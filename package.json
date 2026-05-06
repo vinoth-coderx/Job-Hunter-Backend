@@ -7,7 +7,7 @@
     "dev": "tsx watch src/index.ts",
     "fetch:jobs": "tsx scripts/fetch-jobs.ts",
     "build": "tsc",
-    "start": "tsx src/index.ts",
+    "start": "node dist/index.js",
     "lint": "eslint src --ext .ts",
     "type-check": "tsc --noEmit"
   },
