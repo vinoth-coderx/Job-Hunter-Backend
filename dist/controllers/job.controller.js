@@ -4,6 +4,7 @@ exports.triggerFetch = exports.matchedJobs = exports.getJob = exports.listAllJob
 const zod_1 = require("zod");
 const Job_1 = require("../models/Job");
 const User_1 = require("../models/User");
+const AppliedJob_1 = require("../models/AppliedJob");
 const asyncHandler_1 = require("../utils/asyncHandler");
 const ApiError_1 = require("../utils/ApiError");
 const env_1 = require("../config/env");
@@ -11,6 +12,12 @@ const matcher_service_1 = require("../services/ai/matcher.service");
 const jobScraper_cron_1 = require("../jobs/jobScraper.cron");
 const jobCache_service_1 = require("../services/jobCache.service");
 const logger_1 = require("../utils/logger");
+const fetchAppliedJobIds = async (userId) => {
+    if (!userId)
+        return [];
+    const ids = await AppliedJob_1.AppliedJob.find({ user: userId }).distinct('job');
+    return ids;
+};
 exports.listJobsSchema = zod_1.z.object({
     query: zod_1.z.object({
         q: zod_1.z.string().optional(),
@@ -71,6 +78,11 @@ exports.listJobs = (0, asyncHandler_1.asyncHandler)(async (req, res, next) => {
         return;
     }
     const filter = buildFilter(q);
+    if (req.user) {
+        const appliedIds = await fetchAppliedJobIds(req.user._id);
+        if (appliedIds.length)
+            filter._id = { $nin: appliedIds };
+    }
     const sort = { postedAt: -1 };
     if (q.sort === 'salary') {
         sort.salaryMax = -1;
@@ -145,9 +157,13 @@ exports.matchedJobs = (0, asyncHandler_1.asyncHandler)(async (req, res) => {
     const user = await User_1.User.findById(req.user._id);
     if (!user)
         throw ApiError_1.ApiError.notFound('User not found');
+    const appliedIds = await fetchAppliedJobIds(req.user._id);
+    const excludeApplied = appliedIds.length
+        ? { _id: { $nin: appliedIds } }
+        : {};
     const profileComplete = Boolean(user.profile.skills?.length || user.profile.preferredRoles?.length);
     if (!profileComplete) {
-        const baseFilter = { isActive: true, postedAt: { $gte: cutoff } };
+        const baseFilter = { isActive: true, postedAt: { $gte: cutoff }, ...excludeApplied };
         const [items, total] = await Promise.all([
             Job_1.Job.find(baseFilter).sort({ postedAt: -1 }).skip(skip).limit(limit).lean(),
             Job_1.Job.countDocuments(baseFilter),
@@ -178,6 +194,7 @@ exports.matchedJobs = (0, asyncHandler_1.asyncHandler)(async (req, res) => {
     const candidateFilter = {
         isActive: true,
         postedAt: { $gte: cutoff },
+        ...excludeApplied,
         $or: [
             ...(user.profile.skills?.length
                 ? [{ skills: { $in: user.profile.skills.map((s) => s.toLowerCase()) } }]
@@ -190,7 +207,7 @@ exports.matchedJobs = (0, asyncHandler_1.asyncHandler)(async (req, res) => {
     const candidates = await Job_1.Job.find(candidateFilter).sort({ postedAt: -1 }).limit(1000);
     const matched = await (0, matcher_service_1.matchJobsForUser)(user, candidates, threshold, useAi);
     if (matched.length === 0) {
-        const baseFilter = { isActive: true, postedAt: { $gte: cutoff } };
+        const baseFilter = { isActive: true, postedAt: { $gte: cutoff }, ...excludeApplied };
         const [items, total] = await Promise.all([
             Job_1.Job.find(baseFilter).sort({ postedAt: -1 }).skip(skip).limit(limit).lean(),
             Job_1.Job.countDocuments(baseFilter),

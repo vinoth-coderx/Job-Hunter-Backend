@@ -1,7 +1,9 @@
 import { Request, Response, NextFunction } from 'express';
 import { z } from 'zod';
+import mongoose from 'mongoose';
 import { Job } from '../models/Job';
 import { User } from '../models/User';
+import { AppliedJob } from '../models/AppliedJob';
 import { asyncHandler } from '../utils/asyncHandler';
 import { ApiError } from '../utils/ApiError';
 import { AuthRequest } from '../types';
@@ -10,6 +12,18 @@ import { matchJobsForUser } from '../services/ai/matcher.service';
 import { runJobFetchNow } from '../jobs/jobScraper.cron';
 import { buildAllJobsPayload } from '../services/jobCache.service';
 import { logger } from '../utils/logger';
+
+// Applied jobs belong in the Applied tab, not the discovery feed. We pull
+// the user's applied job IDs once per request and `$nin`-filter them out
+// of /jobs/matched and /jobs (search). Returns an empty array for guests
+// or when the user has never applied.
+const fetchAppliedJobIds = async (
+  userId: mongoose.Types.ObjectId | string | undefined,
+): Promise<mongoose.Types.ObjectId[]> => {
+  if (!userId) return [];
+  const ids = await AppliedJob.find({ user: userId }).distinct('job');
+  return ids as mongoose.Types.ObjectId[];
+};
 
 export const listJobsSchema = z.object({
   query: z.object({
@@ -75,6 +89,13 @@ export const listJobs = asyncHandler(async (req: AuthRequest, res: Response, nex
   }
 
   const filter = buildFilter(q);
+
+  // Hide already-applied jobs from search results — they live in the
+  // Applied tab. Skipped for guests (no user means no applications).
+  if (req.user) {
+    const appliedIds = await fetchAppliedJobIds(req.user._id);
+    if (appliedIds.length) filter._id = { $nin: appliedIds };
+  }
 
   const sort: Record<string, 1 | -1> = { postedAt: -1 };
   if (q.sort === 'salary') {
@@ -163,12 +184,19 @@ export const matchedJobs = asyncHandler(async (req: AuthRequest, res: Response) 
   const user = await User.findById(req.user._id);
   if (!user) throw ApiError.notFound('User not found');
 
+  // Applied jobs belong in /applied — strip them from every code path
+  // below (profile-incomplete fallback, recency fallback, scored match).
+  const appliedIds = await fetchAppliedJobIds(req.user._id);
+  const excludeApplied = appliedIds.length
+    ? { _id: { $nin: appliedIds } }
+    : {};
+
   const profileComplete = Boolean(
     user.profile.skills?.length || user.profile.preferredRoles?.length,
   );
 
   if (!profileComplete) {
-    const baseFilter = { isActive: true, postedAt: { $gte: cutoff } };
+    const baseFilter = { isActive: true, postedAt: { $gte: cutoff }, ...excludeApplied };
     const [items, total] = await Promise.all([
       Job.find(baseFilter).sort({ postedAt: -1 }).skip(skip).limit(limit).lean(),
       Job.countDocuments(baseFilter),
@@ -200,6 +228,7 @@ export const matchedJobs = asyncHandler(async (req: AuthRequest, res: Response) 
   const candidateFilter: Record<string, unknown> = {
     isActive: true,
     postedAt: { $gte: cutoff },
+    ...excludeApplied,
     $or: [
       ...(user.profile.skills?.length
         ? [{ skills: { $in: user.profile.skills.map((s) => s.toLowerCase()) } }]
@@ -223,7 +252,7 @@ export const matchedJobs = asyncHandler(async (req: AuthRequest, res: Response) 
   // so the home is never blank — UI ranking still prefers scored matches
   // when they exist on a later refresh.
   if (matched.length === 0) {
-    const baseFilter = { isActive: true, postedAt: { $gte: cutoff } };
+    const baseFilter = { isActive: true, postedAt: { $gte: cutoff }, ...excludeApplied };
     const [items, total] = await Promise.all([
       Job.find(baseFilter).sort({ postedAt: -1 }).skip(skip).limit(limit).lean(),
       Job.countDocuments(baseFilter),
