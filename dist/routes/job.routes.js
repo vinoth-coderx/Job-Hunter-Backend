@@ -2,6 +2,8 @@
 Object.defineProperty(exports, "__esModule", { value: true });
 const express_1 = require("express");
 const job_controller_1 = require("../controllers/job.controller");
+const savedJobs_controller_1 = require("../controllers/savedJobs.controller");
+const jobView_controller_1 = require("../controllers/jobView.controller");
 const auth_1 = require("../middleware/auth");
 const validate_1 = require("../middleware/validate");
 const router = (0, express_1.Router)();
@@ -9,6 +11,11 @@ router.get('/', auth_1.optionalAuth, (0, validate_1.validate)(job_controller_1.l
 router.get('/feed', auth_1.optionalAuth, (0, validate_1.validate)(job_controller_1.listJobsSchema), job_controller_1.listJobs);
 router.get('/all', auth_1.optionalAuth, job_controller_1.listAllJobs);
 router.get('/matched', auth_1.authenticateOrGuest, job_controller_1.matchedJobs);
+router.get('/saved', auth_1.authenticate, savedJobs_controller_1.listSavedJobs);
+router.get('/saved/ids', auth_1.authenticate, savedJobs_controller_1.listSavedJobIds);
 router.post('/admin/fetch', auth_1.authenticate, job_controller_1.triggerFetch);
+router.post('/:id/save', auth_1.authenticate, savedJobs_controller_1.saveJob);
+router.delete('/:id/save', auth_1.authenticate, savedJobs_controller_1.unsaveJob);
+router.post('/:id/view', auth_1.optionalAuth, jobView_controller_1.recordJobView);
 router.get('/:id', auth_1.optionalAuth, job_controller_1.getJob);
 exports.default = router;

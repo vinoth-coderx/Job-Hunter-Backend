@@ -1,0 +1,13 @@
+"use strict";
+Object.defineProperty(exports, "__esModule", { value: true });
+const express_1 = require("express");
+const skillAssessment_controller_1 = require("../controllers/skillAssessment.controller");
+const auth_1 = require("../middleware/auth");
+const validate_1 = require("../middleware/validate");
+const router = (0, express_1.Router)();
+router.use(auth_1.authenticate);
+router.get('/', skillAssessment_controller_1.listMyAssessments);
+router.post('/start', (0, validate_1.validate)(skillAssessment_controller_1.startAssessmentSchema), skillAssessment_controller_1.startAssessment);
+router.get('/:id', skillAssessment_controller_1.getAssessment);
+router.post('/:id/submit', (0, validate_1.validate)(skillAssessment_controller_1.submitAssessmentSchema), skillAssessment_controller_1.submitAssessment);
+exports.default = router;

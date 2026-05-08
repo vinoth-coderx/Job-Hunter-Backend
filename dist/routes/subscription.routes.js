@@ -1,14 +1,21 @@
 "use strict";
+var __importDefault = (this && this.__importDefault) || function (mod) {
+    return (mod && mod.__esModule) ? mod : { "default": mod };
+};
 Object.defineProperty(exports, "__esModule", { value: true });
 const express_1 = require("express");
+const express_2 = __importDefault(require("express"));
 const subscription_controller_1 = require("../controllers/subscription.controller");
 const auth_1 = require("../middleware/auth");
 const validate_1 = require("../middleware/validate");
 const router = (0, express_1.Router)();
 router.get('/plans', subscription_controller_1.listPlans);
+router.post('/razorpay/webhook', express_2.default.raw({ type: 'application/json' }), subscription_controller_1.razorpayWebhook);
 router.use(auth_1.authenticate);
 router.get('/current', subscription_controller_1.currentSubscription);
 router.get('/history', subscription_controller_1.subscriptionHistory);
 router.post('/subscribe', (0, validate_1.validate)(subscription_controller_1.subscribeSchema), subscription_controller_1.subscribe);
 router.post('/cancel', subscription_controller_1.cancelSubscription);
+router.post('/razorpay/order', (0, validate_1.validate)(subscription_controller_1.createRazorpayOrderSchema), subscription_controller_1.razorpayCreateOrder);
+router.post('/razorpay/verify', (0, validate_1.validate)(subscription_controller_1.verifyRazorpayPaymentSchema), subscription_controller_1.razorpayVerifyPayment);
 exports.default = router;

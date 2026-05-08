@@ -1,0 +1,12 @@
+"use strict";
+Object.defineProperty(exports, "__esModule", { value: true });
+const express_1 = require("express");
+const ai_controller_1 = require("../controllers/ai.controller");
+const auth_1 = require("../middleware/auth");
+const validate_1 = require("../middleware/validate");
+const router = (0, express_1.Router)();
+router.use(auth_1.authenticate);
+router.post('/cover-letter', (0, validate_1.validate)(ai_controller_1.coverLetterSchema), ai_controller_1.generateCoverLetterEndpoint);
+router.get('/profile-optimizer', ai_controller_1.profileOptimizerEndpoint);
+router.post('/skill-gap', (0, validate_1.validate)(ai_controller_1.skillGapSchema), ai_controller_1.skillGapEndpoint);
+exports.default = router;

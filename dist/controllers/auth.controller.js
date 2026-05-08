@@ -179,6 +179,7 @@ exports.me = (0, asyncHandler_1.asyncHandler)(async (req, res) => {
             id: user._id,
             email: user.email,
             role: user.role,
+            activeRole: user.activeRole,
             profile: user.profile,
             subscription: user.subscription,
             isEmailVerified: user.isEmailVerified,

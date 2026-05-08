@@ -16,6 +16,8 @@ const router = (0, express_1.Router)();
 router.use(auth_1.authenticate);
 router.patch('/profile', (0, validate_1.validate)(user_controller_1.updateProfileSchema), user_controller_1.updateProfile);
 router.post('/change-password', (0, validate_1.validate)(user_controller_1.changePasswordSchema), user_controller_1.changePassword);
+router.post('/switch-role', (0, validate_1.validate)(user_controller_1.switchRoleSchema), user_controller_1.switchRole);
+router.put('/notification-prefs', (0, validate_1.validate)(user_controller_1.notificationPrefsSchema), user_controller_1.updateNotificationPrefs);
 const wrapMulter = (mw, maxBytes) => (req, res, next) => {
     mw(req, res, (err) => {
         if (!err)

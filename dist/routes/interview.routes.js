@@ -1,0 +1,17 @@
+"use strict";
+Object.defineProperty(exports, "__esModule", { value: true });
+const express_1 = require("express");
+const interview_controller_1 = require("../controllers/interview.controller");
+const auth_1 = require("../middleware/auth");
+const validate_1 = require("../middleware/validate");
+const router = (0, express_1.Router)();
+router.use(auth_1.authenticate);
+router.post('/hirer', (0, validate_1.validate)(interview_controller_1.scheduleInterviewSchema), interview_controller_1.scheduleInterview);
+router.get('/hirer', interview_controller_1.listHirerInterviews);
+router.put('/hirer/:id', (0, validate_1.validate)(interview_controller_1.updateInterviewSchema), interview_controller_1.updateInterview);
+router.delete('/hirer/:id', interview_controller_1.cancelInterview);
+router.post('/hirer/:id/feedback', (0, validate_1.validate)(interview_controller_1.submitFeedbackSchema), interview_controller_1.submitFeedback);
+router.get('/seeker', interview_controller_1.listSeekerInterviews);
+router.put('/seeker/:id/confirm', interview_controller_1.confirmInterview);
+router.get('/:id', interview_controller_1.getInterview);
+exports.default = router;

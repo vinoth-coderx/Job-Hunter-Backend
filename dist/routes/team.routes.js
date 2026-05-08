@@ -1,0 +1,15 @@
+"use strict";
+Object.defineProperty(exports, "__esModule", { value: true });
+const express_1 = require("express");
+const team_controller_1 = require("../controllers/team.controller");
+const auth_1 = require("../middleware/auth");
+const validate_1 = require("../middleware/validate");
+const router = (0, express_1.Router)();
+router.use(auth_1.authenticate);
+router.get('/', team_controller_1.listTeam);
+router.post('/invite', (0, validate_1.validate)(team_controller_1.inviteSchema), team_controller_1.inviteTeamMember);
+router.post('/accept', (0, validate_1.validate)(team_controller_1.acceptSchema), team_controller_1.acceptInvite);
+router.delete('/invites/:id', team_controller_1.revokeInvite);
+router.delete('/members/:userId', team_controller_1.removeMember);
+router.put('/members/:userId/role', (0, validate_1.validate)(team_controller_1.updateRoleSchema), team_controller_1.updateMemberRole);
+exports.default = router;

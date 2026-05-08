@@ -1,0 +1,14 @@
+"use strict";
+Object.defineProperty(exports, "__esModule", { value: true });
+const express_1 = require("express");
+const mockInterview_controller_1 = require("../controllers/mockInterview.controller");
+const auth_1 = require("../middleware/auth");
+const validate_1 = require("../middleware/validate");
+const router = (0, express_1.Router)();
+router.use(auth_1.authenticate);
+router.get('/', mockInterview_controller_1.listMockInterviews);
+router.post('/start', (0, validate_1.validate)(mockInterview_controller_1.startMockSchema), mockInterview_controller_1.startMockInterview);
+router.get('/:id', mockInterview_controller_1.getMockInterview);
+router.post('/:id/answer', (0, validate_1.validate)(mockInterview_controller_1.answerMockSchema), mockInterview_controller_1.answerMockInterview);
+router.post('/:id/finish', mockInterview_controller_1.finishMockInterview);
+exports.default = router;

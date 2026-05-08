@@ -189,6 +189,36 @@ exports.matchedJobs = (0, asyncHandler_1.asyncHandler)(async (req, res) => {
     };
     const candidates = await Job_1.Job.find(candidateFilter).sort({ postedAt: -1 }).limit(1000);
     const matched = await (0, matcher_service_1.matchJobsForUser)(user, candidates, threshold, useAi);
+    if (matched.length === 0) {
+        const baseFilter = { isActive: true, postedAt: { $gte: cutoff } };
+        const [items, total] = await Promise.all([
+            Job_1.Job.find(baseFilter).sort({ postedAt: -1 }).skip(skip).limit(limit).lean(),
+            Job_1.Job.countDocuments(baseFilter),
+        ]);
+        res.json({
+            success: true,
+            data: items.map((j) => ({
+                job: j,
+                score: null,
+                matchedSkills: [],
+                missingSkills: [],
+                reasoning: null,
+            })),
+            meta: {
+                page,
+                limit,
+                total,
+                totalPages: Math.ceil(total / limit),
+                hasMore: skip + items.length < total,
+                threshold,
+                useAi,
+                profileIncomplete: false,
+                noMatchesFallback: true,
+                candidatePoolSize: candidates.length,
+            },
+        });
+        return;
+    }
     const total = matched.length;
     const slice = matched.slice(skip, skip + limit);
     res.json({

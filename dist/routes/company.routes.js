@@ -1,0 +1,15 @@
+"use strict";
+Object.defineProperty(exports, "__esModule", { value: true });
+const express_1 = require("express");
+const company_controller_1 = require("../controllers/company.controller");
+const auth_1 = require("../middleware/auth");
+const validate_1 = require("../middleware/validate");
+const router = (0, express_1.Router)();
+router.get('/followed', auth_1.authenticate, company_controller_1.listFollowedCompanies);
+router.get('/:id', auth_1.optionalAuth, company_controller_1.getCompanyProfile);
+router.get('/:id/jobs', auth_1.optionalAuth, company_controller_1.listCompanyJobs);
+router.post('/:id/follow', auth_1.authenticate, company_controller_1.followCompany);
+router.delete('/:id/follow', auth_1.authenticate, company_controller_1.unfollowCompany);
+router.post('/:id/reviews', auth_1.authenticate, (0, validate_1.validate)(company_controller_1.reviewSchema), company_controller_1.submitReview);
+router.get('/:id/reviews', auth_1.optionalAuth, company_controller_1.listReviews);
+exports.default = router;

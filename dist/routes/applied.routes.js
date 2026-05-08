@@ -9,6 +9,7 @@ router.use(auth_1.authenticate);
 router.get('/', applied_controller_1.listApplied);
 router.get('/stats', applied_controller_1.appliedStats);
 router.post('/', (0, validate_1.validate)(applied_controller_1.applySchema), applied_controller_1.applyToJob);
+router.post('/quick-apply', (0, validate_1.validate)(applied_controller_1.quickApplySchema), applied_controller_1.quickApply);
 router.patch('/:id', (0, validate_1.validate)(applied_controller_1.updateAppliedSchema), applied_controller_1.updateApplied);
 router.delete('/:id', applied_controller_1.deleteApplied);
 exports.default = router;

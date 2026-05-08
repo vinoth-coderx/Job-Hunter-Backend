@@ -1,0 +1,11 @@
+"use strict";
+Object.defineProperty(exports, "__esModule", { value: true });
+const express_1 = require("express");
+const salary_controller_1 = require("../controllers/salary.controller");
+const auth_1 = require("../middleware/auth");
+const validate_1 = require("../middleware/validate");
+const router = (0, express_1.Router)();
+router.get('/', auth_1.optionalAuth, (0, validate_1.validate)(salary_controller_1.insightsQuerySchema), salary_controller_1.getInsights);
+router.post('/submit', auth_1.authenticate, (0, validate_1.validate)(salary_controller_1.submitSchema), salary_controller_1.submitSalary);
+router.post('/compare', auth_1.authenticate, (0, validate_1.validate)(salary_controller_1.compareSchema), salary_controller_1.compareSalary);
+exports.default = router;

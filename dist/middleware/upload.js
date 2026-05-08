@@ -3,7 +3,7 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.uploadAvatar = exports.uploadResume = exports.AVATAR_MAX_SIZE_BYTES = exports.RESUME_MAX_SIZE_BYTES = exports.AVATAR_DIR = exports.RESUME_DIR = void 0;
+exports.uploadOfficePhotos = exports.uploadCompanyLogo = exports.uploadAvatar = exports.uploadResume = exports.OFFICE_PHOTO_MAX_SIZE_BYTES = exports.COMPANY_LOGO_MAX_SIZE_BYTES = exports.AVATAR_MAX_SIZE_BYTES = exports.RESUME_MAX_SIZE_BYTES = exports.OFFICE_PHOTO_DIR = exports.COMPANY_LOGO_DIR = exports.AVATAR_DIR = exports.RESUME_DIR = void 0;
 const multer_1 = __importDefault(require("multer"));
 const path_1 = __importDefault(require("path"));
 const fs_1 = __importDefault(require("fs"));
@@ -12,9 +12,13 @@ const ApiError_1 = require("../utils/ApiError");
 const UPLOAD_ROOT = path_1.default.resolve(process.cwd(), 'uploads');
 exports.RESUME_DIR = path_1.default.join(UPLOAD_ROOT, 'resumes');
 exports.AVATAR_DIR = path_1.default.join(UPLOAD_ROOT, 'avatars');
+exports.COMPANY_LOGO_DIR = path_1.default.join(UPLOAD_ROOT, 'company-logos');
+exports.OFFICE_PHOTO_DIR = path_1.default.join(UPLOAD_ROOT, 'office-photos');
 exports.RESUME_MAX_SIZE_BYTES = 5 * 1024 * 1024;
 exports.AVATAR_MAX_SIZE_BYTES = 2 * 1024 * 1024;
-for (const dir of [exports.RESUME_DIR, exports.AVATAR_DIR]) {
+exports.COMPANY_LOGO_MAX_SIZE_BYTES = 2 * 1024 * 1024;
+exports.OFFICE_PHOTO_MAX_SIZE_BYTES = 5 * 1024 * 1024;
+for (const dir of [exports.RESUME_DIR, exports.AVATAR_DIR, exports.COMPANY_LOGO_DIR, exports.OFFICE_PHOTO_DIR]) {
     if (!fs_1.default.existsSync(dir))
         fs_1.default.mkdirSync(dir, { recursive: true });
 }
@@ -53,3 +57,13 @@ exports.uploadAvatar = (0, multer_1.default)({
     fileFilter: buildFilter(AVATAR_MIME, AVATAR_EXT, 'JPG, PNG, or WEBP image'),
     limits: { fileSize: exports.AVATAR_MAX_SIZE_BYTES, files: 1 },
 }).single('avatar');
+exports.uploadCompanyLogo = (0, multer_1.default)({
+    storage: buildStorage(exports.COMPANY_LOGO_DIR),
+    fileFilter: buildFilter(AVATAR_MIME, AVATAR_EXT, 'JPG, PNG, or WEBP image'),
+    limits: { fileSize: exports.COMPANY_LOGO_MAX_SIZE_BYTES, files: 1 },
+}).single('logo');
+exports.uploadOfficePhotos = (0, multer_1.default)({
+    storage: buildStorage(exports.OFFICE_PHOTO_DIR),
+    fileFilter: buildFilter(AVATAR_MIME, AVATAR_EXT, 'JPG, PNG, or WEBP image'),
+    limits: { fileSize: exports.OFFICE_PHOTO_MAX_SIZE_BYTES, files: 10 },
+}).array('photos', 10);

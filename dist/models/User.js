@@ -57,6 +57,7 @@ const userSchema = new mongoose_1.Schema({
     googleId: { type: String, sparse: true, unique: true },
     authProvider: { type: String, enum: ['local', 'google'], default: 'local' },
     role: { type: String, enum: ['user', 'admin'], default: 'user' },
+    activeRole: { type: String, enum: ['seeker', 'hirer'], default: 'seeker', index: true },
     isEmailVerified: { type: Boolean, default: false },
     emailVerificationToken: String,
     passwordResetToken: String,
@@ -113,6 +114,31 @@ const userSchema = new mongoose_1.Schema({
         startDate: Date,
         endDate: Date,
         paymentId: String,
+    },
+    notificationPreferences: {
+        push: { type: Boolean, default: true },
+        email: { type: Boolean, default: true },
+        whatsapp: { type: Boolean, default: false },
+        jobAlerts: { type: Boolean, default: true },
+        applicationUpdates: { type: Boolean, default: true },
+        autoApplySummary: { type: Boolean, default: true },
+        quietHoursStart: { type: String, default: '22:00' },
+        quietHoursEnd: { type: String, default: '08:00' },
+    },
+    gamification: {
+        streakCount: { type: Number, default: 0, min: 0 },
+        longestStreak: { type: Number, default: 0, min: 0 },
+        lastCheckinDate: Date,
+        earnedBadges: {
+            type: [
+                {
+                    _id: false,
+                    badgeId: { type: String, required: true, maxlength: 60 },
+                    earnedAt: { type: Date, default: Date.now },
+                },
+            ],
+            default: [],
+        },
     },
     lastLogin: Date,
 }, { timestamps: true });

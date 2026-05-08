@@ -35,26 +35,82 @@ var __importStar = (this && this.__importStar) || (function () {
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.AppliedJob = void 0;
 const mongoose_1 = __importStar(require("mongoose"));
+const screeningAnswerSchema = new mongoose_1.Schema({
+    question: { type: String, required: true, maxlength: 500 },
+    answer: { type: String, required: true, maxlength: 2000 },
+}, { _id: false });
+const statusHistorySchema = new mongoose_1.Schema({
+    status: {
+        type: String,
+        enum: [
+            'applied',
+            'viewed',
+            'shortlisted',
+            'interview',
+            'offer',
+            'hired',
+            'rejected',
+            'withdrawn',
+        ],
+        required: true,
+    },
+    changedAt: { type: Date, required: true, default: Date.now },
+    changedBy: { type: mongoose_1.Schema.Types.ObjectId, ref: 'User' },
+    note: { type: String, maxlength: 1000 },
+}, { _id: false });
 const appliedJobSchema = new mongoose_1.Schema({
     user: { type: mongoose_1.Schema.Types.ObjectId, ref: 'User', required: true, index: true },
     job: { type: mongoose_1.Schema.Types.ObjectId, ref: 'Job', required: true, index: true },
+    hirerProfile: {
+        type: mongoose_1.Schema.Types.ObjectId,
+        ref: 'HirerProfile',
+        index: true,
+        sparse: true,
+    },
     jobSnapshot: {
         title: { type: String, required: true },
         company: { type: String, required: true },
         location: { type: String, required: true },
         url: { type: String, required: true },
     },
+    applyType: {
+        type: String,
+        enum: ['one_click', 'custom_form', 'auto_apply', 'external_manual'],
+        default: 'external_manual',
+    },
+    source: {
+        type: String,
+        enum: ['native', 'indeed', 'naukri', 'linkedin', 'other'],
+        default: 'other',
+    },
+    resumeUrlSnapshot: { type: String, maxlength: 1000 },
+    quickNote: { type: String, maxlength: 500 },
+    screeningAnswers: { type: [screeningAnswerSchema], default: undefined },
     status: {
         type: String,
-        enum: ['applied', 'viewed', 'interview', 'offer', 'rejected', 'withdrawn'],
+        enum: [
+            'applied',
+            'viewed',
+            'shortlisted',
+            'interview',
+            'offer',
+            'hired',
+            'rejected',
+            'withdrawn',
+        ],
         default: 'applied',
         index: true,
     },
+    statusHistory: { type: [statusHistorySchema], default: [] },
     matchScore: { type: Number, min: 0, max: 100 },
     appliedAt: { type: Date, default: Date.now, index: true },
-    notes: String,
+    notes: { type: String, maxlength: 2000 },
+    hirerNotes: { type: String, maxlength: 4000 },
+    rejectionReason: { type: String, maxlength: 1000 },
     followUpDate: Date,
 }, { timestamps: true });
 appliedJobSchema.index({ user: 1, job: 1 }, { unique: true });
 appliedJobSchema.index({ user: 1, status: 1, appliedAt: -1 });
+appliedJobSchema.index({ hirerProfile: 1, status: 1, appliedAt: -1 });
+appliedJobSchema.index({ job: 1, status: 1, appliedAt: -1 });
 exports.AppliedJob = mongoose_1.default.model('AppliedJob', appliedJobSchema);

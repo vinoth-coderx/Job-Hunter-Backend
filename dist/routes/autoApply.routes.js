@@ -1,0 +1,18 @@
+"use strict";
+Object.defineProperty(exports, "__esModule", { value: true });
+const express_1 = require("express");
+const autoApply_controller_1 = require("../controllers/autoApply.controller");
+const auth_1 = require("../middleware/auth");
+const validate_1 = require("../middleware/validate");
+const router = (0, express_1.Router)();
+router.use(auth_1.authenticate);
+router.get('/settings', autoApply_controller_1.getSettings);
+router.put('/settings', (0, validate_1.validate)(autoApply_controller_1.updateSettingsSchema), autoApply_controller_1.updateSettings);
+router.post('/pause', (0, validate_1.validate)(autoApply_controller_1.pauseSchema), autoApply_controller_1.pauseAutoApply);
+router.post('/resume', autoApply_controller_1.resumeAutoApply);
+router.post('/run-now', autoApply_controller_1.runNow);
+router.get('/preview', autoApply_controller_1.getPreview);
+router.post('/approve', (0, validate_1.validate)(autoApply_controller_1.approveSchema), autoApply_controller_1.approveJobs);
+router.get('/logs', autoApply_controller_1.listLogs);
+router.get('/logs/today', autoApply_controller_1.todaySummary);
+exports.default = router;

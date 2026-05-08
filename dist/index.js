@@ -10,6 +10,9 @@ const env_1 = require("./config/env");
 const database_1 = require("./config/database");
 const redis_1 = require("./config/redis");
 const jobScraper_cron_1 = require("./jobs/jobScraper.cron");
+const alertChecker_cron_1 = require("./jobs/alertChecker.cron");
+const autoApply_cron_1 = require("./jobs/autoApply.cron");
+const socket_1 = require("./services/chat/socket");
 const scrapers_1 = require("./services/scrapers");
 const logger_1 = require("./utils/logger");
 let server;
@@ -19,6 +22,7 @@ const start = async () => {
         await (0, redis_1.connectRedis)();
         const app = (0, app_1.createApp)();
         server = http_1.default.createServer(app);
+        (0, socket_1.initSocket)(server);
         server.listen(env_1.env.PORT, () => {
             const base = `http://localhost:${env_1.env.PORT}`;
             const api = `${base}/api/${env_1.env.API_VERSION}`;
@@ -36,6 +40,8 @@ const start = async () => {
             logger_1.logger.info(`  Feed     : ${api}/jobs/feed   (auth: explicit matched feed)`);
             logger_1.logger.info('================================================');
             (0, jobScraper_cron_1.startJobScraperCron)();
+            (0, alertChecker_cron_1.startAlertCheckerCron)();
+            (0, autoApply_cron_1.startAutoApplyCron)();
         });
     }
     catch (err) {
@@ -46,6 +52,9 @@ const start = async () => {
 const shutdown = async (signal) => {
     logger_1.logger.info(`${signal} received — shutting down gracefully`);
     (0, jobScraper_cron_1.stopJobScraperCron)();
+    (0, alertChecker_cron_1.stopAlertCheckerCron)();
+    (0, autoApply_cron_1.stopAutoApplyCron)();
+    await (0, socket_1.closeSocket)().catch((e) => logger_1.logger.warn('Socket close failed', e));
     if (server) {
         await new Promise((resolve) => server.close(() => resolve()));
     }

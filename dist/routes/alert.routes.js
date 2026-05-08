@@ -1,0 +1,13 @@
+"use strict";
+Object.defineProperty(exports, "__esModule", { value: true });
+const express_1 = require("express");
+const alert_controller_1 = require("../controllers/alert.controller");
+const auth_1 = require("../middleware/auth");
+const validate_1 = require("../middleware/validate");
+const router = (0, express_1.Router)();
+router.use(auth_1.authenticate);
+router.get('/', alert_controller_1.listAlerts);
+router.post('/', (0, validate_1.validate)(alert_controller_1.createAlertSchema), alert_controller_1.createAlert);
+router.patch('/:id', (0, validate_1.validate)(alert_controller_1.updateAlertSchema), alert_controller_1.updateAlert);
+router.delete('/:id', alert_controller_1.deleteAlert);
+exports.default = router;

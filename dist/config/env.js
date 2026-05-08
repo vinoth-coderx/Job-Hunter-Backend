@@ -49,8 +49,14 @@ const envSchema = zod_1.z.object({
     EMAIL_FROM: zod_1.z.string().default('Job Hunter <noreply@jobhunter.com>'),
     RAZORPAY_KEY_ID: zod_1.z.string().optional(),
     RAZORPAY_KEY_SECRET: zod_1.z.string().optional(),
+    RAZORPAY_WEBHOOK_SECRET: zod_1.z.string().optional(),
     STRIPE_SECRET_KEY: zod_1.z.string().optional(),
     STRIPE_WEBHOOK_SECRET: zod_1.z.string().optional(),
+    FIREBASE_SERVICE_ACCOUNT_JSON: zod_1.z.string().optional(),
+    FIREBASE_SERVICE_ACCOUNT_PATH: zod_1.z.string().optional(),
+    FIREBASE_PROJECT_ID: zod_1.z.string().optional(),
+    CRON_ALERT_SCHEDULE: zod_1.z.string().default('*/15 * * * *'),
+    ALERT_PUSH_MAX_PER_RUN: zod_1.z.string().default('5').transform(Number),
 });
 const parsed = envSchema.safeParse(process.env);
 if (!parsed.success) {
