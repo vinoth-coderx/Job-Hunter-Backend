@@ -3,16 +3,19 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.runJobFetchNow = exports.stopJobScraperCron = exports.startJobScraperCron = void 0;
+exports.runJobFetchNow = exports.stopJobScraperCron = exports.startJobScraperCron = exports.APPLIED_JOB_RETENTION_DAYS = void 0;
 const node_cron_1 = __importDefault(require("node-cron"));
 const env_1 = require("../config/env");
 const logger_1 = require("../utils/logger");
 const scrapers_1 = require("../services/scrapers");
 const Subscription_1 = require("../models/Subscription");
 const User_1 = require("../models/User");
+const AppliedJob_1 = require("../models/AppliedJob");
 let jobScraperTask = null;
 let subscriptionCheckerTask = null;
+let appliedJobsCleanupTask = null;
 let isRunning = false;
+exports.APPLIED_JOB_RETENTION_DAYS = 90;
 const startJobScraperCron = () => {
     if (!env_1.env.CRON_ENABLED) {
         logger_1.logger.info('Cron disabled by config');
@@ -55,7 +58,19 @@ const startJobScraperCron = () => {
             logger_1.logger.error('Cron: subscription expiry check failed', err);
         }
     }, { timezone: 'Asia/Kolkata' });
-    logger_1.logger.info(`Cron scheduled — job fetch: "${env_1.env.CRON_JOB_FETCH_SCHEDULE}", sub check: daily 00:00`);
+    appliedJobsCleanupTask = node_cron_1.default.schedule('0 2 * * *', async () => {
+        try {
+            const cutoff = new Date(Date.now() - exports.APPLIED_JOB_RETENTION_DAYS * 24 * 60 * 60 * 1000);
+            const result = await AppliedJob_1.AppliedJob.deleteMany({ appliedAt: { $lt: cutoff } });
+            if (result.deletedCount > 0) {
+                logger_1.logger.info(`Cron: purged ${result.deletedCount} applied-job records older than ${exports.APPLIED_JOB_RETENTION_DAYS} days`);
+            }
+        }
+        catch (err) {
+            logger_1.logger.error('Cron: applied-jobs cleanup failed', err);
+        }
+    }, { timezone: 'Asia/Kolkata' });
+    logger_1.logger.info(`Cron scheduled — job fetch: "${env_1.env.CRON_JOB_FETCH_SCHEDULE}", sub check: daily 00:00, applied-jobs cleanup: daily 02:00 (>${exports.APPLIED_JOB_RETENTION_DAYS}d)`);
 };
 exports.startJobScraperCron = startJobScraperCron;
 const stopJobScraperCron = () => {
@@ -66,6 +81,10 @@ const stopJobScraperCron = () => {
     if (subscriptionCheckerTask) {
         subscriptionCheckerTask.stop();
         subscriptionCheckerTask = null;
+    }
+    if (appliedJobsCleanupTask) {
+        appliedJobsCleanupTask.stop();
+        appliedJobsCleanupTask = null;
     }
     logger_1.logger.info('Cron stopped');
 };

@@ -16,6 +16,7 @@ import {
   downloadResumeHandler,
   resumeMetaHandler,
   deleteResumeHandler,
+  parseResumeHandler,
 } from '../controllers/resume.controller';
 import {
   uploadAvatarHandler,
@@ -63,6 +64,7 @@ const wrapMulter =
   };
 
 router.post('/resume', wrapMulter(uploadResume, RESUME_MAX_SIZE_BYTES), uploadResumeHandler);
+router.post('/resume/parse', parseResumeHandler);
 router.get('/resume', downloadResumeHandler);
 router.get('/resume/meta', resumeMetaHandler);
 router.delete('/resume', deleteResumeHandler);

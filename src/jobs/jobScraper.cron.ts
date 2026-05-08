@@ -4,10 +4,17 @@ import { logger } from '../utils/logger';
 import { fetchAllJobs } from '../services/scrapers';
 import { Subscription } from '../models/Subscription';
 import { User } from '../models/User';
+import { AppliedJob } from '../models/AppliedJob';
 
 let jobScraperTask: ScheduledTask | null = null;
 let subscriptionCheckerTask: ScheduledTask | null = null;
+let appliedJobsCleanupTask: ScheduledTask | null = null;
 let isRunning = false;
+
+// How long an applied-job record sticks around. Anything older is purged
+// nightly so the seeker's "Applied" feed stays focused on actionable
+// recent activity.
+export const APPLIED_JOB_RETENTION_DAYS = 90;
 
 export const startJobScraperCron = (): void => {
   if (!env.CRON_ENABLED) {
@@ -66,8 +73,30 @@ export const startJobScraperCron = (): void => {
     { timezone: 'Asia/Kolkata' },
   );
 
+  // Nightly cleanup of applied-job records older than the retention window.
+  // Runs at 02:00 IST so it doesn't overlap the daily subscription check.
+  appliedJobsCleanupTask = cron.schedule(
+    '0 2 * * *',
+    async () => {
+      try {
+        const cutoff = new Date(
+          Date.now() - APPLIED_JOB_RETENTION_DAYS * 24 * 60 * 60 * 1000,
+        );
+        const result = await AppliedJob.deleteMany({ appliedAt: { $lt: cutoff } });
+        if (result.deletedCount > 0) {
+          logger.info(
+            `Cron: purged ${result.deletedCount} applied-job records older than ${APPLIED_JOB_RETENTION_DAYS} days`,
+          );
+        }
+      } catch (err) {
+        logger.error('Cron: applied-jobs cleanup failed', err);
+      }
+    },
+    { timezone: 'Asia/Kolkata' },
+  );
+
   logger.info(
-    `Cron scheduled — job fetch: "${env.CRON_JOB_FETCH_SCHEDULE}", sub check: daily 00:00`,
+    `Cron scheduled — job fetch: "${env.CRON_JOB_FETCH_SCHEDULE}", sub check: daily 00:00, applied-jobs cleanup: daily 02:00 (>${APPLIED_JOB_RETENTION_DAYS}d)`,
   );
 };
 
@@ -79,6 +108,10 @@ export const stopJobScraperCron = (): void => {
   if (subscriptionCheckerTask) {
     subscriptionCheckerTask.stop();
     subscriptionCheckerTask = null;
+  }
+  if (appliedJobsCleanupTask) {
+    appliedJobsCleanupTask.stop();
+    appliedJobsCleanupTask = null;
   }
   logger.info('Cron stopped');
 };

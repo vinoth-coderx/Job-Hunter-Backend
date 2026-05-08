@@ -10,6 +10,7 @@ const asyncHandler_1 = require("../utils/asyncHandler");
 const ApiError_1 = require("../utils/ApiError");
 const matcher_service_1 = require("../services/ai/matcher.service");
 const User_1 = require("../models/User");
+const jobScraper_cron_1 = require("../jobs/jobScraper.cron");
 exports.applySchema = zod_1.z.object({
     body: zod_1.z.object({
         jobId: zod_1.z.string().min(1),
@@ -151,7 +152,11 @@ exports.listApplied = (0, asyncHandler_1.asyncHandler)(async (req, res) => {
     const page = Number.isFinite(pageRaw) && pageRaw > 0 ? pageRaw : 1;
     const limit = Math.min(100, Number.isFinite(limitRaw) && limitRaw > 0 ? limitRaw : 20);
     const skip = (page - 1) * limit;
-    const filter = { user: req.user._id };
+    const cutoff = new Date(Date.now() - jobScraper_cron_1.APPLIED_JOB_RETENTION_DAYS * 24 * 60 * 60 * 1000);
+    const filter = {
+        user: req.user._id,
+        appliedAt: { $gte: cutoff },
+    };
     if (status)
         filter.status = status;
     const [items, total] = await Promise.all([

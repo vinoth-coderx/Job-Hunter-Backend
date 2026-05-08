@@ -36,7 +36,7 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.deleteResumeHandler = exports.resumeMetaHandler = exports.downloadResumeHandler = exports.uploadResumeHandler = void 0;
+exports.deleteResumeHandler = exports.parseResumeHandler = exports.resumeMetaHandler = exports.downloadResumeHandler = exports.uploadResumeHandler = void 0;
 const path_1 = __importDefault(require("path"));
 const promises_1 = __importDefault(require("fs/promises"));
 const asyncHandler_1 = require("../utils/asyncHandler");
@@ -44,6 +44,7 @@ const ApiError_1 = require("../utils/ApiError");
 const User_1 = require("../models/User");
 const logger_1 = require("../utils/logger");
 const upload_1 = require("../middleware/upload");
+const resumeParser_service_1 = require("../services/ai/resumeParser.service");
 const extractText = async (filePath, mime) => {
     try {
         if (mime === 'application/pdf') {
@@ -150,6 +151,24 @@ exports.resumeMetaHandler = (0, asyncHandler_1.asyncHandler)(async (req, res) =>
             downloadUrl: `/api/v1/users/resume`,
         },
     });
+});
+exports.parseResumeHandler = (0, asyncHandler_1.asyncHandler)(async (req, res) => {
+    if (!req.user)
+        throw ApiError_1.ApiError.unauthorized();
+    const user = await User_1.User.findById(req.user._id).select('profile.resumeText profile.resumeFile');
+    if (!user)
+        throw ApiError_1.ApiError.notFound('User not found');
+    const text = user.profile.resumeText || '';
+    if (!text) {
+        res.json({
+            success: true,
+            message: 'No resume text available — upload a text-based PDF or DOCX first.',
+            data: null,
+        });
+        return;
+    }
+    const parsed = await (0, resumeParser_service_1.parseResumeText)(text);
+    res.json({ success: true, data: parsed });
 });
 exports.deleteResumeHandler = (0, asyncHandler_1.asyncHandler)(async (req, res) => {
     if (!req.user)

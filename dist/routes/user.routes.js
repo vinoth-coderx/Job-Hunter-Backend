@@ -32,6 +32,7 @@ const wrapMulter = (mw, maxBytes) => (req, res, next) => {
     });
 };
 router.post('/resume', wrapMulter(upload_1.uploadResume, upload_1.RESUME_MAX_SIZE_BYTES), resume_controller_1.uploadResumeHandler);
+router.post('/resume/parse', resume_controller_1.parseResumeHandler);
 router.get('/resume', resume_controller_1.downloadResumeHandler);
 router.get('/resume/meta', resume_controller_1.resumeMetaHandler);
 router.delete('/resume', resume_controller_1.deleteResumeHandler);

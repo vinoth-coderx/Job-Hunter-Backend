@@ -9,6 +9,7 @@ import { ApiError } from '../utils/ApiError';
 import { AuthRequest } from '../types';
 import { heuristicMatch } from '../services/ai/matcher.service';
 import { User } from '../models/User';
+import { APPLIED_JOB_RETENTION_DAYS } from '../jobs/jobScraper.cron';
 
 export const applySchema = z.object({
   body: z.object({
@@ -183,7 +184,15 @@ export const listApplied = asyncHandler(async (req: AuthRequest, res: Response) 
   const limit = Math.min(100, Number.isFinite(limitRaw) && limitRaw > 0 ? limitRaw : 20);
   const skip = (page - 1) * limit;
 
-  const filter: Record<string, unknown> = { user: req.user._id };
+  // Cap the visible window to the retention period so the UI never shows
+  // records that the nightly cleanup is about to (or already did) purge.
+  const cutoff = new Date(
+    Date.now() - APPLIED_JOB_RETENTION_DAYS * 24 * 60 * 60 * 1000,
+  );
+  const filter: Record<string, unknown> = {
+    user: req.user._id,
+    appliedAt: { $gte: cutoff },
+  };
   if (status) filter.status = status;
 
   const [items, total] = await Promise.all([

@@ -7,6 +7,7 @@ import { AuthRequest } from '../types';
 import { User } from '../models/User';
 import { logger } from '../utils/logger';
 import { RESUME_DIR } from '../middleware/upload';
+import { parseResumeText } from '../services/ai/resumeParser.service';
 
 const extractText = async (filePath: string, mime: string): Promise<string> => {
   try {
@@ -122,6 +123,32 @@ export const resumeMetaHandler = asyncHandler(async (req: AuthRequest, res: Resp
       downloadUrl: `/api/v1/users/resume`,
     },
   });
+});
+
+/**
+ * Runs the stored resume text through the LLM parser and returns a
+ * structured JSON the client can merge into its local resume profile.
+ * Idempotent — safe to retry. Always returns 200 with whatever could be
+ * parsed; an empty object means the LLM had nothing to work with (e.g.
+ * scanned PDF with no extractable text).
+ */
+export const parseResumeHandler = asyncHandler(async (req: AuthRequest, res: Response) => {
+  if (!req.user) throw ApiError.unauthorized();
+  const user = await User.findById(req.user._id).select('profile.resumeText profile.resumeFile');
+  if (!user) throw ApiError.notFound('User not found');
+
+  const text = user.profile.resumeText || '';
+  if (!text) {
+    res.json({
+      success: true,
+      message: 'No resume text available — upload a text-based PDF or DOCX first.',
+      data: null,
+    });
+    return;
+  }
+
+  const parsed = await parseResumeText(text);
+  res.json({ success: true, data: parsed });
 });
 
 export const deleteResumeHandler = asyncHandler(async (req: AuthRequest, res: Response) => {
