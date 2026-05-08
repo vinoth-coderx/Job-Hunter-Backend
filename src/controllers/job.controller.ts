@@ -5,11 +5,10 @@ import { User } from '../models/User';
 import { asyncHandler } from '../utils/asyncHandler';
 import { ApiError } from '../utils/ApiError';
 import { AuthRequest } from '../types';
-import { redis, CACHE_KEYS } from '../config/redis';
 import { env } from '../config/env';
 import { matchJobsForUser } from '../services/ai/matcher.service';
 import { runJobFetchNow } from '../jobs/jobScraper.cron';
-import { buildAllJobsPayload, warmJobsCache, clearJobsCache } from '../services/jobCache.service';
+import { buildAllJobsPayload } from '../services/jobCache.service';
 import { logger } from '../utils/logger';
 
 export const listJobsSchema = z.object({
@@ -59,8 +58,6 @@ const isSearchMode = (q: Record<string, unknown>): boolean =>
   SEARCH_PARAMS.some((k) => typeof q[k] === 'string' && (q[k] as string).length > 0);
 
 export const listJobs = asyncHandler(async (req: AuthRequest, res: Response, next: NextFunction) => {
-  if (!req.user) throw ApiError.unauthorized();
-
   const q = req.query as Record<string, unknown>;
   const numQ = (v: unknown, dflt: number): number => {
     const n = typeof v === 'string' ? Number(v) : NaN;
@@ -70,15 +67,10 @@ export const listJobs = asyncHandler(async (req: AuthRequest, res: Response, nex
   const limit = numQ(q.limit, 20);
   const skip = (page - 1) * limit;
 
-  if (!isSearchMode(q)) {
+  // Logged-in users browsing without filters get personalised matches.
+  // Guests fall through to the recency-sorted public listing below.
+  if (!isSearchMode(q) && req.user) {
     matchedJobs(req, res, next);
-    return;
-  }
-
-  const cacheKey = `jobs:search:${req.user.id}:${JSON.stringify(q)}`;
-  const cached = await redis.get(cacheKey);
-  if (cached) {
-    res.json(JSON.parse(cached));
     return;
   }
 
@@ -95,55 +87,29 @@ export const listJobs = asyncHandler(async (req: AuthRequest, res: Response, nex
     Job.countDocuments(filter),
   ]);
 
-  const payload = {
+  res.json({
     success: true,
     mode: 'search',
     data: items,
     meta: { page, limit, total, totalPages: Math.ceil(total / limit) },
-  };
-
-  await redis.setex(cacheKey, env.REDIS_JOB_CACHE_TTL, JSON.stringify(payload));
-  res.json(payload);
+  });
 });
 
 export const listAllJobs = asyncHandler(async (_req: AuthRequest, res: Response) => {
-  const cached = await redis.get(CACHE_KEYS.ALL_JOBS);
-  if (cached) {
-    res.json(JSON.parse(cached));
-    return;
-  }
-
   const payload = await buildAllJobsPayload();
-  await redis.setex(CACHE_KEYS.ALL_JOBS, env.REDIS_JOB_CACHE_TTL, JSON.stringify(payload));
   res.json(payload);
-});
-
-export const warmCache = asyncHandler(async (req: AuthRequest, res: Response) => {
-  if (!req.user || req.user.role !== 'admin') throw ApiError.forbidden('Admin only');
-  const result = await warmJobsCache();
-  res.json({ success: true, message: 'Cache warmed', data: result });
-});
-
-export const clearCache = asyncHandler(async (req: AuthRequest, res: Response) => {
-  if (!req.user || req.user.role !== 'admin') throw ApiError.forbidden('Admin only');
-  const result = await clearJobsCache();
-  res.json({ success: true, message: 'Cache cleared', data: result });
 });
 
 export const getJob = asyncHandler(async (req: Request, res: Response) => {
   const id = String(req.params.id);
-  const cached = await redis.get(CACHE_KEYS.JOB_BY_ID(id));
-  if (cached) {
-    res.json({ success: true, data: JSON.parse(cached) });
-    return;
-  }
-
   const job = await Job.findById(id).lean();
   if (!job) throw ApiError.notFound('Job not found');
-
-  await redis.setex(CACHE_KEYS.JOB_BY_ID(id), env.REDIS_JOB_CACHE_TTL, JSON.stringify(job));
   res.json({ success: true, data: job });
 });
+
+// Default match floor for the home feed: only show jobs the matcher
+// rates >= 50%. Clients can override with ?threshold= up to 100.
+const DEFAULT_MATCH_FLOOR = 50;
 
 export const matchedJobs = asyncHandler(async (req: AuthRequest, res: Response) => {
   if (!req.user) throw ApiError.unauthorized();
@@ -152,34 +118,27 @@ export const matchedJobs = asyncHandler(async (req: AuthRequest, res: Response) 
   const thresholdRaw = typeof req.query.threshold === 'string' ? Number(req.query.threshold) : NaN;
   const threshold = Number.isFinite(thresholdRaw)
     ? Math.min(100, Math.max(0, thresholdRaw))
-    : env.AI_MATCH_THRESHOLD;
+    : DEFAULT_MATCH_FLOOR;
+  const pageRaw = typeof req.query.page === 'string' ? Number(req.query.page) : NaN;
+  const page = Math.max(1, Number.isFinite(pageRaw) ? Math.floor(pageRaw) : 1);
   const limitRaw = typeof req.query.limit === 'string' ? Number(req.query.limit) : NaN;
-  const limit = Math.min(500, Number.isFinite(limitRaw) ? limitRaw : 100);
-
-  const cacheKey = `${CACHE_KEYS.USER_MATCHED_JOBS(req.user.id)}:${useAi}:${threshold}:${limit}`;
-  const cached = await redis.get(cacheKey);
-  if (cached) {
-    res.json(JSON.parse(cached));
-    return;
-  }
-
-  const user = await User.findById(req.user._id);
-  if (!user) throw ApiError.notFound('User not found');
-
+  const limit = Math.min(100, Math.max(1, Number.isFinite(limitRaw) ? Math.floor(limitRaw) : 20));
+  const skip = (page - 1) * limit;
   const cutoff = new Date(Date.now() - env.JOB_FRESHNESS_DAYS * 24 * 60 * 60 * 1000);
-  const profileComplete = Boolean(
-    user.profile.skills?.length || user.profile.preferredRoles?.length,
-  );
 
-  if (!profileComplete) {
-    const recent = await Job.find({ isActive: true, postedAt: { $gte: cutoff } })
-      .sort({ postedAt: -1 })
-      .limit(limit)
-      .lean();
-
-    const fallbackPayload = {
+  // Guests have no profile to match against, so we serve a recency-sorted
+  // public listing wrapped in the same shape as the matched response. No
+  // skill / category filter — the result spans every domain in the DB
+  // (IT, non-IT, core, finance, sales, …) so guests see the full breadth.
+  if (req.user.role === 'guest') {
+    const baseFilter = { isActive: true, postedAt: { $gte: cutoff } };
+    const [items, total] = await Promise.all([
+      Job.find(baseFilter).sort({ postedAt: -1 }).skip(skip).limit(limit).lean(),
+      Job.countDocuments(baseFilter),
+    ]);
+    res.json({
       success: true,
-      data: recent.map((j) => ({
+      data: items.map((j) => ({
         job: j,
         score: null,
         matchedSkills: [],
@@ -187,15 +146,54 @@ export const matchedJobs = asyncHandler(async (req: AuthRequest, res: Response) 
         reasoning: null,
       })),
       meta: {
-        total: recent.length,
+        page,
+        limit,
+        total,
+        totalPages: Math.ceil(total / limit),
+        hasMore: skip + items.length < total,
+        threshold,
+        useAi: false,
+        guest: true,
+        nextStep: 'Sign in with Google to get personalised matches.',
+      },
+    });
+    return;
+  }
+
+  const user = await User.findById(req.user._id);
+  if (!user) throw ApiError.notFound('User not found');
+
+  const profileComplete = Boolean(
+    user.profile.skills?.length || user.profile.preferredRoles?.length,
+  );
+
+  if (!profileComplete) {
+    const baseFilter = { isActive: true, postedAt: { $gte: cutoff } };
+    const [items, total] = await Promise.all([
+      Job.find(baseFilter).sort({ postedAt: -1 }).skip(skip).limit(limit).lean(),
+      Job.countDocuments(baseFilter),
+    ]);
+    res.json({
+      success: true,
+      data: items.map((j) => ({
+        job: j,
+        score: null,
+        matchedSkills: [],
+        missingSkills: [],
+        reasoning: null,
+      })),
+      meta: {
+        page,
+        limit,
+        total,
+        totalPages: Math.ceil(total / limit),
+        hasMore: skip + items.length < total,
         threshold,
         useAi,
         profileIncomplete: true,
-        nextStep: 'Add skills and preferred roles to your profile to get personalized 80%+ matches',
+        nextStep: 'Add skills and preferred roles to your profile to get personalised matches.',
       },
-    };
-    await redis.setex(cacheKey, 600, JSON.stringify(fallbackPayload));
-    res.json(fallbackPayload);
+    });
     return;
   }
 
@@ -212,14 +210,55 @@ export const matchedJobs = asyncHandler(async (req: AuthRequest, res: Response) 
     ],
   };
 
+  // Pull a wide candidate pool, score every one, then paginate over the
+  // sorted-desc result. The matcher already drops anything below
+  // `threshold`, so once we slice we have only >=50% scoring jobs ordered
+  // highest-first. Pool size of 1000 keeps the per-request work bounded.
   const candidates = await Job.find(candidateFilter).sort({ postedAt: -1 }).limit(1000);
-
   const matched = await matchJobsForUser(user, candidates, threshold, useAi);
-  const top = matched.slice(0, limit);
 
-  const payload = {
+  // Recency fallback: a profile-complete user whose skills/roles don't
+  // overlap with any job in the freshness window would otherwise see an
+  // empty home. Serve the unfiltered recent feed (same shape, score=null)
+  // so the home is never blank — UI ranking still prefers scored matches
+  // when they exist on a later refresh.
+  if (matched.length === 0) {
+    const baseFilter = { isActive: true, postedAt: { $gte: cutoff } };
+    const [items, total] = await Promise.all([
+      Job.find(baseFilter).sort({ postedAt: -1 }).skip(skip).limit(limit).lean(),
+      Job.countDocuments(baseFilter),
+    ]);
+    res.json({
+      success: true,
+      data: items.map((j) => ({
+        job: j,
+        score: null,
+        matchedSkills: [],
+        missingSkills: [],
+        reasoning: null,
+      })),
+      meta: {
+        page,
+        limit,
+        total,
+        totalPages: Math.ceil(total / limit),
+        hasMore: skip + items.length < total,
+        threshold,
+        useAi,
+        profileIncomplete: false,
+        noMatchesFallback: true,
+        candidatePoolSize: candidates.length,
+      },
+    });
+    return;
+  }
+
+  const total = matched.length;
+  const slice = matched.slice(skip, skip + limit);
+
+  res.json({
     success: true,
-    data: top.map((m) => ({
+    data: slice.map((m) => ({
       job: m.job,
       score: m.match.score,
       matchedSkills: m.match.matchedSkills,
@@ -227,16 +266,17 @@ export const matchedJobs = asyncHandler(async (req: AuthRequest, res: Response) 
       reasoning: m.match.reasoning,
     })),
     meta: {
-      total: matched.length,
+      page,
+      limit,
+      total,
+      totalPages: Math.ceil(total / limit),
+      hasMore: skip + slice.length < total,
       threshold,
       useAi,
       profileIncomplete: false,
       candidatePoolSize: candidates.length,
     },
-  };
-
-  await redis.setex(cacheKey, 1800, JSON.stringify(payload));
-  res.json(payload);
+  });
 });
 
 export const triggerFetch = asyncHandler(async (req: AuthRequest, res: Response) => {

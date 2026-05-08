@@ -56,8 +56,19 @@ const envSchema = z.object({
 
   RAZORPAY_KEY_ID: z.string().optional(),
   RAZORPAY_KEY_SECRET: z.string().optional(),
+  RAZORPAY_WEBHOOK_SECRET: z.string().optional(),
   STRIPE_SECRET_KEY: z.string().optional(),
   STRIPE_WEBHOOK_SECRET: z.string().optional(),
+
+  // FCM push notifications. Either provide the full service-account JSON
+  // inline (FIREBASE_SERVICE_ACCOUNT_JSON, useful for hosted env vars)
+  // or a path to it (FIREBASE_SERVICE_ACCOUNT_PATH). When neither is set
+  // the alert cron still runs but skips push delivery.
+  FIREBASE_SERVICE_ACCOUNT_JSON: z.string().optional(),
+  FIREBASE_SERVICE_ACCOUNT_PATH: z.string().optional(),
+  FIREBASE_PROJECT_ID: z.string().optional(),
+  CRON_ALERT_SCHEDULE: z.string().default('*/15 * * * *'),
+  ALERT_PUSH_MAX_PER_RUN: z.string().default('5').transform(Number),
 });
 
 const parsed = envSchema.safeParse(process.env);

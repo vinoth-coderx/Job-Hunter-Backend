@@ -4,8 +4,12 @@ import {
   updateProfile,
   changePassword,
   deleteAccount,
+  switchRole,
+  updateNotificationPrefs,
   updateProfileSchema,
   changePasswordSchema,
+  switchRoleSchema,
+  notificationPrefsSchema,
 } from '../controllers/user.controller';
 import {
   uploadResumeHandler,
@@ -34,6 +38,12 @@ router.use(authenticate);
 
 router.patch('/profile', validate(updateProfileSchema), updateProfile);
 router.post('/change-password', validate(changePasswordSchema), changePassword);
+router.post('/switch-role', validate(switchRoleSchema), switchRole);
+router.put(
+  '/notification-prefs',
+  validate(notificationPrefsSchema),
+  updateNotificationPrefs,
+);
 
 const wrapMulter =
   (mw: RequestHandler, maxBytes: number) =>

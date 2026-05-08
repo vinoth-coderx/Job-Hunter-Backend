@@ -42,7 +42,6 @@ const promises_1 = __importDefault(require("fs/promises"));
 const asyncHandler_1 = require("../utils/asyncHandler");
 const ApiError_1 = require("../utils/ApiError");
 const User_1 = require("../models/User");
-const redis_1 = require("../config/redis");
 const logger_1 = require("../utils/logger");
 const upload_1 = require("../middleware/upload");
 const extractText = async (filePath, mime) => {
@@ -107,13 +106,6 @@ exports.uploadResumeHandler = (0, asyncHandler_1.asyncHandler)(async (req, res) 
     if (oldFilename && oldFilename !== req.file.filename) {
         await removeFileQuiet(oldFilename);
     }
-    await redis_1.redis.del(redis_1.CACHE_KEYS.USER_PROFILE(req.user.id));
-    const matchKeys = await redis_1.redis.keys(`match:${req.user.id}:*`);
-    if (matchKeys.length)
-        await redis_1.redis.del(...matchKeys);
-    const feedKeys = await redis_1.redis.keys(`${redis_1.CACHE_KEYS.USER_MATCHED_JOBS(req.user.id)}*`);
-    if (feedKeys.length)
-        await redis_1.redis.del(...feedKeys);
     res.status(201).json({
         success: true,
         message: 'Resume uploaded',
@@ -170,6 +162,5 @@ exports.deleteResumeHandler = (0, asyncHandler_1.asyncHandler)(async (req, res) 
     user.profile.resumeText = undefined;
     await user.save();
     await removeFileQuiet(filename);
-    await redis_1.redis.del(redis_1.CACHE_KEYS.USER_PROFILE(req.user.id));
     res.json({ success: true, message: 'Resume deleted' });
 });

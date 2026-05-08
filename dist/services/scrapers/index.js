@@ -7,7 +7,6 @@ const rapidapi_service_1 = require("./rapidapi.service");
 const puppeteer_service_1 = require("./puppeteer.service");
 const Job_1 = require("../../models/Job");
 const logger_1 = require("../../utils/logger");
-const redis_1 = require("../../config/redis");
 const env_1 = require("../../config/env");
 const adzuna = new adzuna_service_1.AdzunaScraper();
 exports.adzuna = adzuna;
@@ -100,10 +99,6 @@ const fetchAllJobs = async (opts = {}) => {
     }
     const cutoff = new Date(Date.now() - env_1.env.JOB_FRESHNESS_DAYS * 24 * 60 * 60 * 1000);
     await Job_1.Job.updateMany({ postedAt: { $lt: cutoff } }, { $set: { isActive: false } });
-    await redis_1.redis.del(redis_1.CACHE_KEYS.ALL_JOBS);
-    const keys = await redis_1.redis.keys('jobs:*');
-    if (keys.length)
-        await redis_1.redis.del(...keys);
     logger_1.logger.info(`Job fetch complete — total: ${all.length}, inserted: ${inserted}, updated: ${updated}`, bySource);
     return { total: all.length, inserted, updated, bySource };
 };

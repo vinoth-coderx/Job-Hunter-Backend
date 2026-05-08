@@ -8,12 +8,10 @@ const node_cron_1 = __importDefault(require("node-cron"));
 const env_1 = require("../config/env");
 const logger_1 = require("../utils/logger");
 const scrapers_1 = require("../services/scrapers");
-const jobCache_service_1 = require("../services/jobCache.service");
 const Subscription_1 = require("../models/Subscription");
 const User_1 = require("../models/User");
 let jobScraperTask = null;
 let subscriptionCheckerTask = null;
-let cacheWarmTask = null;
 let isRunning = false;
 const startJobScraperCron = () => {
     if (!env_1.env.CRON_ENABLED) {
@@ -57,21 +55,7 @@ const startJobScraperCron = () => {
             logger_1.logger.error('Cron: subscription expiry check failed', err);
         }
     }, { timezone: 'Asia/Kolkata' });
-    if (node_cron_1.default.validate(env_1.env.CRON_CACHE_WARM_SCHEDULE)) {
-        cacheWarmTask = node_cron_1.default.schedule(env_1.env.CRON_CACHE_WARM_SCHEDULE, async () => {
-            try {
-                const result = await (0, jobCache_service_1.warmJobsCache)();
-                logger_1.logger.info('Cron: cache warmed', result);
-            }
-            catch (err) {
-                logger_1.logger.error('Cron: cache warm failed', err);
-            }
-        }, { timezone: 'Asia/Kolkata' });
-    }
-    else {
-        logger_1.logger.error(`Invalid cache warm cron: ${env_1.env.CRON_CACHE_WARM_SCHEDULE}`);
-    }
-    logger_1.logger.info(`Cron scheduled — job fetch: "${env_1.env.CRON_JOB_FETCH_SCHEDULE}", cache warm: "${env_1.env.CRON_CACHE_WARM_SCHEDULE}", sub check: daily 00:00`);
+    logger_1.logger.info(`Cron scheduled — job fetch: "${env_1.env.CRON_JOB_FETCH_SCHEDULE}", sub check: daily 00:00`);
 };
 exports.startJobScraperCron = startJobScraperCron;
 const stopJobScraperCron = () => {
@@ -82,10 +66,6 @@ const stopJobScraperCron = () => {
     if (subscriptionCheckerTask) {
         subscriptionCheckerTask.stop();
         subscriptionCheckerTask = null;
-    }
-    if (cacheWarmTask) {
-        cacheWarmTask.stop();
-        cacheWarmTask = null;
     }
     logger_1.logger.info('Cron stopped');
 };

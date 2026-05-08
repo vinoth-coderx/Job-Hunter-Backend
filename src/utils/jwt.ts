@@ -26,3 +26,12 @@ export const generateTokenPair = (payload: JwtPayload) => ({
   accessToken: generateAccessToken(payload),
   refreshToken: generateRefreshToken(payload),
 });
+
+// Guest tokens are short-lived and stateless — there is no DB record to
+// rotate refresh tokens against, so the access token is signed with a
+// shorter expiry and the refresh token is omitted upstream.
+export const generateGuestAccessToken = (payload: JwtPayload): string => {
+  return jwt.sign(payload, env.JWT_SECRET, {
+    expiresIn: '7d',
+  } as SignOptions);
+};

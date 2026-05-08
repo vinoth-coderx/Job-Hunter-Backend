@@ -8,6 +8,7 @@ import {
   me,
   googleCallback,
   googleMobileLogin,
+  guestLogin,
   registerSchema,
   loginSchema,
   googleMobileSchema,
@@ -27,6 +28,8 @@ router.get('/me', authenticate, me);
 
 router.post('/google', authLimiter, validate(googleMobileSchema), googleMobileLogin);
 router.post('/google/mobile', authLimiter, validate(googleMobileSchema), googleMobileLogin);
+
+router.post('/guest', authLimiter, guestLogin);
 
 if (env.GOOGLE_CLIENT_ID && env.GOOGLE_CLIENT_SECRET) {
   router.get(

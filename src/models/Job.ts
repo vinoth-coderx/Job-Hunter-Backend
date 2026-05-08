@@ -1,21 +1,77 @@
 import mongoose, { Schema, Document, Model } from 'mongoose';
-import { JobSource, JobType, RemoteType } from '../types';
+import {
+  JobSource,
+  JobType,
+  RemoteType,
+  JobStatus,
+  ScreeningQuestionType,
+} from '../types';
+
+export interface IScreeningQuestion {
+  question: string;
+  type: ScreeningQuestionType;
+  options?: string[];
+  isRequired: boolean;
+}
 
 export interface IJob extends Document {
   _id: mongoose.Types.ObjectId;
-  externalId: string;
+
+  // Native vs external. Existing scraped jobs keep isNative=false and
+  // continue to work without any change.
+  isNative: boolean;
   source: JobSource;
+
+  // External-only (set when isNative=false)
+  externalId?: string;
+
+  // Native-only (set when isNative=true)
+  hirerProfile?: mongoose.Types.ObjectId;
+  postedBy?: mongoose.Types.ObjectId;
+
   title: string;
   company: string;
+  companyLogoUrl?: string;
+  department?: string;
   location: string;
   description: string;
+  responsibilities?: string[];
   url: string;
+
   salaryMin?: number;
   salaryMax?: number;
   currency?: string;
+  isSalaryVisible?: boolean;
+  perks?: string[];
+
   jobType: JobType;
   remoteType: RemoteType;
+  openingsCount?: number;
+  experienceMinYears?: number;
+  experienceMaxYears?: number;
+  education?: string;
+
   skills: string[];
+  niceToHaveSkills?: string[];
+
+  applyType?: 'easy_apply' | 'custom_form';
+  requiredDocuments?: string[];
+  screeningQuestions?: IScreeningQuestion[];
+  applicationDeadline?: Date;
+
+  status: JobStatus;
+  isBoosted?: boolean;
+  boostExpiresAt?: Date;
+
+  viewsCount: number;
+  applicationsCount: number;
+  shortlistedCount: number;
+
+  scheduledPublishAt?: Date;
+  publishedAt?: Date;
+  expiresAt?: Date;
+  closedAt?: Date;
+
   postedAt: Date;
   fetchedAt: Date;
   isActive: boolean;
@@ -24,23 +80,44 @@ export interface IJob extends Document {
   updatedAt: Date;
 }
 
+const screeningQuestionSchema = new Schema<IScreeningQuestion>(
+  {
+    question: { type: String, required: true, trim: true, maxlength: 500 },
+    type: { type: String, enum: ['text', 'mcq', 'yes_no'], required: true },
+    options: { type: [String], default: undefined },
+    isRequired: { type: Boolean, default: false },
+  },
+  { _id: false },
+);
+
 const jobSchema = new Schema<IJob>(
   {
-    externalId: { type: String, required: true, index: true },
+    isNative: { type: Boolean, default: false, index: true },
     source: {
       type: String,
-      enum: ['adzuna', 'serpapi', 'rapidapi', 'puppeteer', 'playwright'],
+      enum: ['native', 'adzuna', 'serpapi', 'rapidapi', 'puppeteer', 'playwright'],
       required: true,
       index: true,
     },
-    title: { type: String, required: true, trim: true, index: 'text' },
-    company: { type: String, required: true, trim: true, index: true },
-    location: { type: String, required: true, trim: true, index: true },
-    description: { type: String, required: true, index: 'text' },
-    url: { type: String, required: true },
-    salaryMin: Number,
-    salaryMax: Number,
-    currency: String,
+    externalId: { type: String, index: true, sparse: true },
+    hirerProfile: { type: Schema.Types.ObjectId, ref: 'HirerProfile', index: true, sparse: true },
+    postedBy: { type: Schema.Types.ObjectId, ref: 'User', index: true, sparse: true },
+
+    title: { type: String, required: true, trim: true, maxlength: 200, index: 'text' },
+    company: { type: String, required: true, trim: true, maxlength: 200, index: true },
+    companyLogoUrl: String,
+    department: { type: String, trim: true, maxlength: 100 },
+    location: { type: String, required: true, trim: true, maxlength: 200, index: true },
+    description: { type: String, required: true, maxlength: 20000, index: 'text' },
+    responsibilities: { type: [String], default: undefined },
+    url: { type: String, required: true, maxlength: 2000 },
+
+    salaryMin: { type: Number, min: 0 },
+    salaryMax: { type: Number, min: 0 },
+    currency: { type: String, default: 'INR', maxlength: 8 },
+    isSalaryVisible: { type: Boolean, default: true },
+    perks: { type: [String], default: undefined },
+
     jobType: {
       type: String,
       enum: ['full-time', 'part-time', 'contract', 'internship', 'temporary', 'unknown'],
@@ -51,7 +128,37 @@ const jobSchema = new Schema<IJob>(
       enum: ['remote', 'hybrid', 'onsite', 'unknown'],
       default: 'unknown',
     },
+    openingsCount: { type: Number, min: 1, default: 1 },
+    experienceMinYears: { type: Number, min: 0, max: 60 },
+    experienceMaxYears: { type: Number, min: 0, max: 60 },
+    education: { type: String, maxlength: 200 },
+
     skills: { type: [String], default: [], index: true },
+    niceToHaveSkills: { type: [String], default: undefined },
+
+    applyType: { type: String, enum: ['easy_apply', 'custom_form'], default: 'easy_apply' },
+    requiredDocuments: { type: [String], default: undefined },
+    screeningQuestions: { type: [screeningQuestionSchema], default: undefined },
+    applicationDeadline: Date,
+
+    status: {
+      type: String,
+      enum: ['draft', 'active', 'paused', 'closed', 'expired'],
+      default: 'active',
+      index: true,
+    },
+    isBoosted: { type: Boolean, default: false, index: true },
+    boostExpiresAt: Date,
+
+    viewsCount: { type: Number, default: 0, min: 0 },
+    applicationsCount: { type: Number, default: 0, min: 0 },
+    shortlistedCount: { type: Number, default: 0, min: 0 },
+
+    scheduledPublishAt: Date,
+    publishedAt: Date,
+    expiresAt: Date,
+    closedAt: Date,
+
     postedAt: { type: Date, required: true, index: true },
     fetchedAt: { type: Date, default: Date.now },
     isActive: { type: Boolean, default: true, index: true },
@@ -60,9 +167,19 @@ const jobSchema = new Schema<IJob>(
   { timestamps: true },
 );
 
-jobSchema.index({ externalId: 1, source: 1 }, { unique: true });
+// External jobs uniqueness — only enforced when both fields exist
+// (partial filter), so multiple native jobs without externalId are allowed.
+jobSchema.index(
+  { externalId: 1, source: 1 },
+  {
+    unique: true,
+    partialFilterExpression: { externalId: { $exists: true, $type: 'string' } },
+  },
+);
 jobSchema.index({ title: 'text', company: 'text', description: 'text', skills: 'text' });
 jobSchema.index({ postedAt: -1, isActive: 1 });
 jobSchema.index({ skills: 1, location: 1, jobType: 1 });
+jobSchema.index({ status: 1, isNative: 1, postedAt: -1 });
+jobSchema.index({ hirerProfile: 1, status: 1, createdAt: -1 });
 
 export const Job: Model<IJob> = mongoose.model<IJob>('Job', jobSchema);

@@ -5,7 +5,6 @@ import { asyncHandler } from '../utils/asyncHandler';
 import { ApiError } from '../utils/ApiError';
 import { AuthRequest } from '../types';
 import { User } from '../models/User';
-import { redis, CACHE_KEYS } from '../config/redis';
 import { logger } from '../utils/logger';
 import { RESUME_DIR } from '../middleware/upload';
 
@@ -75,12 +74,6 @@ export const uploadResumeHandler = asyncHandler(async (req: AuthRequest, res: Re
     await removeFileQuiet(oldFilename);
   }
 
-  await redis.del(CACHE_KEYS.USER_PROFILE(req.user.id));
-  const matchKeys = await redis.keys(`match:${req.user.id}:*`);
-  if (matchKeys.length) await redis.del(...matchKeys);
-  const feedKeys = await redis.keys(`${CACHE_KEYS.USER_MATCHED_JOBS(req.user.id)}*`);
-  if (feedKeys.length) await redis.del(...feedKeys);
-
   res.status(201).json({
     success: true,
     message: 'Resume uploaded',
@@ -142,7 +135,6 @@ export const deleteResumeHandler = asyncHandler(async (req: AuthRequest, res: Re
   await user.save();
 
   await removeFileQuiet(filename);
-  await redis.del(CACHE_KEYS.USER_PROFILE(req.user.id));
 
   res.json({ success: true, message: 'Resume deleted' });
 });

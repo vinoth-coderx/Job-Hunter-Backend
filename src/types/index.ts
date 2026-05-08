@@ -1,18 +1,40 @@
 import { Request } from 'express';
 
+export type UserRole = 'user' | 'admin' | 'guest';
+
 export interface JwtPayload {
   userId: string;
   email: string;
-  role: 'user' | 'admin';
+  role: UserRole;
 }
 
 export type AuthRequest = Request;
 
 export type SubscriptionTier = 'free' | 'weekly' | 'monthly' | 'yearly';
 export type SubscriptionStatus = 'active' | 'expired' | 'cancelled';
-export type JobSource = 'adzuna' | 'serpapi' | 'rapidapi' | 'puppeteer' | 'playwright';
+export type JobSource =
+  | 'native'
+  | 'adzuna'
+  | 'serpapi'
+  | 'rapidapi'
+  | 'puppeteer'
+  | 'playwright';
 export type JobType = 'full-time' | 'part-time' | 'contract' | 'internship' | 'temporary' | 'unknown';
 export type RemoteType = 'remote' | 'hybrid' | 'onsite' | 'unknown';
+export type JobStatus = 'draft' | 'active' | 'paused' | 'closed' | 'expired';
+export type ScreeningQuestionType = 'text' | 'mcq' | 'yes_no';
+export type CompanySize = '1-10' | '11-50' | '51-200' | '201-500' | '500-1000' | '1000+';
+export type NotificationType =
+  | 'new_job_match'
+  | 'application_status'
+  | 'interview_scheduled'
+  | 'new_message'
+  | 'auto_apply_summary'
+  | 'profile_viewed'
+  | 'subscription_expiry'
+  | 'company_new_job'
+  | 'new_applicant'
+  | 'system';
 
 export interface ScrapedJob {
   externalId: string;

@@ -8,11 +8,15 @@ import { ApiError } from '../utils/ApiError';
 const UPLOAD_ROOT = path.resolve(process.cwd(), 'uploads');
 export const RESUME_DIR = path.join(UPLOAD_ROOT, 'resumes');
 export const AVATAR_DIR = path.join(UPLOAD_ROOT, 'avatars');
+export const COMPANY_LOGO_DIR = path.join(UPLOAD_ROOT, 'company-logos');
+export const OFFICE_PHOTO_DIR = path.join(UPLOAD_ROOT, 'office-photos');
 
 export const RESUME_MAX_SIZE_BYTES = 5 * 1024 * 1024;
 export const AVATAR_MAX_SIZE_BYTES = 2 * 1024 * 1024;
+export const COMPANY_LOGO_MAX_SIZE_BYTES = 2 * 1024 * 1024;
+export const OFFICE_PHOTO_MAX_SIZE_BYTES = 5 * 1024 * 1024;
 
-for (const dir of [RESUME_DIR, AVATAR_DIR]) {
+for (const dir of [RESUME_DIR, AVATAR_DIR, COMPANY_LOGO_DIR, OFFICE_PHOTO_DIR]) {
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
 }
 
@@ -59,3 +63,15 @@ export const uploadAvatar = multer({
   fileFilter: buildFilter(AVATAR_MIME, AVATAR_EXT, 'JPG, PNG, or WEBP image'),
   limits: { fileSize: AVATAR_MAX_SIZE_BYTES, files: 1 },
 }).single('avatar');
+
+export const uploadCompanyLogo = multer({
+  storage: buildStorage(COMPANY_LOGO_DIR),
+  fileFilter: buildFilter(AVATAR_MIME, AVATAR_EXT, 'JPG, PNG, or WEBP image'),
+  limits: { fileSize: COMPANY_LOGO_MAX_SIZE_BYTES, files: 1 },
+}).single('logo');
+
+export const uploadOfficePhotos = multer({
+  storage: buildStorage(OFFICE_PHOTO_DIR),
+  fileFilter: buildFilter(AVATAR_MIME, AVATAR_EXT, 'JPG, PNG, or WEBP image'),
+  limits: { fileSize: OFFICE_PHOTO_MAX_SIZE_BYTES, files: 10 },
+}).array('photos', 10);

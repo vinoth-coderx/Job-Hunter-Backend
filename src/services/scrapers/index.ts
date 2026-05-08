@@ -5,7 +5,6 @@ import { PuppeteerScraper } from './puppeteer.service';
 import { Job } from '../../models/Job';
 import { ScrapedJob } from '../../types';
 import { logger } from '../../utils/logger';
-import { redis, CACHE_KEYS } from '../../config/redis';
 import { env } from '../../config/env';
 
 const adzuna = new AdzunaScraper();
@@ -118,10 +117,6 @@ export const fetchAllJobs = async (opts: FetchOptions = {}): Promise<{
 
   const cutoff = new Date(Date.now() - env.JOB_FRESHNESS_DAYS * 24 * 60 * 60 * 1000);
   await Job.updateMany({ postedAt: { $lt: cutoff } }, { $set: { isActive: false } });
-
-  await redis.del(CACHE_KEYS.ALL_JOBS);
-  const keys = await redis.keys('jobs:*');
-  if (keys.length) await redis.del(...keys);
 
   logger.info(
     `Job fetch complete — total: ${all.length}, inserted: ${inserted}, updated: ${updated}`,

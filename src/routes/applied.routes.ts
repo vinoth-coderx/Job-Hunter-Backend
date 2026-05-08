@@ -1,11 +1,13 @@
 import { Router } from 'express';
 import {
   applyToJob,
+  quickApply,
   listApplied,
   updateApplied,
   deleteApplied,
   appliedStats,
   applySchema,
+  quickApplySchema,
   updateAppliedSchema,
 } from '../controllers/applied.controller';
 import { authenticate } from '../middleware/auth';
@@ -18,6 +20,7 @@ router.use(authenticate);
 router.get('/', listApplied);
 router.get('/stats', appliedStats);
 router.post('/', validate(applySchema), applyToJob);
+router.post('/quick-apply', validate(quickApplySchema), quickApply);
 router.patch('/:id', validate(updateAppliedSchema), updateApplied);
 router.delete('/:id', deleteApplied);
 

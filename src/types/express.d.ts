@@ -1,13 +1,14 @@
 import { Types } from 'mongoose';
-import { SubscriptionTier } from './index';
+import { SubscriptionTier, UserRole } from './index';
 
 declare global {
   namespace Express {
     interface User {
-      _id: Types.ObjectId;
+      // For guest sessions there is no DB record, so _id is optional.
+      _id?: Types.ObjectId;
       id: string;
       email: string;
-      role: 'user' | 'admin';
+      role: UserRole;
       subscription?: SubscriptionTier;
     }
     interface Request {

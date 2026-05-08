@@ -5,6 +5,9 @@ import { env } from './config/env';
 import { connectDatabase, disconnectDatabase } from './config/database';
 import { connectRedis, disconnectRedis } from './config/redis';
 import { startJobScraperCron, stopJobScraperCron } from './jobs/jobScraper.cron';
+import { startAlertCheckerCron, stopAlertCheckerCron } from './jobs/alertChecker.cron';
+import { startAutoApplyCron, stopAutoApplyCron } from './jobs/autoApply.cron';
+import { initSocket, closeSocket } from './services/chat/socket';
 import { puppeteerScraper } from './services/scrapers';
 import { logger } from './utils/logger';
 
@@ -17,6 +20,7 @@ const start = async (): Promise<void> => {
 
     const app = createApp();
     server = http.createServer(app);
+    initSocket(server);
 
     server.listen(env.PORT, () => {
       const base = `http://localhost:${env.PORT}`;
@@ -35,6 +39,8 @@ const start = async (): Promise<void> => {
       logger.info(`  Feed     : ${api}/jobs/feed   (auth: explicit matched feed)`);
       logger.info('================================================');
       startJobScraperCron();
+      startAlertCheckerCron();
+      startAutoApplyCron();
     });
   } catch (err) {
     logger.error('Failed to start server', err);
@@ -45,6 +51,9 @@ const start = async (): Promise<void> => {
 const shutdown = async (signal: string): Promise<void> => {
   logger.info(`${signal} received — shutting down gracefully`);
   stopJobScraperCron();
+  stopAlertCheckerCron();
+  stopAutoApplyCron();
+  await closeSocket().catch((e) => logger.warn('Socket close failed', e));
 
   if (server) {
     await new Promise<void>((resolve) => server.close(() => resolve()));

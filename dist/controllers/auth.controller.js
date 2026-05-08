@@ -1,14 +1,15 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.googleMobileLogin = exports.googleMobileSchema = exports.googleCallback = exports.me = exports.logout = exports.refreshToken = exports.login = exports.register = exports.loginSchema = exports.registerSchema = void 0;
+exports.googleMobileLogin = exports.googleMobileSchema = exports.guestLogin = exports.googleCallback = exports.me = exports.logout = exports.refreshToken = exports.login = exports.register = exports.loginSchema = exports.registerSchema = void 0;
 const zod_1 = require("zod");
 const google_auth_library_1 = require("google-auth-library");
 const User_1 = require("../models/User");
 const ApiError_1 = require("../utils/ApiError");
 const jwt_1 = require("../utils/jwt");
+const crypto_1 = require("crypto");
 const asyncHandler_1 = require("../utils/asyncHandler");
 const logger_1 = require("../utils/logger");
-const crypto_1 = require("../utils/crypto");
+const crypto_2 = require("../utils/crypto");
 const security_1 = require("../middleware/security");
 const env_1 = require("../config/env");
 const googleAudiences = [
@@ -44,7 +45,7 @@ exports.register = (0, asyncHandler_1.asyncHandler)(async (req, res) => {
     const existing = await User_1.User.findOne({ email });
     if (existing)
         throw ApiError_1.ApiError.conflict('Email already registered');
-    const verificationToken = (0, crypto_1.randomToken)(32);
+    const verificationToken = (0, crypto_2.randomToken)(32);
     const user = await User_1.User.create({
         email,
         password,
@@ -204,6 +205,30 @@ exports.googleCallback = (0, asyncHandler_1.asyncHandler)(async (req, res) => {
         success: true,
         message: 'Google login successful',
         data: { ...tokens },
+    });
+});
+exports.guestLogin = (0, asyncHandler_1.asyncHandler)(async (_req, res) => {
+    const guestId = `guest:${(0, crypto_1.randomUUID)()}`;
+    const accessToken = (0, jwt_1.generateGuestAccessToken)({
+        userId: guestId,
+        email: 'guest@jobhunter.local',
+        role: 'guest',
+    });
+    res.json({
+        success: true,
+        message: 'Guest session created',
+        data: {
+            user: {
+                id: guestId,
+                email: null,
+                fullName: 'Guest',
+                role: 'guest',
+                subscription: { tier: 'free', status: 'active' },
+                isGuest: true,
+            },
+            accessToken,
+            refreshToken: null,
+        },
     });
 });
 exports.googleMobileSchema = zod_1.z.object({

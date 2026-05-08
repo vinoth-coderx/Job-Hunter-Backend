@@ -3,7 +3,8 @@ import { z } from 'zod';
 import { OAuth2Client } from 'google-auth-library';
 import { User } from '../models/User';
 import { ApiError } from '../utils/ApiError';
-import { generateTokenPair, verifyRefreshToken } from '../utils/jwt';
+import { generateTokenPair, generateGuestAccessToken, verifyRefreshToken } from '../utils/jwt';
+import { randomUUID } from 'crypto';
 import { asyncHandler } from '../utils/asyncHandler';
 import { AuthRequest } from '../types';
 import { logger } from '../utils/logger';
@@ -200,6 +201,7 @@ export const me = asyncHandler(async (req: AuthRequest, res: Response) => {
       id: user._id,
       email: user.email,
       role: user.role,
+      activeRole: user.activeRole,
       profile: user.profile,
       subscription: user.subscription,
       isEmailVerified: user.isEmailVerified,
@@ -229,6 +231,38 @@ export const googleCallback = asyncHandler(async (req: Request, res: Response) =
     success: true,
     message: 'Google login successful',
     data: { ...tokens },
+  });
+});
+
+// Stateless guest session: no DB record, no refresh token. The client gets
+// a short-lived access token whose `role: 'guest'` claim is honoured by the
+// `authenticateOrGuest` middleware. Privileged endpoints (apply, profile,
+// subscriptions, /auth/me, etc.) keep using strict `authenticate`, which
+// rejects guest tokens — the app will see a clear 401/403 there.
+export const guestLogin = asyncHandler(async (_req: Request, res: Response) => {
+  const guestId = `guest:${randomUUID()}`;
+  const accessToken = generateGuestAccessToken({
+    userId: guestId,
+    email: 'guest@jobhunter.local',
+    role: 'guest',
+  });
+
+  res.json({
+    success: true,
+    message: 'Guest session created',
+    data: {
+      user: {
+        id: guestId,
+        email: null,
+        fullName: 'Guest',
+        role: 'guest',
+        subscription: { tier: 'free', status: 'active' },
+        isGuest: true,
+      },
+      accessToken,
+      // Refresh token deliberately omitted — guest tokens are not refreshable.
+      refreshToken: null,
+    },
   });
 });
 

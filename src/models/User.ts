@@ -9,6 +9,10 @@ export interface IUser extends Document {
   googleId?: string;
   authProvider: 'local' | 'google';
   role: 'user' | 'admin';
+  // Which side of the app the user is currently using.
+  // Both modes share the same User document; the hirer side is gated
+  // additionally on the existence of a HirerProfile.
+  activeRole: 'seeker' | 'hirer';
   isEmailVerified: boolean;
   emailVerificationToken?: string;
   passwordResetToken?: string;
@@ -50,6 +54,22 @@ export interface IUser extends Document {
     endDate?: Date;
     paymentId?: string;
   };
+  notificationPreferences: {
+    push: boolean;
+    email: boolean;
+    whatsapp: boolean;
+    jobAlerts: boolean;
+    applicationUpdates: boolean;
+    autoApplySummary: boolean;
+    quietHoursStart?: string;
+    quietHoursEnd?: string;
+  };
+  gamification: {
+    streakCount: number;
+    longestStreak: number;
+    lastCheckinDate?: Date;
+    earnedBadges: { badgeId: string; earnedAt: Date }[];
+  };
   lastLogin?: Date;
   createdAt: Date;
   updatedAt: Date;
@@ -75,6 +95,7 @@ const userSchema = new Schema<IUser>(
     googleId: { type: String, sparse: true, unique: true },
     authProvider: { type: String, enum: ['local', 'google'], default: 'local' },
     role: { type: String, enum: ['user', 'admin'], default: 'user' },
+    activeRole: { type: String, enum: ['seeker', 'hirer'], default: 'seeker', index: true },
     isEmailVerified: { type: Boolean, default: false },
     emailVerificationToken: String,
     passwordResetToken: String,
@@ -131,6 +152,34 @@ const userSchema = new Schema<IUser>(
       startDate: Date,
       endDate: Date,
       paymentId: String,
+    },
+    notificationPreferences: {
+      push: { type: Boolean, default: true },
+      email: { type: Boolean, default: true },
+      // WhatsApp is opt-in per the spec.
+      whatsapp: { type: Boolean, default: false },
+      jobAlerts: { type: Boolean, default: true },
+      applicationUpdates: { type: Boolean, default: true },
+      autoApplySummary: { type: Boolean, default: true },
+      // 'HH:mm' format. When both are set we suppress non-critical
+      // pushes during the window — checked client-side and by the cron.
+      quietHoursStart: { type: String, default: '22:00' },
+      quietHoursEnd: { type: String, default: '08:00' },
+    },
+    gamification: {
+      streakCount: { type: Number, default: 0, min: 0 },
+      longestStreak: { type: Number, default: 0, min: 0 },
+      lastCheckinDate: Date,
+      earnedBadges: {
+        type: [
+          {
+            _id: false,
+            badgeId: { type: String, required: true, maxlength: 60 },
+            earnedAt: { type: Date, default: Date.now },
+          },
+        ],
+        default: [],
+      },
     },
     lastLogin: Date,
   },

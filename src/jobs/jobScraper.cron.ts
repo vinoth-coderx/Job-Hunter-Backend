@@ -2,13 +2,11 @@ import cron, { ScheduledTask } from 'node-cron';
 import { env } from '../config/env';
 import { logger } from '../utils/logger';
 import { fetchAllJobs } from '../services/scrapers';
-import { warmJobsCache } from '../services/jobCache.service';
 import { Subscription } from '../models/Subscription';
 import { User } from '../models/User';
 
 let jobScraperTask: ScheduledTask | null = null;
 let subscriptionCheckerTask: ScheduledTask | null = null;
-let cacheWarmTask: ScheduledTask | null = null;
 let isRunning = false;
 
 export const startJobScraperCron = (): void => {
@@ -68,25 +66,8 @@ export const startJobScraperCron = (): void => {
     { timezone: 'Asia/Kolkata' },
   );
 
-  if (cron.validate(env.CRON_CACHE_WARM_SCHEDULE)) {
-    cacheWarmTask = cron.schedule(
-      env.CRON_CACHE_WARM_SCHEDULE,
-      async () => {
-        try {
-          const result = await warmJobsCache();
-          logger.info('Cron: cache warmed', result);
-        } catch (err) {
-          logger.error('Cron: cache warm failed', err);
-        }
-      },
-      { timezone: 'Asia/Kolkata' },
-    );
-  } else {
-    logger.error(`Invalid cache warm cron: ${env.CRON_CACHE_WARM_SCHEDULE}`);
-  }
-
   logger.info(
-    `Cron scheduled — job fetch: "${env.CRON_JOB_FETCH_SCHEDULE}", cache warm: "${env.CRON_CACHE_WARM_SCHEDULE}", sub check: daily 00:00`,
+    `Cron scheduled — job fetch: "${env.CRON_JOB_FETCH_SCHEDULE}", sub check: daily 00:00`,
   );
 };
 
@@ -98,10 +79,6 @@ export const stopJobScraperCron = (): void => {
   if (subscriptionCheckerTask) {
     subscriptionCheckerTask.stop();
     subscriptionCheckerTask = null;
-  }
-  if (cacheWarmTask) {
-    cacheWarmTask.stop();
-    cacheWarmTask = null;
   }
   logger.info('Cron stopped');
 };
