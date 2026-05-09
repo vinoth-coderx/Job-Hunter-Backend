@@ -1,6 +1,6 @@
 import mongoose, { Schema, Document, Model } from 'mongoose';
 import bcrypt from 'bcryptjs';
-import { SubscriptionTier, JobType, RemoteType } from '../types';
+import { SubscriptionTier, SubscriptionStatus, JobType, RemoteType } from '../types';
 
 export interface IUser extends Document {
   _id: mongoose.Types.ObjectId;
@@ -49,10 +49,15 @@ export interface IUser extends Document {
   };
   subscription: {
     tier: SubscriptionTier;
-    status: 'active' | 'expired' | 'cancelled';
+    status: SubscriptionStatus;
     startDate?: Date;
     endDate?: Date;
     paymentId?: string;
+    /// Set when the user activates the one-time auto-apply free trial.
+    /// Trial is live for 7 days from this timestamp.
+    trialActivatedAt?: Date;
+    /// Latches true on first activation so the trial can't be re-claimed.
+    trialUsed: boolean;
   };
   notificationPreferences: {
     push: boolean;
@@ -146,12 +151,18 @@ const userSchema = new Schema<IUser>(
       },
       status: {
         type: String,
-        enum: ['active', 'expired', 'cancelled'],
+        enum: ['active', 'expired', 'cancelled', 'refunded'],
         default: 'active',
       },
       startDate: Date,
       endDate: Date,
       paymentId: String,
+      // Auto-apply free trial (one per account, 7 days). When set, the
+      // user gets `monthly`-tier auto-apply privileges until 7 days
+      // after [trialActivatedAt]. We don't reset `trialUsed` once it
+      // flips true, so the trial cannot be re-claimed by toggling.
+      trialActivatedAt: Date,
+      trialUsed: { type: Boolean, default: false },
     },
     notificationPreferences: {
       push: { type: Boolean, default: true },

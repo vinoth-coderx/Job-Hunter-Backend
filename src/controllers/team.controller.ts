@@ -8,6 +8,8 @@ import { User } from '../models/User';
 import { asyncHandler } from '../utils/asyncHandler';
 import { ApiError } from '../utils/ApiError';
 import { AuthRequest } from '../types';
+import { sendTeamInviteEmail } from '../services/notification/email.service';
+import { logger } from '../utils/logger';
 
 const isObjectId = (s: string) => /^[a-f0-9]{24}$/i.test(s);
 
@@ -106,8 +108,22 @@ export const inviteTeamMember = asyncHandler(async (req: AuthRequest, res: Respo
     { upsert: true, new: true },
   );
 
-  // The Flutter app will open a deep-link / pasted-token screen; the URL
-  // is opaque to the backend (we just emit the token).
+  // Fire-and-forget: send the invite email if SMTP is configured. The
+  // dialog still surfaces the token so admins can DM it as a fallback.
+  const inviter = await User.findById(req.user._id)
+    .select('email profile.fullName')
+    .lean();
+  void sendTeamInviteEmail({
+    toEmail: invite.email,
+    companyName: profile.companyName,
+    inviterName: inviter?.profile?.fullName || inviter?.email,
+    role: invite.role,
+    token: invite.token,
+    expiresAt: invite.expiresAt,
+  }).catch((err) =>
+    logger.warn(`team invite email dispatch failed: ${(err as Error).message}`),
+  );
+
   res.status(201).json({
     success: true,
     data: {

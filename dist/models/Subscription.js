@@ -86,7 +86,7 @@ const subscriptionSchema = new mongoose_1.Schema({
     },
     status: {
         type: String,
-        enum: ['active', 'expired', 'cancelled'],
+        enum: ['active', 'expired', 'cancelled', 'refunded'],
         default: 'active',
         index: true,
     },
@@ -103,4 +103,5 @@ const subscriptionSchema = new mongoose_1.Schema({
 }, { timestamps: true });
 subscriptionSchema.index({ user: 1, status: 1 });
 subscriptionSchema.index({ endDate: 1, status: 1 });
+subscriptionSchema.index({ paymentId: 1 }, { unique: true, sparse: true });
 exports.Subscription = mongoose_1.default.model('Subscription', subscriptionSchema);

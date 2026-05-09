@@ -5,10 +5,11 @@ import { AppliedJob, ApplicationStatus, IAppliedJob } from '../models/AppliedJob
 import { Job } from '../models/Job';
 import { HirerProfile } from '../models/HirerProfile';
 import { IUser } from '../models/User';
-import { Notification } from '../models/Notification';
 import { asyncHandler } from '../utils/asyncHandler';
 import { ApiError } from '../utils/ApiError';
 import { AuthRequest } from '../types';
+import { notifyUser } from '../services/notification/notify.service';
+import { emitToUser } from '../services/chat/socket';
 
 // ─────────────────────────────────────────────────────────────────────────
 // Schemas
@@ -317,8 +318,8 @@ export const updateApplicantStatus = asyncHandler(async (req: AuthRequest, res: 
   await application.save();
   await recomputeShortlistedCount(application.job);
 
-  // In-app notification for the seeker.
-  await Notification.create({
+  // In-app notification + live banner for the seeker.
+  await notifyUser({
     user: application.user,
     role: 'seeker',
     type: 'application_status',
@@ -329,6 +330,14 @@ export const updateApplicantStatus = asyncHandler(async (req: AuthRequest, res: 
       jobId: application.job.toString(),
       status,
     },
+  });
+
+  // Dedicated event so the seeker's applications screen can update the
+  // single row without a full refetch.
+  emitToUser(application.user.toString(), 'application:status', {
+    applicationId: application._id.toString(),
+    jobId: application.job.toString(),
+    status,
   });
 
   res.json({

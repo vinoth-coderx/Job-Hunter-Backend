@@ -4,10 +4,10 @@ import mongoose from 'mongoose';
 import { Interview } from '../models/Interview';
 import { AppliedJob } from '../models/AppliedJob';
 import { HirerProfile } from '../models/HirerProfile';
-import { Notification } from '../models/Notification';
 import { asyncHandler } from '../utils/asyncHandler';
 import { ApiError } from '../utils/ApiError';
 import { AuthRequest } from '../types';
+import { notifyUser } from '../services/notification/notify.service';
 
 const isObjectId = (s: string) => /^[a-f0-9]{24}$/i.test(s);
 
@@ -137,7 +137,7 @@ export const scheduleInterview = asyncHandler(async (req: AuthRequest, res: Resp
 
   // Notify the candidate.
   try {
-    await Notification.create({
+    await notifyUser({
       user: application.user,
       role: 'seeker',
       type: 'interview_scheduled',
@@ -222,7 +222,7 @@ export const updateInterview = asyncHandler(async (req: AuthRequest, res: Respon
 
   // Notify candidate of any change.
   try {
-    await Notification.create({
+    await notifyUser({
       user: interview.seekerUser,
       role: 'seeker',
       type: 'interview_scheduled',

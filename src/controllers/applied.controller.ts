@@ -2,8 +2,9 @@ import { Response } from 'express';
 import { z } from 'zod';
 import { Job } from '../models/Job';
 import { AppliedJob } from '../models/AppliedJob';
-import { Notification } from '../models/Notification';
 import { HirerProfile } from '../models/HirerProfile';
+import { notifyUser } from '../services/notification/notify.service';
+import { emitToUser } from '../services/chat/socket';
 import { asyncHandler } from '../utils/asyncHandler';
 import { ApiError } from '../utils/ApiError';
 import { AuthRequest } from '../types';
@@ -60,16 +61,53 @@ export const applyToJob = asyncHandler(async (req: AuthRequest, res: Response) =
   const applied = await AppliedJob.create({
     user: req.user._id,
     job: job._id,
+    hirerProfile: job.hirerProfile,
     jobSnapshot: {
       title: job.title,
       company: job.company,
       location: job.location,
       url: job.url,
     },
+    applyType: job.isNative ? 'one_click' : 'external_manual',
+    source: job.isNative ? 'native' : (job.source || 'other'),
     notes,
     matchScore: score,
     status: 'applied',
+    statusHistory: [
+      { status: 'applied', changedAt: new Date(), changedBy: req.user._id },
+    ],
   });
+
+  if (job.isNative) {
+    await Job.updateOne({ _id: job._id }, { $inc: { applicationsCount: 1 } });
+  }
+
+  if (job.hirerProfile) {
+    const hirer = await HirerProfile.findById(job.hirerProfile).select('user').lean();
+    if (hirer?.user) {
+      try {
+        await notifyUser({
+          user: hirer.user,
+          role: 'hirer',
+          type: 'new_applicant',
+          title: 'New applicant',
+          body: `${user?.profile.fullName ?? 'A candidate'} applied to "${job.title}"`,
+          data: {
+            applicationId: applied._id.toString(),
+            jobId: job._id.toString(),
+            matchScore: score,
+          },
+        });
+        emitToUser(hirer.user.toString(), 'applicant:new', {
+          applicationId: applied._id.toString(),
+          jobId: job._id.toString(),
+          matchScore: score,
+        });
+      } catch {
+        // best-effort
+      }
+    }
+  }
 
   res.status(201).json({ success: true, message: 'Marked as applied', data: applied });
 });
@@ -154,7 +192,7 @@ export const quickApply = asyncHandler(async (req: AuthRequest, res: Response) =
     const hirer = await HirerProfile.findById(job.hirerProfile).select('user').lean();
     if (hirer?.user) {
       try {
-        await Notification.create({
+        await notifyUser({
           user: hirer.user,
           role: 'hirer',
           type: 'new_applicant',
@@ -165,6 +203,13 @@ export const quickApply = asyncHandler(async (req: AuthRequest, res: Response) =
             jobId: job._id.toString(),
             matchScore: score,
           },
+        });
+        // Live signal so the kanban / applicants list can prepend the new
+        // row instead of waiting for the hirer to pull-to-refresh.
+        emitToUser(hirer.user.toString(), 'applicant:new', {
+          applicationId: applied._id.toString(),
+          jobId: job._id.toString(),
+          matchScore: score,
         });
       } catch {
         // best-effort

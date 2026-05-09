@@ -16,12 +16,37 @@ import { logger } from '../utils/logger';
 
 const BASE = 'https://api.razorpay.com';
 
-const requireKeys = (): { keyId: string; keySecret: string } => {
-  if (!env.RAZORPAY_KEY_ID || !env.RAZORPAY_KEY_SECRET) {
-    throw ApiError.internal('Razorpay keys not configured (set RAZORPAY_KEY_ID, RAZORPAY_KEY_SECRET)');
+export type RazorpayMode = 'test' | 'live';
+
+/**
+ * Resolve which Razorpay credential set to use. The hard rule:
+ *   - In `NODE_ENV=production`, we ALWAYS use live, regardless of what the
+ *     client asks for. A release-build user cannot self-downgrade into test
+ *     mode by spoofing a request — debug-mode bypass only works against a
+ *     non-production backend (local/staging).
+ *   - Otherwise (dev/staging), honor the requested mode if its keys are
+ *     configured; fall back to live with a warning if not.
+ */
+export const resolveRazorpayMode = (requested: RazorpayMode | undefined): RazorpayMode => {
+  if (env.NODE_ENV === 'production') return 'live';
+  if (requested === 'test' && env.RAZORPAY_TEST_KEY_ID && env.RAZORPAY_TEST_KEY_SECRET) {
+    return 'test';
   }
-  return { keyId: env.RAZORPAY_KEY_ID, keySecret: env.RAZORPAY_KEY_SECRET };
+  return 'live';
 };
+
+const requireKeys = (mode: RazorpayMode): { keyId: string; keySecret: string } => {
+  const keyId = mode === 'test' ? env.RAZORPAY_TEST_KEY_ID : env.RAZORPAY_KEY_ID;
+  const keySecret = mode === 'test' ? env.RAZORPAY_TEST_KEY_SECRET : env.RAZORPAY_KEY_SECRET;
+  if (!keyId || !keySecret) {
+    throw ApiError.internal(
+      `Razorpay ${mode} keys not configured (set RAZORPAY_${mode === 'test' ? 'TEST_' : ''}KEY_ID, RAZORPAY_${mode === 'test' ? 'TEST_' : ''}KEY_SECRET)`,
+    );
+  }
+  return { keyId, keySecret };
+};
+
+export const getRazorpayKeyId = (mode: RazorpayMode): string => requireKeys(mode).keyId;
 
 export interface RazorpayOrder {
   id: string;
@@ -40,8 +65,9 @@ export const createRazorpayOrder = async (params: {
   currency?: string;
   receipt?: string;
   notes?: Record<string, string>;
+  mode: RazorpayMode;
 }): Promise<RazorpayOrder> => {
-  const { keyId, keySecret } = requireKeys();
+  const { keyId, keySecret } = requireKeys(params.mode);
   const { amountPaise, currency = 'INR', receipt, notes } = params;
 
   if (amountPaise < 100) {
@@ -81,6 +107,69 @@ export const createRazorpayOrder = async (params: {
 };
 
 /**
+ * Fetch an order from Razorpay. Used to re-derive trusted tier/userId/amount
+ * from server-set `notes` rather than trusting the client.
+ */
+export const fetchRazorpayOrder = async (
+  orderId: string,
+  mode: RazorpayMode,
+): Promise<RazorpayOrder & { notes?: Record<string, string> }> => {
+  const { keyId, keySecret } = requireKeys(mode);
+  try {
+    const res = await axios.get(`${BASE}/v1/orders/${orderId}`, {
+      auth: { username: keyId, password: keySecret },
+      timeout: 12_000,
+    });
+    return res.data;
+  } catch (err) {
+    if (axios.isAxiosError(err)) {
+      logger.error('Razorpay fetchOrder failed', err.response?.data ?? err.message);
+      throw ApiError.badRequest('Could not fetch Razorpay order');
+    }
+    throw err;
+  }
+};
+
+export interface RazorpayPayment {
+  id: string;
+  entity: 'payment';
+  amount: number;
+  currency: string;
+  status: 'created' | 'authorized' | 'captured' | 'refunded' | 'failed';
+  order_id: string;
+  method: string;
+  captured: boolean;
+  email?: string;
+  contact?: string;
+  notes?: Record<string, string>;
+  created_at: number;
+}
+
+/**
+ * Fetch a payment from Razorpay. Used inside the webhook handler to
+ * authoritatively check status === 'captured' before activating a sub.
+ */
+export const fetchRazorpayPayment = async (
+  paymentId: string,
+  mode: RazorpayMode,
+): Promise<RazorpayPayment> => {
+  const { keyId, keySecret } = requireKeys(mode);
+  try {
+    const res = await axios.get<RazorpayPayment>(`${BASE}/v1/payments/${paymentId}`, {
+      auth: { username: keyId, password: keySecret },
+      timeout: 12_000,
+    });
+    return res.data;
+  } catch (err) {
+    if (axios.isAxiosError(err)) {
+      logger.error('Razorpay fetchPayment failed', err.response?.data ?? err.message);
+      throw ApiError.badRequest('Could not fetch Razorpay payment');
+    }
+    throw err;
+  }
+};
+
+/**
  * Confirms that a payment really came from Razorpay using their HMAC
  * scheme. Never trust client-supplied success without this check.
  */
@@ -88,8 +177,9 @@ export const verifyPaymentSignature = (params: {
   orderId: string;
   paymentId: string;
   signature: string;
+  mode: RazorpayMode;
 }): boolean => {
-  const { keySecret } = requireKeys();
+  const { keySecret } = requireKeys(params.mode);
   const expected = crypto
     .createHmac('sha256', keySecret)
     .update(`${params.orderId}|${params.paymentId}`)

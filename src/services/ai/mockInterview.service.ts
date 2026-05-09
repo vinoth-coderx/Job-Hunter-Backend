@@ -1,7 +1,11 @@
 import Anthropic from '@anthropic-ai/sdk';
 import { env } from '../../config/env';
 import { logger } from '../../utils/logger';
-import { IMockInterviewTurn, MockInterviewType } from '../../models/MockInterview';
+import {
+  ICandidateProfileSnapshot,
+  IMockInterviewTurn,
+  MockInterviewType,
+} from '../../models/MockInterview';
 
 const client = env.ANTHROPIC_API_KEY
   ? new Anthropic({ apiKey: env.ANTHROPIC_API_KEY })
@@ -23,7 +27,36 @@ interface NextQuestionResult {
   question: string;
   feedback?: IMockInterviewTurn['feedback'];
   shouldFinish: boolean;
+  /// True when the candidate's last answer didn't address the question
+  /// at all (off-topic, gibberish, "I don't know" with zero substance).
+  /// The controller uses this to NOT advance the question counter and
+  /// re-ask the same question rather than wasting a slot.
+  answerWasIrrelevant?: boolean;
 }
+
+/// Render the candidate profile snapshot into a compact prompt block.
+/// Skips empty fields so the model isn't tempted to invent details. The
+/// resume excerpt is hard-capped to keep token use predictable.
+const renderCandidateProfile = (p?: ICandidateProfileSnapshot): string => {
+  if (!p) return '';
+  const lines: string[] = [];
+  if (p.fullName) lines.push(`Name: ${p.fullName}`);
+  if (p.headline) lines.push(`Headline: ${p.headline}`);
+  if (typeof p.experienceYears === 'number') {
+    lines.push(`Experience: ${p.experienceYears} years`);
+  }
+  if (p.skills && p.skills.length) {
+    lines.push(`Skills: ${p.skills.slice(0, 25).join(', ')}`);
+  }
+  if (p.preferredRoles && p.preferredRoles.length) {
+    lines.push(`Target roles: ${p.preferredRoles.slice(0, 5).join(', ')}`);
+  }
+  if (p.resumeExcerpt) {
+    lines.push(`Resume excerpt:\n${p.resumeExcerpt.slice(0, 1500)}`);
+  }
+  if (lines.length === 0) return '';
+  return `\nCandidate profile (use this to ground every question — don't ask things the candidate hasn't claimed any familiarity with, and DO probe specifics from their stated skills/experience):\n${lines.join('\n')}\n`;
+};
 
 /**
  * Decide what the interviewer says next. Given the conversation so far,
@@ -38,8 +71,10 @@ export const nextInterviewerTurn = async (params: {
   interviewType: MockInterviewType;
   turns: IMockInterviewTurn[];
   questionsTarget: number;
+  candidateProfile?: ICandidateProfileSnapshot;
 }): Promise<NextQuestionResult> => {
-  const { role, interviewType, turns, questionsTarget } = params;
+  const { role, interviewType, turns, questionsTarget, candidateProfile } =
+    params;
   const questionsAsked = turns.filter((t) => t.role === 'interviewer').length;
 
   if (!client) {
@@ -53,7 +88,7 @@ export const nextInterviewerTurn = async (params: {
   const system = `${SYSTEM_BY_TYPE[interviewType]}
 
 You are interviewing for: ${role}.
-
+${renderCandidateProfile(candidateProfile)}
 Output strict JSON:
 {
   "question": "Your next interview question (one paragraph, no numbering).",
@@ -63,7 +98,8 @@ Output strict JSON:
     "communication": 0-100,
     "suggestion": "1-sentence improvement tip"
   },
-  "shouldFinish": false
+  "shouldFinish": false,
+  "answerWasIrrelevant": false              // TRUE when the candidate's answer was completely off-topic, gibberish, or zero-substance — see rule below
 }
 
 Rules:
@@ -72,7 +108,8 @@ Rules:
 - If asked >= ${questionsTarget} OR the candidate is clearly cooked, set shouldFinish=true and ask a final wrap-up.
 - Probe weak answers; don't repeat the same theme twice in a row.
 - Don't include feedback on the very first turn (no answer yet).
-- Never output multiple questions per turn.`;
+- Never output multiple questions per turn.
+- Set "answerWasIrrelevant": true when the answer is completely unrelated to the question (e.g. asked about React state management, candidate replied "what's the weather?"), gibberish, or just "idk/no" with zero attempt. When TRUE: also set "question" to a short polite re-ask of the SAME question (e.g. "Let's stay on the previous question — could you address it directly?"). A weak-but-relevant answer is NOT irrelevant; just give low feedback scores.`;
 
   const prompt = transcript.length === 0
     ? 'Open the interview now.'
@@ -99,11 +136,13 @@ Rules:
         suggestion?: string;
       };
       shouldFinish?: boolean;
+      answerWasIrrelevant?: boolean;
     };
     const question = String(parsed.question ?? '').trim();
     if (!question) {
       return fallbackTurn(role, interviewType, questionsAsked, questionsTarget);
     }
+    const irrelevant = !!parsed.answerWasIrrelevant;
     return {
       question,
       feedback:
@@ -118,8 +157,12 @@ Rules:
                   : undefined,
             }
           : undefined,
-      shouldFinish:
-        !!parsed.shouldFinish || questionsAsked + 1 >= questionsTarget,
+      // An irrelevant answer never finishes the interview — we want
+      // the candidate to actually attempt the question first.
+      shouldFinish: irrelevant
+        ? false
+        : !!parsed.shouldFinish || questionsAsked + 1 >= questionsTarget,
+      answerWasIrrelevant: irrelevant,
     };
   } catch (err) {
     logger.warn(`mockInterview LLM failed: ${(err as Error).message}`);
@@ -190,8 +233,9 @@ export const summariseInterview = async (params: {
   role: string;
   interviewType: MockInterviewType;
   turns: IMockInterviewTurn[];
+  candidateProfile?: ICandidateProfileSnapshot;
 }): Promise<FinalSummaryResult> => {
-  const { role, interviewType, turns } = params;
+  const { role, interviewType, turns, candidateProfile } = params;
 
   // Heuristic from per-answer scores when LLM is unavailable.
   const heuristic = (): FinalSummaryResult => {
@@ -225,7 +269,11 @@ export const summariseInterview = async (params: {
     .map((t) => `${t.role === 'interviewer' ? 'Q' : 'A'}: ${t.text}`)
     .join('\n');
 
-  const system = `Score this mock ${interviewType} interview for a ${role} candidate. Output strict JSON:
+  const system = `Score this mock ${interviewType} interview for a ${role} candidate.
+${renderCandidateProfile(candidateProfile)}
+When scoring, weigh answers against the candidate's stated experience level — penalise vague answers more harshly for senior candidates than juniors.
+
+Output strict JSON:
 {"finalScore": 0-100, "finalSummary": "3-5 sentences. Lead with biggest strength, then biggest gap, then concrete next step. No fluff."}`;
 
   try {

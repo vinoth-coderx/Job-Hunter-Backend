@@ -15,11 +15,27 @@ export interface IMockInterviewTurn {
   at: Date;
 }
 
+/// Snapshot of the candidate's profile at the moment the session was
+/// started. Lets the AI ground every question in the candidate's actual
+/// skills/experience/headline so it doesn't ask the same generic things
+/// to every user. Frozen at start so a profile edit mid-interview doesn't
+/// retroactively change the prompt context.
+export interface ICandidateProfileSnapshot {
+  fullName?: string;
+  headline?: string;
+  experienceYears?: number;
+  skills?: string[];
+  preferredRoles?: string[];
+  resumeExcerpt?: string;
+}
+
 export interface IMockInterview extends Document {
   _id: mongoose.Types.ObjectId;
   user: mongoose.Types.ObjectId;
   role: string;
   interviewType: MockInterviewType;
+
+  candidateProfile?: ICandidateProfileSnapshot;
 
   turns: IMockInterviewTurn[];
   questionsAsked: number;
@@ -60,6 +76,14 @@ const mockInterviewSchema = new Schema<IMockInterview>(
       type: String,
       enum: ['hr', 'technical', 'behavioural', 'system_design'],
       default: 'behavioural',
+    },
+    candidateProfile: {
+      fullName: String,
+      headline: String,
+      experienceYears: Number,
+      skills: { type: [String], default: undefined },
+      preferredRoles: { type: [String], default: undefined },
+      resumeExcerpt: String,
     },
     turns: { type: [turnSchema], default: [] },
     questionsAsked: { type: Number, default: 0, min: 0 },

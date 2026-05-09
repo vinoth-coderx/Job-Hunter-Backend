@@ -4,7 +4,7 @@
   "description": "Job Hunter Backend - Aggregates jobs from Adzuna, SerpApi, RapidAPI with AI matching",
   "main": "dist/index.js",
   "scripts": {
-    "dev": "tsx watch src/index.ts",
+    "dev": "nodemon",
     "fetch:jobs": "tsx scripts/fetch-jobs.ts",
     "build": "tsc",
     "start": "node dist/index.js",
@@ -58,6 +58,7 @@
     "@types/passport": "^1.0.17",
     "@types/passport-google-oauth20": "^2.0.16",
     "@types/passport-jwt": "^4.0.1",
+    "nodemon": "^3.1.14",
     "tsx": "^4.19.2",
     "typescript": "^5.6.3"
   },

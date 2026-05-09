@@ -7,7 +7,11 @@ import { ApiError } from '../utils/ApiError';
 import { AuthRequest, SubscriptionTier } from '../types';
 import {
   AUTO_APPLY_DAILY_CAP,
+  TRIAL_DURATION_DAYS,
+  TrialState,
   cappedDailyLimit,
+  computeTrialState,
+  effectiveTier,
   isAutoApplyEligible,
 } from '../services/autoApply/limits';
 import {
@@ -89,15 +93,49 @@ export const pauseSchema = z.object({
 // Helpers
 // ─────────────────────────────────────────────────────────────────────────
 
-const requireTier = async (userId: string): Promise<SubscriptionTier> => {
-  const user = await User.findById(userId).select('subscription.tier').lean();
+interface TierContext {
+  /// What the user's account is paying for (free / weekly / monthly /
+  /// yearly). Persisted, not affected by the trial.
+  rawTier: SubscriptionTier;
+  /// What the user gets *right now* — may be bumped to monthly by an
+  /// active trial. All gating decisions should use this.
+  tier: SubscriptionTier;
+  trial: TrialState;
+}
+
+const requireTier = async (userId: string): Promise<TierContext> => {
+  const user = await User.findById(userId).select('subscription').lean();
   if (!user) throw ApiError.notFound('User not found');
-  return (user.subscription?.tier ?? 'free') as SubscriptionTier;
+  const rawTier = (user.subscription?.tier ?? 'free') as SubscriptionTier;
+  const trial = computeTrialState(user.subscription);
+  return { rawTier, tier: effectiveTier(rawTier, trial), trial };
+};
+
+/// Idempotently start the auto-apply free trial for users who haven't
+/// used it yet. Called from the first GET /settings — that's the moment
+/// the user lands on the auto-apply screen, so the timer starts when
+/// they actually see the feature, not at signup.
+const ensureTrialStarted = async (userId: string): Promise<TierContext> => {
+  const ctx = await requireTier(userId);
+  if (ctx.rawTier === 'free' && !ctx.trial.used) {
+    const now = new Date();
+    await User.updateOne(
+      { _id: userId },
+      {
+        $set: {
+          'subscription.trialActivatedAt': now,
+          'subscription.trialUsed': true,
+        },
+      },
+    );
+    return requireTier(userId);
+  }
+  return ctx;
 };
 
 const sanitiseSettings = (
   s: IAutoApplySettings,
-  tier: SubscriptionTier,
+  ctx: TierContext,
 ) => ({
   id: s._id.toString(),
   isEnabled: s.isEnabled,
@@ -114,9 +152,15 @@ const sanitiseSettings = (
   totalAutoApplied: s.totalAutoApplied,
   lastRunAt: s.lastRunAt,
   // Plan caps surface to the client so the UI can show ceilings.
-  tier,
-  planCap: AUTO_APPLY_DAILY_CAP[tier],
-  eligible: isAutoApplyEligible(tier),
+  tier: ctx.tier,
+  planCap: AUTO_APPLY_DAILY_CAP[ctx.tier],
+  eligible: isAutoApplyEligible(ctx.tier),
+  trial: {
+    active: ctx.trial.active,
+    used: ctx.trial.used,
+    endsAt: ctx.trial.endsAt,
+    durationDays: TRIAL_DURATION_DAYS,
+  },
 });
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -125,7 +169,10 @@ const sanitiseSettings = (
 
 export const getSettings = asyncHandler(async (req: AuthRequest, res: Response) => {
   if (!req.user) throw ApiError.unauthorized();
-  const tier = await requireTier(req.user.id);
+  // First settings fetch auto-activates the free trial — that's the
+  // moment the user enters the auto-apply flow, so the 7-day timer
+  // starts when the feature actually becomes visible to them.
+  const ctx = await ensureTrialStarted(req.user.id);
 
   let settings = await AutoApplySettings.findOne({ user: req.user._id });
   if (!settings) {
@@ -133,20 +180,20 @@ export const getSettings = asyncHandler(async (req: AuthRequest, res: Response) 
       user: req.user._id,
       // Start disabled; user opts in.
       isEnabled: false,
-      dailyLimit: Math.max(1, AUTO_APPLY_DAILY_CAP[tier] || 10),
+      dailyLimit: Math.max(1, AUTO_APPLY_DAILY_CAP[ctx.tier] || 10),
     });
   }
 
-  res.json({ success: true, data: sanitiseSettings(settings, tier) });
+  res.json({ success: true, data: sanitiseSettings(settings, ctx) });
 });
 
 export const updateSettings = asyncHandler(async (req: AuthRequest, res: Response) => {
   if (!req.user) throw ApiError.unauthorized();
-  const tier = await requireTier(req.user.id);
+  const ctx = await requireTier(req.user.id);
   const body = req.body as z.infer<typeof updateSettingsSchema>['body'];
 
   // Enabling auto-apply requires an eligible tier.
-  if (body.isEnabled === true && !isAutoApplyEligible(tier)) {
+  if (body.isEnabled === true && !isAutoApplyEligible(ctx.tier)) {
     throw ApiError.forbidden(
       'Auto-Apply requires a Monthly or Yearly subscription. Upgrade to enable.',
     );
@@ -156,7 +203,7 @@ export const updateSettings = asyncHandler(async (req: AuthRequest, res: Respons
   if (!settings) {
     settings = await AutoApplySettings.create({
       user: req.user._id,
-      dailyLimit: Math.max(1, AUTO_APPLY_DAILY_CAP[tier] || 10),
+      dailyLimit: Math.max(1, AUTO_APPLY_DAILY_CAP[ctx.tier] || 10),
     });
   }
 
@@ -164,7 +211,7 @@ export const updateSettings = asyncHandler(async (req: AuthRequest, res: Respons
   if (body.runTime !== undefined) settings.runTime = body.runTime;
   if (body.runDays !== undefined) settings.runDays = body.runDays;
   if (body.dailyLimit !== undefined) {
-    settings.dailyLimit = cappedDailyLimit(body.dailyLimit, tier);
+    settings.dailyLimit = cappedDailyLimit(body.dailyLimit, ctx.tier);
   }
   if (body.preferences) {
     settings.preferences = {
@@ -194,12 +241,12 @@ export const updateSettings = asyncHandler(async (req: AuthRequest, res: Respons
   }
 
   await settings.save();
-  res.json({ success: true, data: sanitiseSettings(settings, tier) });
+  res.json({ success: true, data: sanitiseSettings(settings, ctx) });
 });
 
 export const pauseAutoApply = asyncHandler(async (req: AuthRequest, res: Response) => {
   if (!req.user) throw ApiError.unauthorized();
-  const tier = await requireTier(req.user.id);
+  const ctx = await requireTier(req.user.id);
   const { days, reason } = req.body as z.infer<typeof pauseSchema>['body'];
 
   const settings = await AutoApplySettings.findOne({ user: req.user._id });
@@ -214,17 +261,17 @@ export const pauseAutoApply = asyncHandler(async (req: AuthRequest, res: Respons
   if (reason) settings.pauseReason = reason;
 
   await settings.save();
-  res.json({ success: true, data: sanitiseSettings(settings, tier) });
+  res.json({ success: true, data: sanitiseSettings(settings, ctx) });
 });
 
 export const resumeAutoApply = asyncHandler(async (req: AuthRequest, res: Response) => {
   if (!req.user) throw ApiError.unauthorized();
-  const tier = await requireTier(req.user.id);
+  const ctx = await requireTier(req.user.id);
 
   const settings = await AutoApplySettings.findOne({ user: req.user._id });
   if (!settings) throw ApiError.notFound('Auto-apply not configured');
 
-  if (!isAutoApplyEligible(tier)) {
+  if (!isAutoApplyEligible(ctx.tier)) {
     throw ApiError.forbidden(
       'Auto-Apply requires a Monthly or Yearly subscription.',
     );
@@ -234,7 +281,7 @@ export const resumeAutoApply = asyncHandler(async (req: AuthRequest, res: Respon
   settings.pauseUntil = undefined;
   settings.pauseReason = undefined;
   await settings.save();
-  res.json({ success: true, data: sanitiseSettings(settings, tier) });
+  res.json({ success: true, data: sanitiseSettings(settings, ctx) });
 });
 
 export const approveSchema = z.object({
@@ -397,8 +444,8 @@ export const todaySummary = asyncHandler(async (req: AuthRequest, res: Response)
 
 export const runNow = asyncHandler(async (req: AuthRequest, res: Response) => {
   if (!req.user) throw ApiError.unauthorized();
-  const tier = await requireTier(req.user.id);
-  if (!isAutoApplyEligible(tier)) {
+  const ctx = await requireTier(req.user.id);
+  if (!isAutoApplyEligible(ctx.tier)) {
     throw ApiError.forbidden('Auto-Apply requires a paid plan');
   }
 

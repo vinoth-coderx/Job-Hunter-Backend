@@ -47,13 +47,15 @@ const ensureParticipant = async (
   return conv;
 };
 
+/// Returns the peer participant. For self-conversations (notes-to-self,
+/// single-account testing) where the user is the sole participant, falls
+/// back to the user themselves so message routing still works.
 const otherParticipant = (
   conv: { participants: mongoose.Types.ObjectId[] },
   me: mongoose.Types.ObjectId,
 ): mongoose.Types.ObjectId => {
   const other = conv.participants.find((p) => p.toString() !== me.toString());
-  if (!other) throw ApiError.internal('Conversation has no other participant');
-  return other;
+  return other ?? me;
 };
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -101,32 +103,62 @@ export const startConversation = asyncHandler(async (req: AuthRequest, res: Resp
   >['body'];
 
   if (!isObjectId(otherUserId)) throw ApiError.badRequest('Invalid otherUserId');
-  if (otherUserId === req.user.id) {
-    throw ApiError.badRequest('Cannot start a conversation with yourself');
-  }
+  const isSelf = otherUserId === req.user.id;
   const other = await User.findById(otherUserId).select('_id').lean();
   if (!other) throw ApiError.notFound('User not found');
 
-  // Reuse existing 1:1 conversation if present.
-  const existing = await Conversation.findOne({
-    participants: { $all: [req.user._id, other._id], $size: 2 },
+  // For self-conversations the participant array stores the user once so
+  // it doesn't collide with a real 1:1 conversation in lookups.
+  const participantIds = isSelf
+    ? [req.user._id]
+    : [req.user._id, other._id];
+
+  const existingFilter = isSelf
+    ? { participants: { $all: [req.user._id], $size: 1 } }
+    : { participants: { $all: [req.user._id, other._id], $size: 2 } };
+
+  const existing = await Conversation.findOne(existingFilter).populate({
+    path: 'participants',
+    select: 'email profile.fullName profile.avatar',
   });
   if (existing) {
-    res.json({ success: true, data: existing });
+    res.json({
+      success: true,
+      data: {
+        ...existing.toObject(),
+        unreadCount:
+          (existing.unreadCount as unknown as Record<string, number>)?.[
+            req.user.id
+          ] ?? 0,
+      },
+    });
     return;
   }
 
-  const conv = await Conversation.create({
-    participants: [req.user._id, other._id],
+  const unreadInit = new Map<string, number>([[req.user.id, 0]]);
+  if (!isSelf) unreadInit.set(otherUserId, 0);
+
+  const created = await Conversation.create({
+    participants: participantIds,
     application: applicationId && isObjectId(applicationId) ? applicationId : undefined,
     job: jobId && isObjectId(jobId) ? jobId : undefined,
-    unreadCount: new Map<string, number>([
-      [req.user.id, 0],
-      [otherUserId, 0],
-    ]),
+    unreadCount: unreadInit,
   });
 
-  res.status(201).json({ success: true, data: conv });
+  // Populate participants so the client can render the peer's name and
+  // avatar immediately without a follow-up fetch.
+  const conv = await Conversation.findById(created._id).populate({
+    path: 'participants',
+    select: 'email profile.fullName profile.avatar',
+  });
+
+  res.status(201).json({
+    success: true,
+    data: {
+      ...(conv ?? created).toObject(),
+      unreadCount: 0,
+    },
+  });
 });
 
 export const listMessages = asyncHandler(async (req: AuthRequest, res: Response) => {
@@ -179,16 +211,19 @@ export const sendMessage = asyncHandler(async (req: AuthRequest, res: Response) 
   conv.unreadCount.set(receiver.toString(), prev + 1);
   await conv.save();
 
-  // Real-time fan-out — non-blocking, best-effort.
+  // Real-time fan-out — non-blocking, best-effort. For self-chat the
+  // sender and receiver are the same user, so emit only once.
   try {
-    emitToUser(receiver.toString(), 'message:new', {
-      conversationId: conv._id.toString(),
-      message,
-    });
     emitToUser(req.user.id, 'message:new', {
       conversationId: conv._id.toString(),
       message,
     });
+    if (receiver.toString() !== req.user.id) {
+      emitToUser(receiver.toString(), 'message:new', {
+        conversationId: conv._id.toString(),
+        message,
+      });
+    }
   } catch {
     // socket layer is optional — REST clients still get the response.
   }
@@ -208,13 +243,16 @@ export const markRead = asyncHandler(async (req: AuthRequest, res: Response) => 
   conv.unreadCount.set(req.user.id, 0);
   await conv.save();
 
-  // Notify the other participant their messages have been read.
+  // Notify the other participant their messages have been read. Skip for
+  // self-chat — the only participant is already the reader.
   try {
     const other = otherParticipant(conv, req.user._id!);
-    emitToUser(other.toString(), 'read:receipt', {
-      conversationId: conv._id.toString(),
-      readerUserId: req.user.id,
-    });
+    if (other.toString() !== req.user.id) {
+      emitToUser(other.toString(), 'read:receipt', {
+        conversationId: conv._id.toString(),
+        readerUserId: req.user.id,
+      });
+    }
   } catch {
     // ignore
   }

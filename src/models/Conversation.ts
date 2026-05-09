@@ -26,8 +26,9 @@ const conversationSchema = new Schema<IConversation>(
     participants: {
       type: [{ type: Schema.Types.ObjectId, ref: 'User', required: true }],
       validate: {
-        validator: (arr: unknown[]) => arr.length === 2,
-        message: 'A conversation must have exactly 2 participants',
+        // Allow 1 (notes-to-self / single-account testing) or 2 participants.
+        validator: (arr: unknown[]) => arr.length === 1 || arr.length === 2,
+        message: 'A conversation must have 1 or 2 participants',
       },
       index: true,
     },

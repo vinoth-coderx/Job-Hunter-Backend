@@ -7,7 +7,11 @@ import { User, IUser } from '../../models/User';
 import { Notification } from '../../models/Notification';
 import { logger } from '../../utils/logger';
 import { scoreForAutoApply } from './scorer';
-import { isAutoApplyEligible } from './limits';
+import {
+  computeTrialState,
+  effectiveTier,
+  isAutoApplyEligible,
+} from './limits';
 import { SubscriptionTier } from '../../types';
 import { generateCoverLetter } from '../ai/coverLetter.service';
 
@@ -44,7 +48,11 @@ export const runAutoApplyForUser = async (
   const settings = await AutoApplySettings.findOne({ user: user._id });
   if (!settings) return null;
 
-  const tier = (user.subscription?.tier ?? 'free') as SubscriptionTier;
+  // Trial users get monthly-tier privileges in the runner too — without
+  // this the cron would happily skip them while the controller/UI shows
+  // them as eligible, which would be a confusing dead-end.
+  const rawTier = (user.subscription?.tier ?? 'free') as SubscriptionTier;
+  const tier = effectiveTier(rawTier, computeTrialState(user.subscription));
   if (!isAutoApplyEligible(tier)) return null;
   if (!settings.isEnabled) return null;
   if (

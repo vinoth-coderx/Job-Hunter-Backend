@@ -54,9 +54,18 @@ const envSchema = z.object({
   SMTP_PASS: z.string().optional(),
   EMAIL_FROM: z.string().default('Job Hunter <noreply@jobhunter.com>'),
 
+  // Live keys — used in production AND when debug clients haven't been
+  // explicitly opted into test mode. Treated as the default.
   RAZORPAY_KEY_ID: z.string().optional(),
   RAZORPAY_KEY_SECRET: z.string().optional(),
   RAZORPAY_WEBHOOK_SECRET: z.string().optional(),
+  // Test keys — used when a debug-build client requests `mode: 'test'` and
+  // NODE_ENV is not 'production'. Production deployments ignore this even
+  // if a client asks, so a release-build user can't downgrade themselves
+  // into test mode and bypass real billing.
+  RAZORPAY_TEST_KEY_ID: z.string().optional(),
+  RAZORPAY_TEST_KEY_SECRET: z.string().optional(),
+  RAZORPAY_TEST_WEBHOOK_SECRET: z.string().optional(),
   STRIPE_SECRET_KEY: z.string().optional(),
   STRIPE_WEBHOOK_SECRET: z.string().optional(),
 

@@ -7,6 +7,7 @@ import { connectRedis, disconnectRedis } from './config/redis';
 import { startJobScraperCron, stopJobScraperCron } from './jobs/jobScraper.cron';
 import { startAlertCheckerCron, stopAlertCheckerCron } from './jobs/alertChecker.cron';
 import { startAutoApplyCron, stopAutoApplyCron } from './jobs/autoApply.cron';
+import { backfillApplicantHirerLinks } from './jobs/backfillApplicantHirer';
 import { initSocket, closeSocket } from './services/chat/socket';
 import { puppeteerScraper } from './services/scrapers';
 import { logger } from './utils/logger';
@@ -41,6 +42,7 @@ const start = async (): Promise<void> => {
       startJobScraperCron();
       startAlertCheckerCron();
       startAutoApplyCron();
+      void backfillApplicantHirerLinks();
     });
   } catch (err) {
     logger.error('Failed to start server', err);

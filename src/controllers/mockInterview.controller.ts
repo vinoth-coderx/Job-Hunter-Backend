@@ -1,6 +1,11 @@
 import { Response } from 'express';
 import { z } from 'zod';
-import { MockInterview, MockInterviewType } from '../models/MockInterview';
+import {
+  ICandidateProfileSnapshot,
+  MockInterview,
+  MockInterviewType,
+} from '../models/MockInterview';
+import { User } from '../models/User';
 import { asyncHandler } from '../utils/asyncHandler';
 import { ApiError } from '../utils/ApiError';
 import { AuthRequest } from '../types';
@@ -8,6 +13,28 @@ import {
   nextInterviewerTurn,
   summariseInterview,
 } from '../services/ai/mockInterview.service';
+
+/// Build the snapshot we hand to the AI so its questions are grounded in
+/// who the candidate actually is — not generic "tell me about yourself"
+/// for everyone. Truncates the resume excerpt aggressively because the
+/// model only needs signal, not the full document.
+const buildCandidateSnapshot = async (
+  userId: string,
+): Promise<ICandidateProfileSnapshot | undefined> => {
+  const user = await User.findById(userId)
+    .select('profile.fullName profile.headline profile.experienceYears profile.skills profile.preferredRoles profile.resumeText')
+    .lean();
+  if (!user) return undefined;
+  const p = user.profile;
+  return {
+    fullName: p.fullName,
+    headline: p.headline,
+    experienceYears: p.experienceYears,
+    skills: p.skills?.length ? p.skills : undefined,
+    preferredRoles: p.preferredRoles?.length ? p.preferredRoles : undefined,
+    resumeExcerpt: p.resumeText ? p.resumeText.slice(0, 1500) : undefined,
+  };
+};
 
 const isObjectId = (s: string) => /^[a-f0-9]{24}$/i.test(s);
 
@@ -41,10 +68,15 @@ export const startMockInterview = asyncHandler(async (req: AuthRequest, res: Res
     typeof startMockSchema
   >['body'];
 
+  // Snapshot the profile NOW so questions stay grounded in who the
+  // candidate is at session start, even if they edit their profile mid-run.
+  const candidateProfile = await buildCandidateSnapshot(req.user.id);
+
   const session = await MockInterview.create({
     user: req.user._id,
     role,
     interviewType,
+    candidateProfile,
     questionsTarget: questionsTarget ?? 6,
     turns: [],
     questionsAsked: 0,
@@ -56,6 +88,7 @@ export const startMockInterview = asyncHandler(async (req: AuthRequest, res: Res
     interviewType: interviewType as MockInterviewType,
     turns: [],
     questionsTarget: session.questionsTarget,
+    candidateProfile,
   });
 
   session.turns.push({
@@ -102,6 +135,7 @@ export const answerMockInterview = asyncHandler(
       interviewType: session.interviewType,
       turns: session.turns,
       questionsTarget: session.questionsTarget,
+      candidateProfile: session.candidateProfile,
     });
 
     // Attach feedback to the candidate's last turn (the answer we just got).
@@ -115,22 +149,33 @@ export const answerMockInterview = asyncHandler(
       }
     }
 
-    if (next.shouldFinish) {
-      // Final wrap question (asked, awaiting candidate's last word).
-      session.turns.push({
-        role: 'interviewer',
-        text: next.question,
-        at: new Date(),
+    if (next.answerWasIrrelevant) {
+      // Off-topic answer: don't push a new interviewer turn and don't
+      // burn a question slot. The AI's `question` here is a re-ask of
+      // the previous one — return it for display but keep the counter
+      // exactly where it was.
+      await session.save();
+      res.json({
+        success: true,
+        data: {
+          id: session._id.toString(),
+          questionsAsked: session.questionsAsked,
+          questionsTarget: session.questionsTarget,
+          latestFeedback: next.feedback,
+          latestQuestion: next.question,
+          shouldFinish: false,
+          answerWasIrrelevant: true,
+        },
       });
-      session.questionsAsked = (session.questionsAsked ?? 0) + 1;
-    } else {
-      session.turns.push({
-        role: 'interviewer',
-        text: next.question,
-        at: new Date(),
-      });
-      session.questionsAsked = (session.questionsAsked ?? 0) + 1;
+      return;
     }
+
+    session.turns.push({
+      role: 'interviewer',
+      text: next.question,
+      at: new Date(),
+    });
+    session.questionsAsked = (session.questionsAsked ?? 0) + 1;
 
     await session.save();
     res.json({
@@ -142,6 +187,7 @@ export const answerMockInterview = asyncHandler(
         latestFeedback: next.feedback,
         latestQuestion: next.question,
         shouldFinish: next.shouldFinish,
+        answerWasIrrelevant: false,
       },
     });
   },
@@ -167,6 +213,7 @@ export const finishMockInterview = asyncHandler(
       role: session.role,
       interviewType: session.interviewType,
       turns: session.turns,
+      candidateProfile: session.candidateProfile,
     });
     session.finalScore = finalScore;
     session.finalSummary = finalSummary;

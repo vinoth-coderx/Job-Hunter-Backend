@@ -108,7 +108,7 @@ const userSchema = new mongoose_1.Schema({
         },
         status: {
             type: String,
-            enum: ['active', 'expired', 'cancelled'],
+            enum: ['active', 'expired', 'cancelled', 'refunded'],
             default: 'active',
         },
         startDate: Date,

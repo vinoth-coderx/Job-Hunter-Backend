@@ -11,7 +11,7 @@ export interface JwtPayload {
 export type AuthRequest = Request;
 
 export type SubscriptionTier = 'free' | 'weekly' | 'monthly' | 'yearly';
-export type SubscriptionStatus = 'active' | 'expired' | 'cancelled';
+export type SubscriptionStatus = 'active' | 'expired' | 'cancelled' | 'refunded';
 export type JobSource =
   | 'native'
   | 'adzuna'

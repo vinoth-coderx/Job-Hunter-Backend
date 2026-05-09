@@ -21,6 +21,19 @@ export interface MatchResult {
 
 const cacheKey = (userId: string, jobId: string) => `match:${userId}:${jobId}`;
 
+/// Weight breakdown (caps at 100):
+///   Skills overlap        50
+///   Role title match      15
+///   Experience fit        15
+///   Location match        10
+///   Salary alignment       5
+///   Job-type preference    3
+///   Remote preference      2
+///
+/// Skills used to dominate at 70 — that pushed jobs with overlapping
+/// keywords but mismatched seniority/salary to the top, which is why
+/// "matches" felt off. Pulling skills down to 50 and giving experience +
+/// salary + remote real weight tracks how a recruiter actually ranks.
 export const heuristicMatch = (user: IUser, job: IJob): MatchResult => {
   const userSkills = (user.profile.skills || []).map((s) => s.toLowerCase());
   const jobSkills = (job.skills || []).map((s) => s.toLowerCase());
@@ -33,14 +46,33 @@ export const heuristicMatch = (user: IUser, job: IJob): MatchResult => {
 
   let score = 0;
   if (jobSkills.length > 0) {
-    score = (matched.length / jobSkills.length) * 70;
+    score = (matched.length / jobSkills.length) * 50;
   } else if (userSkills.length > 0) {
     const overlap = userSkills.filter((s) => desc.includes(s)).length;
-    score = (overlap / userSkills.length) * 70;
+    score = (overlap / userSkills.length) * 50;
   }
 
   const userRoles = (user.profile.preferredRoles || []).map((r) => r.toLowerCase());
   if (userRoles.some((r) => job.title.toLowerCase().includes(r))) score += 15;
+
+  // Experience fit — full credit when the candidate sits inside the job's
+  // band, partial when they're within 2 years on either side, zero when
+  // the gap is larger or the band is unknown. Avoids the "junior matches
+  // a staff role at 95%" failure mode.
+  const exp = user.profile.experienceYears ?? 0;
+  const expMin = job.experienceMinYears;
+  const expMax = job.experienceMaxYears;
+  if (typeof expMin === 'number' || typeof expMax === 'number') {
+    const lo = expMin ?? 0;
+    const hi = expMax ?? Math.max(lo, exp);
+    if (exp >= lo && exp <= hi) {
+      score += 15;
+    } else {
+      const gap = exp < lo ? lo - exp : exp - hi;
+      if (gap <= 2) score += 8;
+      else if (gap <= 4) score += 3;
+    }
+  }
 
   const userLocs = (user.profile.preferredLocations || []).map((l) => l.toLowerCase());
   if (
@@ -51,11 +83,35 @@ export const heuristicMatch = (user: IUser, job: IJob): MatchResult => {
     score += 10;
   }
 
+  // Salary alignment — only awards when both the candidate and the job
+  // exposed a number. Full credit if the candidate's expected min sits
+  // inside the job's range; partial when the job exceeds expectations
+  // (a positive surprise); zero when the job offers materially less.
+  const expected = user.profile.expectedSalaryMin;
+  const jobMin = job.salaryMin;
+  const jobMax = job.salaryMax;
+  if (typeof expected === 'number' && (typeof jobMin === 'number' || typeof jobMax === 'number')) {
+    const offerHi = jobMax ?? jobMin ?? 0;
+    const offerLo = jobMin ?? jobMax ?? 0;
+    if (expected <= offerHi && expected >= offerLo * 0.9) {
+      score += 5;
+    } else if (offerHi >= expected) {
+      score += 3;
+    }
+  }
+
   if (
     user.profile.preferredJobTypes?.length &&
     user.profile.preferredJobTypes.includes(job.jobType)
   ) {
-    score += 5;
+    score += 3;
+  }
+
+  if (
+    user.profile.preferredRemote?.length &&
+    user.profile.preferredRemote.includes(job.remoteType)
+  ) {
+    score += 2;
   }
 
   return {

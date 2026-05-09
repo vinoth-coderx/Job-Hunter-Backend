@@ -84,7 +84,7 @@ const subscriptionSchema = new Schema<ISubscription>(
     },
     status: {
       type: String,
-      enum: ['active', 'expired', 'cancelled'],
+      enum: ['active', 'expired', 'cancelled', 'refunded'],
       default: 'active',
       index: true,
     },
@@ -104,6 +104,10 @@ const subscriptionSchema = new Schema<ISubscription>(
 
 subscriptionSchema.index({ user: 1, status: 1 });
 subscriptionSchema.index({ endDate: 1, status: 1 });
+// Hard guarantee against duplicate activation under a race between the
+// client `/verify` call and the Razorpay webhook. `sparse` is required so
+// free-tier subs (no paymentId) don't collide on null.
+subscriptionSchema.index({ paymentId: 1 }, { unique: true, sparse: true });
 
 export const Subscription: Model<ISubscription> = mongoose.model<ISubscription>(
   'Subscription',
