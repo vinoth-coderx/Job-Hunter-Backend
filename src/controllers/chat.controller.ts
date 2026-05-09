@@ -64,20 +64,106 @@ const otherParticipant = (
 
 // Shape returned alongside the populated job. Keeping it narrow so the
 // payload doesn't balloon with the entire job document for every row.
+//
+// We pull `companyLogoUrl` directly off the job (set at post time) AND
+// nest-populate `hirerProfile.companyLogoUrl` so we can fall back to the
+// hirer's *current* logo if they uploaded one after the job was already
+// live — otherwise seekers who chat about an older job would see the
+// recruiter's initials forever even though the company has a logo now.
+interface PopulatedHirerLite {
+  _id: mongoose.Types.ObjectId;
+  companyLogoUrl?: string;
+  companyName?: string;
+}
+
 interface PopulatedJobLite {
   _id: mongoose.Types.ObjectId;
   title?: string;
   company?: string;
   companyLogoUrl?: string;
+  hirerProfile?: PopulatedHirerLite | mongoose.Types.ObjectId;
+  // Job.postedBy is the user id of the recruiter who created the
+  // listing — used to tag conversations as "hirer-side" for the
+  // viewer-role filter so a single account toggling between seeker
+  // and hirer sees a clean, role-scoped chat list.
+  postedBy?: mongoose.Types.ObjectId;
+}
+
+interface PopulatedAppliedJobLite {
+  _id: mongoose.Types.ObjectId;
+  user?: mongoose.Types.ObjectId;
 }
 
 const jobLitePopulate = {
   path: 'job',
-  select: 'title company companyLogoUrl',
+  select: 'title company companyLogoUrl hirerProfile postedBy',
+  populate: {
+    path: 'hirerProfile',
+    select: 'companyLogoUrl companyName',
+  },
 } as const;
+
+const appliedLitePopulate = {
+  path: 'application',
+  select: 'user',
+} as const;
+
+/// Decide which side of a conversation the current viewer is on. Drives
+/// the seeker-vs-hirer chat filter when one account does both jobs.
+///   - hirer  → the conversation's job was posted by this user.
+///   - seeker → linked application is the user's own apply.
+///   - default seeker — direct user-to-user chats with no job/app
+///     context default to "seeker" so they show up in the seeker tab
+///     (where general inbound messages already live).
+const resolveViewerRole = (
+  job: PopulatedJobLite | null | undefined,
+  application: PopulatedAppliedJobLite | mongoose.Types.ObjectId | null | undefined,
+  viewerId: string,
+): 'seeker' | 'hirer' => {
+  if (job?.postedBy && job.postedBy.toString() === viewerId) return 'hirer';
+  if (
+    application &&
+    typeof application === 'object' &&
+    'user' in application &&
+    (application as PopulatedAppliedJobLite).user?.toString() === viewerId
+  ) {
+    return 'seeker';
+  }
+  return 'seeker';
+};
+
+const resolveCompanyLogo = (job: PopulatedJobLite | null | undefined): string | undefined => {
+  if (!job) return undefined;
+  if (job.companyLogoUrl && job.companyLogoUrl.trim().length > 0) {
+    return job.companyLogoUrl;
+  }
+  const hp = job.hirerProfile;
+  if (hp && typeof hp === 'object' && 'companyLogoUrl' in hp) {
+    return (hp as PopulatedHirerLite).companyLogoUrl;
+  }
+  return undefined;
+};
+
+const resolveCompanyName = (job: PopulatedJobLite | null | undefined): string | undefined => {
+  if (!job) return undefined;
+  if (job.company && job.company.trim().length > 0) return job.company;
+  const hp = job.hirerProfile;
+  if (hp && typeof hp === 'object' && 'companyName' in hp) {
+    return (hp as PopulatedHirerLite).companyName;
+  }
+  return undefined;
+};
 
 export const listConversations = asyncHandler(async (req: AuthRequest, res: Response) => {
   if (!req.user) throw ApiError.unauthorized();
+
+  // Optional `?role=seeker|hirer` filter so a single account that
+  // toggles between roles sees a clean, role-scoped chat list. The
+  // server still tags every row with `viewerRole` either way, so
+  // clients without the query param can filter locally if they prefer.
+  const roleParam = typeof req.query.role === 'string' ? req.query.role : '';
+  const roleFilter: 'seeker' | 'hirer' | null =
+    roleParam === 'seeker' || roleParam === 'hirer' ? roleParam : null;
 
   const items = await Conversation.find({
     participants: req.user._id,
@@ -89,31 +175,46 @@ export const listConversations = asyncHandler(async (req: AuthRequest, res: Resp
       select: 'email profile.fullName profile.avatar',
     })
     .populate(jobLitePopulate)
+    .populate(appliedLitePopulate)
     .lean();
 
-  res.json({
-    success: true,
-    data: items.map((c) => {
-      const job = c.job as unknown as PopulatedJobLite | mongoose.Types.ObjectId | null;
-      const isPopulated = job && typeof job === 'object' && '_id' in job && 'title' in job;
-      const populated = isPopulated ? (job as PopulatedJobLite) : null;
-      return {
-        id: c._id.toString(),
-        participants: c.participants,
-        application: c.application,
-        // Surface the job id alongside the populated company branding —
-        // seeker UIs use companyLogo as the chat header avatar instead
-        // of the recruiter's personal profile picture.
-        job: populated?._id.toString() ?? job ?? null,
-        jobTitle: populated?.title,
-        companyName: populated?.company,
-        companyLogo: populated?.companyLogoUrl,
-        lastMessage: c.lastMessage,
-        unreadCount: (c.unreadCount as unknown as Record<string, number>)?.[req.user!.id] ?? 0,
-        updatedAt: c.updatedAt,
-      };
-    }),
+  const viewerId = req.user.id;
+  const enriched = items.map((c) => {
+    const job = c.job as unknown as PopulatedJobLite | mongoose.Types.ObjectId | null;
+    const isPopulated = job && typeof job === 'object' && '_id' in job && 'title' in job;
+    const populated = isPopulated ? (job as PopulatedJobLite) : null;
+    const applicationRaw = c.application as unknown as
+      | PopulatedAppliedJobLite
+      | mongoose.Types.ObjectId
+      | null
+      | undefined;
+    const viewerRole = resolveViewerRole(populated, applicationRaw, viewerId);
+    return {
+      id: c._id.toString(),
+      participants: c.participants,
+      // Keep `application` as an id for downstream callers that
+      // expect the existing shape — the populated form was only
+      // needed to compute viewerRole.
+      application:
+        applicationRaw && typeof applicationRaw === 'object' && '_id' in applicationRaw
+          ? (applicationRaw as PopulatedAppliedJobLite)._id.toString()
+          : applicationRaw ?? null,
+      job: populated?._id.toString() ?? job ?? null,
+      jobTitle: populated?.title,
+      companyName: resolveCompanyName(populated),
+      companyLogo: resolveCompanyLogo(populated),
+      lastMessage: c.lastMessage,
+      unreadCount: (c.unreadCount as unknown as Record<string, number>)?.[viewerId] ?? 0,
+      updatedAt: c.updatedAt,
+      viewerRole,
+    };
   });
+
+  const filtered = roleFilter
+    ? enriched.filter((c) => c.viewerRole === roleFilter)
+    : enriched;
+
+  res.json({ success: true, data: filtered });
 });
 
 export const getConversation = asyncHandler(async (req: AuthRequest, res: Response) => {
@@ -172,13 +273,16 @@ export const startConversation = asyncHandler(async (req: AuthRequest, res: Resp
 
   // Populate participants + job's company branding so the client can
   // render the peer's name, avatar, and (for seekers) the recruiter's
-  // company logo immediately without a follow-up fetch.
+  // company logo immediately without a follow-up fetch. Also populate
+  // the linked application so `enrichConversation` can compute
+  // `viewerRole` for newly-started threads.
   const conv = await Conversation.findById(created._id)
     .populate({
       path: 'participants',
       select: 'email profile.fullName profile.avatar',
     })
-    .populate(jobLitePopulate);
+    .populate(jobLitePopulate)
+    .populate(appliedLitePopulate);
 
   res.status(201).json({
     success: true,
@@ -205,6 +309,12 @@ const enrichConversation = (
   const isPopulated =
     job && typeof job === 'object' && '_id' in job && 'title' in job;
   const populated = isPopulated ? (job as PopulatedJobLite) : null;
+  const applicationRaw = raw.application as unknown as
+    | PopulatedAppliedJobLite
+    | mongoose.Types.ObjectId
+    | null
+    | undefined;
+  const viewerRole = resolveViewerRole(populated, applicationRaw, userId);
   const unreadMap = raw.unreadCount as
     | unknown as Record<string, number>
     | Map<string, number>
@@ -217,9 +327,14 @@ const enrichConversation = (
     ...raw,
     job: populated?._id.toString() ?? job ?? null,
     jobTitle: populated?.title,
-    companyName: populated?.company,
-    companyLogo: populated?.companyLogoUrl,
+    companyName: resolveCompanyName(populated),
+    companyLogo: resolveCompanyLogo(populated),
+    application:
+      applicationRaw && typeof applicationRaw === 'object' && '_id' in applicationRaw
+        ? (applicationRaw as PopulatedAppliedJobLite)._id.toString()
+        : applicationRaw ?? null,
     unreadCount: unread,
+    viewerRole,
   };
 };
 

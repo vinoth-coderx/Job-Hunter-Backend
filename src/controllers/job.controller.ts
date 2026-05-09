@@ -9,6 +9,7 @@ import { ApiError } from '../utils/ApiError';
 import { AuthRequest } from '../types';
 import { env } from '../config/env';
 import { matchJobsForUser } from '../services/ai/matcher.service';
+import { aiJobSearch } from '../services/ai/jobSearch.service';
 import { runJobFetchNow } from '../jobs/jobScraper.cron';
 import { buildAllJobsPayload } from '../services/jobCache.service';
 import { logger } from '../utils/logger';
@@ -318,3 +319,43 @@ export const triggerFetch = asyncHandler(async (req: AuthRequest, res: Response)
     throw ApiError.internal('Failed to trigger fetch');
   }
 });
+
+export const aiSearchSchema = z.object({
+  body: z.object({
+    query: z.string().min(1).max(500),
+    limit: z.coerce.number().min(1).max(50).optional(),
+    excludeAppliedJobs: z.boolean().optional().default(true),
+  }),
+});
+
+/// AI-powered semantic job search. Accepts a natural-language query
+/// ("senior react dev in bangalore, 15 LPA"), extracts intent via Claude,
+/// and matches across title, skills, description, responsibilities,
+/// department and company. Already-applied jobs are filtered out by
+/// default so they don't pollute the discovery surface.
+export const aiSearchJobs = asyncHandler(
+  async (req: AuthRequest, res: Response) => {
+    const { query, limit, excludeAppliedJobs } = req.body as z.infer<
+      typeof aiSearchSchema
+    >['body'];
+
+    const excludeIds = excludeAppliedJobs
+      ? (await fetchAppliedJobIds(req.user?._id)).map((id) => id.toString())
+      : [];
+
+    const result = await aiJobSearch({
+      query,
+      limit: limit ?? 30,
+      excludeJobIds: excludeIds,
+    });
+
+    res.json({
+      success: true,
+      data: result.jobs,
+      meta: {
+        intent: result.intent,
+        total: result.total,
+      },
+    });
+  },
+);

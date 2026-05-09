@@ -6,6 +6,8 @@ import {
   matchedJobs,
   triggerFetch,
   listJobsSchema,
+  aiSearchJobs,
+  aiSearchSchema,
 } from '../controllers/job.controller';
 import {
   listSavedJobs,
@@ -32,6 +34,16 @@ router.get('/matched', authenticateOrGuest, matchedJobs);
 // Saved jobs — declared before `/:id` for the same reason as above.
 router.get('/saved', authenticate, listSavedJobs);
 router.get('/saved/ids', authenticate, listSavedJobIds);
+
+// AI semantic search across title/skills/description/role. Authenticated
+// so we can exclude already-applied jobs; routes the query through Claude
+// for intent extraction and ranks by multi-field relevance.
+router.post(
+  '/ai-search',
+  authenticateOrGuest,
+  validate(aiSearchSchema),
+  aiSearchJobs,
+);
 
 router.post('/admin/fetch', authenticate, triggerFetch);
 
