@@ -4,8 +4,9 @@ exports.appliedStats = exports.deleteApplied = exports.updateApplied = exports.l
 const zod_1 = require("zod");
 const Job_1 = require("../models/Job");
 const AppliedJob_1 = require("../models/AppliedJob");
-const Notification_1 = require("../models/Notification");
 const HirerProfile_1 = require("../models/HirerProfile");
+const notify_service_1 = require("../services/notification/notify.service");
+const socket_1 = require("../services/chat/socket");
 const asyncHandler_1 = require("../utils/asyncHandler");
 const ApiError_1 = require("../utils/ApiError");
 const matcher_service_1 = require("../services/ai/matcher.service");
@@ -52,16 +53,51 @@ exports.applyToJob = (0, asyncHandler_1.asyncHandler)(async (req, res) => {
     const applied = await AppliedJob_1.AppliedJob.create({
         user: req.user._id,
         job: job._id,
+        hirerProfile: job.hirerProfile,
         jobSnapshot: {
             title: job.title,
             company: job.company,
             location: job.location,
             url: job.url,
         },
+        applyType: job.isNative ? 'one_click' : 'external_manual',
+        source: job.isNative ? 'native' : (job.source || 'other'),
         notes,
         matchScore: score,
         status: 'applied',
+        statusHistory: [
+            { status: 'applied', changedAt: new Date(), changedBy: req.user._id },
+        ],
     });
+    if (job.isNative) {
+        await Job_1.Job.updateOne({ _id: job._id }, { $inc: { applicationsCount: 1 } });
+    }
+    if (job.hirerProfile) {
+        const hirer = await HirerProfile_1.HirerProfile.findById(job.hirerProfile).select('user').lean();
+        if (hirer?.user) {
+            try {
+                await (0, notify_service_1.notifyUser)({
+                    user: hirer.user,
+                    role: 'hirer',
+                    type: 'new_applicant',
+                    title: 'New applicant',
+                    body: `${user?.profile.fullName ?? 'A candidate'} applied to "${job.title}"`,
+                    data: {
+                        applicationId: applied._id.toString(),
+                        jobId: job._id.toString(),
+                        matchScore: score,
+                    },
+                });
+                (0, socket_1.emitToUser)(hirer.user.toString(), 'applicant:new', {
+                    applicationId: applied._id.toString(),
+                    jobId: job._id.toString(),
+                    matchScore: score,
+                });
+            }
+            catch {
+            }
+        }
+    }
     res.status(201).json({ success: true, message: 'Marked as applied', data: applied });
 });
 exports.quickApply = (0, asyncHandler_1.asyncHandler)(async (req, res) => {
@@ -124,7 +160,7 @@ exports.quickApply = (0, asyncHandler_1.asyncHandler)(async (req, res) => {
         const hirer = await HirerProfile_1.HirerProfile.findById(job.hirerProfile).select('user').lean();
         if (hirer?.user) {
             try {
-                await Notification_1.Notification.create({
+                await (0, notify_service_1.notifyUser)({
                     user: hirer.user,
                     role: 'hirer',
                     type: 'new_applicant',
@@ -135,6 +171,11 @@ exports.quickApply = (0, asyncHandler_1.asyncHandler)(async (req, res) => {
                         jobId: job._id.toString(),
                         matchScore: score,
                     },
+                });
+                (0, socket_1.emitToUser)(hirer.user.toString(), 'applicant:new', {
+                    applicationId: applied._id.toString(),
+                    jobId: job._id.toString(),
+                    matchScore: score,
                 });
             }
             catch {

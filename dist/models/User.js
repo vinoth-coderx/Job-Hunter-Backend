@@ -114,6 +114,8 @@ const userSchema = new mongoose_1.Schema({
         startDate: Date,
         endDate: Date,
         paymentId: String,
+        trialActivatedAt: Date,
+        trialUsed: { type: Boolean, default: false },
     },
     notificationPreferences: {
         push: { type: Boolean, default: true },

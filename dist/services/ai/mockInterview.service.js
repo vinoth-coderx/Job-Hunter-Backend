@@ -17,8 +17,32 @@ const SYSTEM_BY_TYPE = {
     technical: 'You are conducting a technical interview. Ask realistic role-relevant problems. Probe for trade-offs and edge cases. Never give the answer prematurely.',
     system_design: 'You are conducting a senior system-design interview. Ask one open-ended design question, then drill down into scaling, storage, consistency trade-offs.',
 };
+const renderCandidateProfile = (p) => {
+    if (!p)
+        return '';
+    const lines = [];
+    if (p.fullName)
+        lines.push(`Name: ${p.fullName}`);
+    if (p.headline)
+        lines.push(`Headline: ${p.headline}`);
+    if (typeof p.experienceYears === 'number') {
+        lines.push(`Experience: ${p.experienceYears} years`);
+    }
+    if (p.skills && p.skills.length) {
+        lines.push(`Skills: ${p.skills.slice(0, 25).join(', ')}`);
+    }
+    if (p.preferredRoles && p.preferredRoles.length) {
+        lines.push(`Target roles: ${p.preferredRoles.slice(0, 5).join(', ')}`);
+    }
+    if (p.resumeExcerpt) {
+        lines.push(`Resume excerpt:\n${p.resumeExcerpt.slice(0, 1500)}`);
+    }
+    if (lines.length === 0)
+        return '';
+    return `\nCandidate profile (use this to ground every question — don't ask things the candidate hasn't claimed any familiarity with, and DO probe specifics from their stated skills/experience):\n${lines.join('\n')}\n`;
+};
 const nextInterviewerTurn = async (params) => {
-    const { role, interviewType, turns, questionsTarget } = params;
+    const { role, interviewType, turns, questionsTarget, candidateProfile } = params;
     const questionsAsked = turns.filter((t) => t.role === 'interviewer').length;
     if (!client) {
         return fallbackTurn(role, interviewType, questionsAsked, questionsTarget);
@@ -29,7 +53,7 @@ const nextInterviewerTurn = async (params) => {
     const system = `${SYSTEM_BY_TYPE[interviewType]}
 
 You are interviewing for: ${role}.
-
+${renderCandidateProfile(candidateProfile)}
 Output strict JSON:
 {
   "question": "Your next interview question (one paragraph, no numbering).",
@@ -39,7 +63,8 @@ Output strict JSON:
     "communication": 0-100,
     "suggestion": "1-sentence improvement tip"
   },
-  "shouldFinish": false
+  "shouldFinish": false,
+  "answerWasIrrelevant": false              // TRUE when the candidate's answer was completely off-topic, gibberish, or zero-substance — see rule below
 }
 
 Rules:
@@ -48,7 +73,8 @@ Rules:
 - If asked >= ${questionsTarget} OR the candidate is clearly cooked, set shouldFinish=true and ask a final wrap-up.
 - Probe weak answers; don't repeat the same theme twice in a row.
 - Don't include feedback on the very first turn (no answer yet).
-- Never output multiple questions per turn.`;
+- Never output multiple questions per turn.
+- Set "answerWasIrrelevant": true when the answer is completely unrelated to the question (e.g. asked about React state management, candidate replied "what's the weather?"), gibberish, or just "idk/no" with zero attempt. When TRUE: also set "question" to a short polite re-ask of the SAME question (e.g. "Let's stay on the previous question — could you address it directly?"). A weak-but-relevant answer is NOT irrelevant; just give low feedback scores.`;
     const prompt = transcript.length === 0
         ? 'Open the interview now.'
         : `Conversation so far:\n${transcript}\n\nGive the next interviewer turn.`;
@@ -68,6 +94,7 @@ Rules:
         if (!question) {
             return fallbackTurn(role, interviewType, questionsAsked, questionsTarget);
         }
+        const irrelevant = !!parsed.answerWasIrrelevant;
         return {
             question,
             feedback: parsed.feedback && typeof parsed.feedback === 'object'
@@ -80,7 +107,10 @@ Rules:
                         : undefined,
                 }
                 : undefined,
-            shouldFinish: !!parsed.shouldFinish || questionsAsked + 1 >= questionsTarget,
+            shouldFinish: irrelevant
+                ? false
+                : !!parsed.shouldFinish || questionsAsked + 1 >= questionsTarget,
+            answerWasIrrelevant: irrelevant,
         };
     }
     catch (err) {
@@ -137,7 +167,7 @@ const fallbackTurn = (_role, type, questionsAsked, target) => {
     };
 };
 const summariseInterview = async (params) => {
-    const { role, interviewType, turns } = params;
+    const { role, interviewType, turns, candidateProfile } = params;
     const heuristic = () => {
         const scored = turns.filter((t) => t.feedback);
         if (scored.length === 0) {
@@ -166,7 +196,11 @@ const summariseInterview = async (params) => {
     const transcript = turns
         .map((t) => `${t.role === 'interviewer' ? 'Q' : 'A'}: ${t.text}`)
         .join('\n');
-    const system = `Score this mock ${interviewType} interview for a ${role} candidate. Output strict JSON:
+    const system = `Score this mock ${interviewType} interview for a ${role} candidate.
+${renderCandidateProfile(candidateProfile)}
+When scoring, weigh answers against the candidate's stated experience level — penalise vague answers more harshly for senior candidates than juniors.
+
+Output strict JSON:
 {"finalScore": 0-100, "finalSummary": "3-5 sentences. Lead with biggest strength, then biggest gap, then concrete next step. No fluff."}`;
     try {
         const res = await client.messages.create({

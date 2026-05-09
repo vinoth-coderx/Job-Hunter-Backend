@@ -67,12 +67,28 @@ exports.pauseSchema = zod_1.z.object({
     }),
 });
 const requireTier = async (userId) => {
-    const user = await User_1.User.findById(userId).select('subscription.tier').lean();
+    const user = await User_1.User.findById(userId).select('subscription').lean();
     if (!user)
         throw ApiError_1.ApiError.notFound('User not found');
-    return (user.subscription?.tier ?? 'free');
+    const rawTier = (user.subscription?.tier ?? 'free');
+    const trial = (0, limits_1.computeTrialState)(user.subscription);
+    return { rawTier, tier: (0, limits_1.effectiveTier)(rawTier, trial), trial };
 };
-const sanitiseSettings = (s, tier) => ({
+const ensureTrialStarted = async (userId) => {
+    const ctx = await requireTier(userId);
+    if (ctx.rawTier === 'free' && !ctx.trial.used) {
+        const now = new Date();
+        await User_1.User.updateOne({ _id: userId }, {
+            $set: {
+                'subscription.trialActivatedAt': now,
+                'subscription.trialUsed': true,
+            },
+        });
+        return requireTier(userId);
+    }
+    return ctx;
+};
+const sanitiseSettings = (s, ctx) => ({
     id: s._id.toString(),
     isEnabled: s.isEnabled,
     isPaused: s.isPaused,
@@ -87,37 +103,43 @@ const sanitiseSettings = (s, tier) => ({
     aiCoverLetter: s.aiCoverLetter,
     totalAutoApplied: s.totalAutoApplied,
     lastRunAt: s.lastRunAt,
-    tier,
-    planCap: limits_1.AUTO_APPLY_DAILY_CAP[tier],
-    eligible: (0, limits_1.isAutoApplyEligible)(tier),
+    tier: ctx.tier,
+    planCap: limits_1.AUTO_APPLY_DAILY_CAP[ctx.tier],
+    eligible: (0, limits_1.isAutoApplyEligible)(ctx.tier),
+    trial: {
+        active: ctx.trial.active,
+        used: ctx.trial.used,
+        endsAt: ctx.trial.endsAt,
+        durationDays: limits_1.TRIAL_DURATION_DAYS,
+    },
 });
 exports.getSettings = (0, asyncHandler_1.asyncHandler)(async (req, res) => {
     if (!req.user)
         throw ApiError_1.ApiError.unauthorized();
-    const tier = await requireTier(req.user.id);
+    const ctx = await ensureTrialStarted(req.user.id);
     let settings = await AutoApplySettings_1.AutoApplySettings.findOne({ user: req.user._id });
     if (!settings) {
         settings = await AutoApplySettings_1.AutoApplySettings.create({
             user: req.user._id,
             isEnabled: false,
-            dailyLimit: Math.max(1, limits_1.AUTO_APPLY_DAILY_CAP[tier] || 10),
+            dailyLimit: Math.max(1, limits_1.AUTO_APPLY_DAILY_CAP[ctx.tier] || 10),
         });
     }
-    res.json({ success: true, data: sanitiseSettings(settings, tier) });
+    res.json({ success: true, data: sanitiseSettings(settings, ctx) });
 });
 exports.updateSettings = (0, asyncHandler_1.asyncHandler)(async (req, res) => {
     if (!req.user)
         throw ApiError_1.ApiError.unauthorized();
-    const tier = await requireTier(req.user.id);
+    const ctx = await requireTier(req.user.id);
     const body = req.body;
-    if (body.isEnabled === true && !(0, limits_1.isAutoApplyEligible)(tier)) {
+    if (body.isEnabled === true && !(0, limits_1.isAutoApplyEligible)(ctx.tier)) {
         throw ApiError_1.ApiError.forbidden('Auto-Apply requires a Monthly or Yearly subscription. Upgrade to enable.');
     }
     let settings = await AutoApplySettings_1.AutoApplySettings.findOne({ user: req.user._id });
     if (!settings) {
         settings = await AutoApplySettings_1.AutoApplySettings.create({
             user: req.user._id,
-            dailyLimit: Math.max(1, limits_1.AUTO_APPLY_DAILY_CAP[tier] || 10),
+            dailyLimit: Math.max(1, limits_1.AUTO_APPLY_DAILY_CAP[ctx.tier] || 10),
         });
     }
     if (body.isEnabled !== undefined)
@@ -127,7 +149,7 @@ exports.updateSettings = (0, asyncHandler_1.asyncHandler)(async (req, res) => {
     if (body.runDays !== undefined)
         settings.runDays = body.runDays;
     if (body.dailyLimit !== undefined) {
-        settings.dailyLimit = (0, limits_1.cappedDailyLimit)(body.dailyLimit, tier);
+        settings.dailyLimit = (0, limits_1.cappedDailyLimit)(body.dailyLimit, ctx.tier);
     }
     if (body.preferences) {
         settings.preferences = {
@@ -155,12 +177,12 @@ exports.updateSettings = (0, asyncHandler_1.asyncHandler)(async (req, res) => {
         settings.pauseReason = undefined;
     }
     await settings.save();
-    res.json({ success: true, data: sanitiseSettings(settings, tier) });
+    res.json({ success: true, data: sanitiseSettings(settings, ctx) });
 });
 exports.pauseAutoApply = (0, asyncHandler_1.asyncHandler)(async (req, res) => {
     if (!req.user)
         throw ApiError_1.ApiError.unauthorized();
-    const tier = await requireTier(req.user.id);
+    const ctx = await requireTier(req.user.id);
     const { days, reason } = req.body;
     const settings = await AutoApplySettings_1.AutoApplySettings.findOne({ user: req.user._id });
     if (!settings)
@@ -175,23 +197,23 @@ exports.pauseAutoApply = (0, asyncHandler_1.asyncHandler)(async (req, res) => {
     if (reason)
         settings.pauseReason = reason;
     await settings.save();
-    res.json({ success: true, data: sanitiseSettings(settings, tier) });
+    res.json({ success: true, data: sanitiseSettings(settings, ctx) });
 });
 exports.resumeAutoApply = (0, asyncHandler_1.asyncHandler)(async (req, res) => {
     if (!req.user)
         throw ApiError_1.ApiError.unauthorized();
-    const tier = await requireTier(req.user.id);
+    const ctx = await requireTier(req.user.id);
     const settings = await AutoApplySettings_1.AutoApplySettings.findOne({ user: req.user._id });
     if (!settings)
         throw ApiError_1.ApiError.notFound('Auto-apply not configured');
-    if (!(0, limits_1.isAutoApplyEligible)(tier)) {
+    if (!(0, limits_1.isAutoApplyEligible)(ctx.tier)) {
         throw ApiError_1.ApiError.forbidden('Auto-Apply requires a Monthly or Yearly subscription.');
     }
     settings.isPaused = false;
     settings.pauseUntil = undefined;
     settings.pauseReason = undefined;
     await settings.save();
-    res.json({ success: true, data: sanitiseSettings(settings, tier) });
+    res.json({ success: true, data: sanitiseSettings(settings, ctx) });
 });
 exports.approveSchema = zod_1.z.object({
     body: zod_1.z.object({
@@ -336,8 +358,8 @@ exports.todaySummary = (0, asyncHandler_1.asyncHandler)(async (req, res) => {
 exports.runNow = (0, asyncHandler_1.asyncHandler)(async (req, res) => {
     if (!req.user)
         throw ApiError_1.ApiError.unauthorized();
-    const tier = await requireTier(req.user.id);
-    if (!(0, limits_1.isAutoApplyEligible)(tier)) {
+    const ctx = await requireTier(req.user.id);
+    if (!(0, limits_1.isAutoApplyEligible)(ctx.tier)) {
         throw ApiError_1.ApiError.forbidden('Auto-Apply requires a paid plan');
     }
     const user = await User_1.User.findById(req.user._id);

@@ -9,9 +9,10 @@ const mongoose_1 = __importDefault(require("mongoose"));
 const AppliedJob_1 = require("../models/AppliedJob");
 const Job_1 = require("../models/Job");
 const HirerProfile_1 = require("../models/HirerProfile");
-const Notification_1 = require("../models/Notification");
 const asyncHandler_1 = require("../utils/asyncHandler");
 const ApiError_1 = require("../utils/ApiError");
+const notify_service_1 = require("../services/notification/notify.service");
+const socket_1 = require("../services/chat/socket");
 const HIRER_STATUSES = [
     'applied',
     'viewed',
@@ -268,7 +269,7 @@ exports.updateApplicantStatus = (0, asyncHandler_1.asyncHandler)(async (req, res
     }
     await application.save();
     await recomputeShortlistedCount(application.job);
-    await Notification_1.Notification.create({
+    await (0, notify_service_1.notifyUser)({
         user: application.user,
         role: 'seeker',
         type: 'application_status',
@@ -279,6 +280,11 @@ exports.updateApplicantStatus = (0, asyncHandler_1.asyncHandler)(async (req, res
             jobId: application.job.toString(),
             status,
         },
+    });
+    (0, socket_1.emitToUser)(application.user.toString(), 'application:status', {
+        applicationId: application._id.toString(),
+        jobId: application.job.toString(),
+        status,
     });
     res.json({
         success: true,

@@ -9,9 +9,9 @@ const mongoose_1 = __importDefault(require("mongoose"));
 const Interview_1 = require("../models/Interview");
 const AppliedJob_1 = require("../models/AppliedJob");
 const HirerProfile_1 = require("../models/HirerProfile");
-const Notification_1 = require("../models/Notification");
 const asyncHandler_1 = require("../utils/asyncHandler");
 const ApiError_1 = require("../utils/ApiError");
+const notify_service_1 = require("../services/notification/notify.service");
 const isObjectId = (s) => /^[a-f0-9]{24}$/i.test(s);
 const interviewerInput = zod_1.z.object({
     user: zod_1.z.string().min(1).optional(),
@@ -114,7 +114,7 @@ exports.scheduleInterview = (0, asyncHandler_1.asyncHandler)(async (req, res) =>
         await application.save();
     }
     try {
-        await Notification_1.Notification.create({
+        await (0, notify_service_1.notifyUser)({
             user: application.user,
             role: 'seeker',
             type: 'interview_scheduled',
@@ -190,7 +190,7 @@ exports.updateInterview = (0, asyncHandler_1.asyncHandler)(async (req, res) => {
     }
     await interview.save();
     try {
-        await Notification_1.Notification.create({
+        await (0, notify_service_1.notifyUser)({
             user: interview.seekerUser,
             role: 'seeker',
             type: 'interview_scheduled',

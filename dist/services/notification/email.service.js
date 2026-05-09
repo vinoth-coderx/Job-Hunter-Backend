@@ -3,7 +3,7 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.sendJobAlertEmail = void 0;
+exports.sendTeamInviteEmail = exports.sendJobAlertEmail = void 0;
 const nodemailer_1 = __importDefault(require("nodemailer"));
 const env_1 = require("../../config/env");
 const logger_1 = require("../../utils/logger");
@@ -105,3 +105,58 @@ const sendJobAlertEmail = async (params) => {
     }
 };
 exports.sendJobAlertEmail = sendJobAlertEmail;
+const renderTeamInviteHtml = (params) => {
+    const { companyName, inviterName, role, token, expiresAt } = params;
+    const expires = expiresAt.toLocaleDateString('en-IN', {
+        day: 'numeric',
+        month: 'short',
+        year: 'numeric',
+    });
+    const intro = inviterName
+        ? `${escapeHtml(inviterName)} invited you to join <strong>${escapeHtml(companyName)}</strong>`
+        : `You've been invited to join <strong>${escapeHtml(companyName)}</strong>`;
+    return `
+    <!DOCTYPE html>
+    <html><body style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Inter,sans-serif;background:#f7f9fc;padding:24px 0;">
+      <table style="max-width:560px;margin:0 auto;background:#fff;border-radius:12px;padding:28px;">
+        <tr><td>
+          <h1 style="font-size:20px;color:#0a0a0a;margin:0 0 8px 0;">You're invited to a hiring team</h1>
+          <p style="font-size:14px;color:#374151;margin:0 0 16px 0;line-height:1.5;">
+            ${intro} as a <strong>${escapeHtml(role)}</strong>.
+          </p>
+          <p style="font-size:13px;color:#6b7280;margin:0 0 8px 0;">
+            Open the Job Hunter app, go to <strong>Team → Accept invite</strong>, and paste this token:
+          </p>
+          <div style="background:#f3f4f6;border:1px solid #e5e7eb;border-radius:10px;padding:14px;margin:8px 0 16px 0;">
+            <code style="font-family:'SFMono-Regular',Consolas,monospace;font-size:13px;color:#0a0a0a;word-break:break-all;">
+              ${escapeHtml(token)}
+            </code>
+          </div>
+          <p style="font-size:12px;color:#9ca3af;margin:0;">
+            This invite expires on <strong>${escapeHtml(expires)}</strong>. If you weren't expecting this, you can safely ignore the email.
+          </p>
+        </td></tr>
+      </table>
+    </body></html>`;
+};
+const sendTeamInviteEmail = async (params) => {
+    const t = getTransporter();
+    if (!t) {
+        logger_1.logger.debug('SMTP not configured — skipping team invite email');
+        return;
+    }
+    const subject = `You're invited to join ${params.companyName} on Job Hunter`;
+    const html = renderTeamInviteHtml(params);
+    try {
+        await t.sendMail({
+            from: env_1.env.EMAIL_FROM,
+            to: params.toEmail,
+            subject,
+            html,
+        });
+    }
+    catch (err) {
+        logger_1.logger.warn(`team invite email failed: ${err.message}`);
+    }
+};
+exports.sendTeamInviteEmail = sendTeamInviteEmail;

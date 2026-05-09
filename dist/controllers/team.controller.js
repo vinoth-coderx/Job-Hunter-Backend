@@ -12,6 +12,8 @@ const TeamInvite_1 = require("../models/TeamInvite");
 const User_1 = require("../models/User");
 const asyncHandler_1 = require("../utils/asyncHandler");
 const ApiError_1 = require("../utils/ApiError");
+const email_service_1 = require("../services/notification/email.service");
+const logger_1 = require("../utils/logger");
 const isObjectId = (s) => /^[a-f0-9]{24}$/i.test(s);
 exports.inviteSchema = zod_1.z.object({
     body: zod_1.z.object({
@@ -82,6 +84,17 @@ exports.inviteTeamMember = (0, asyncHandler_1.asyncHandler)(async (req, res) => 
             expiresAt,
         },
     }, { upsert: true, new: true });
+    const inviter = await User_1.User.findById(req.user._id)
+        .select('email profile.fullName')
+        .lean();
+    void (0, email_service_1.sendTeamInviteEmail)({
+        toEmail: invite.email,
+        companyName: profile.companyName,
+        inviterName: inviter?.profile?.fullName || inviter?.email,
+        role: invite.role,
+        token: invite.token,
+        expiresAt: invite.expiresAt,
+    }).catch((err) => logger_1.logger.warn(`team invite email dispatch failed: ${err.message}`));
     res.status(201).json({
         success: true,
         data: {

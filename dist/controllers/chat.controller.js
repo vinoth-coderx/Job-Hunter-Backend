@@ -35,9 +35,7 @@ const ensureParticipant = async (userId, conversationId) => {
 };
 const otherParticipant = (conv, me) => {
     const other = conv.participants.find((p) => p.toString() !== me.toString());
-    if (!other)
-        throw ApiError_1.ApiError.internal('Conversation has no other participant');
-    return other;
+    return other ?? me;
 };
 exports.listConversations = (0, asyncHandler_1.asyncHandler)(async (req, res) => {
     if (!req.user)
@@ -77,29 +75,50 @@ exports.startConversation = (0, asyncHandler_1.asyncHandler)(async (req, res) =>
     const { otherUserId, jobId, applicationId } = req.body;
     if (!isObjectId(otherUserId))
         throw ApiError_1.ApiError.badRequest('Invalid otherUserId');
-    if (otherUserId === req.user.id) {
-        throw ApiError_1.ApiError.badRequest('Cannot start a conversation with yourself');
-    }
+    const isSelf = otherUserId === req.user.id;
     const other = await User_1.User.findById(otherUserId).select('_id').lean();
     if (!other)
         throw ApiError_1.ApiError.notFound('User not found');
-    const existing = await Conversation_1.Conversation.findOne({
-        participants: { $all: [req.user._id, other._id], $size: 2 },
+    const participantIds = isSelf
+        ? [req.user._id]
+        : [req.user._id, other._id];
+    const existingFilter = isSelf
+        ? { participants: { $all: [req.user._id], $size: 1 } }
+        : { participants: { $all: [req.user._id, other._id], $size: 2 } };
+    const existing = await Conversation_1.Conversation.findOne(existingFilter).populate({
+        path: 'participants',
+        select: 'email profile.fullName profile.avatar',
     });
     if (existing) {
-        res.json({ success: true, data: existing });
+        res.json({
+            success: true,
+            data: {
+                ...existing.toObject(),
+                unreadCount: existing.unreadCount?.[req.user.id] ?? 0,
+            },
+        });
         return;
     }
-    const conv = await Conversation_1.Conversation.create({
-        participants: [req.user._id, other._id],
+    const unreadInit = new Map([[req.user.id, 0]]);
+    if (!isSelf)
+        unreadInit.set(otherUserId, 0);
+    const created = await Conversation_1.Conversation.create({
+        participants: participantIds,
         application: applicationId && isObjectId(applicationId) ? applicationId : undefined,
         job: jobId && isObjectId(jobId) ? jobId : undefined,
-        unreadCount: new Map([
-            [req.user.id, 0],
-            [otherUserId, 0],
-        ]),
+        unreadCount: unreadInit,
     });
-    res.status(201).json({ success: true, data: conv });
+    const conv = await Conversation_1.Conversation.findById(created._id).populate({
+        path: 'participants',
+        select: 'email profile.fullName profile.avatar',
+    });
+    res.status(201).json({
+        success: true,
+        data: {
+            ...(conv ?? created).toObject(),
+            unreadCount: 0,
+        },
+    });
 });
 exports.listMessages = (0, asyncHandler_1.asyncHandler)(async (req, res) => {
     if (!req.user)
@@ -144,14 +163,16 @@ exports.sendMessage = (0, asyncHandler_1.asyncHandler)(async (req, res) => {
     conv.unreadCount.set(receiver.toString(), prev + 1);
     await conv.save();
     try {
-        (0, socket_1.emitToUser)(receiver.toString(), 'message:new', {
-            conversationId: conv._id.toString(),
-            message,
-        });
         (0, socket_1.emitToUser)(req.user.id, 'message:new', {
             conversationId: conv._id.toString(),
             message,
         });
+        if (receiver.toString() !== req.user.id) {
+            (0, socket_1.emitToUser)(receiver.toString(), 'message:new', {
+                conversationId: conv._id.toString(),
+                message,
+            });
+        }
     }
     catch {
     }
@@ -166,10 +187,12 @@ exports.markRead = (0, asyncHandler_1.asyncHandler)(async (req, res) => {
     await conv.save();
     try {
         const other = otherParticipant(conv, req.user._id);
-        (0, socket_1.emitToUser)(other.toString(), 'read:receipt', {
-            conversationId: conv._id.toString(),
-            readerUserId: req.user.id,
-        });
+        if (other.toString() !== req.user.id) {
+            (0, socket_1.emitToUser)(other.toString(), 'read:receipt', {
+                conversationId: conv._id.toString(),
+                readerUserId: req.user.id,
+            });
+        }
     }
     catch {
     }

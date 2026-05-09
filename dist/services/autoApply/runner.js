@@ -19,7 +19,8 @@ const runAutoApplyForUser = async (user, options = {}) => {
     const settings = await AutoApplySettings_1.AutoApplySettings.findOne({ user: user._id });
     if (!settings)
         return null;
-    const tier = (user.subscription?.tier ?? 'free');
+    const rawTier = (user.subscription?.tier ?? 'free');
+    const tier = (0, limits_1.effectiveTier)(rawTier, (0, limits_1.computeTrialState)(user.subscription));
     if (!(0, limits_1.isAutoApplyEligible)(tier))
         return null;
     if (!settings.isEnabled)

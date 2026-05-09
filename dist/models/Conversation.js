@@ -39,8 +39,8 @@ const conversationSchema = new mongoose_1.Schema({
     participants: {
         type: [{ type: mongoose_1.Schema.Types.ObjectId, ref: 'User', required: true }],
         validate: {
-            validator: (arr) => arr.length === 2,
-            message: 'A conversation must have exactly 2 participants',
+            validator: (arr) => arr.length === 1 || arr.length === 2,
+            message: 'A conversation must have 1 or 2 participants',
         },
         index: true,
     },

@@ -12,6 +12,7 @@ const redis_1 = require("./config/redis");
 const jobScraper_cron_1 = require("./jobs/jobScraper.cron");
 const alertChecker_cron_1 = require("./jobs/alertChecker.cron");
 const autoApply_cron_1 = require("./jobs/autoApply.cron");
+const backfillApplicantHirer_1 = require("./jobs/backfillApplicantHirer");
 const socket_1 = require("./services/chat/socket");
 const scrapers_1 = require("./services/scrapers");
 const logger_1 = require("./utils/logger");
@@ -42,6 +43,7 @@ const start = async () => {
             (0, jobScraper_cron_1.startJobScraperCron)();
             (0, alertChecker_cron_1.startAlertCheckerCron)();
             (0, autoApply_cron_1.startAutoApplyCron)();
+            void (0, backfillApplicantHirer_1.backfillApplicantHirerLinks)();
         });
     }
     catch (err) {

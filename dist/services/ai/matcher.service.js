@@ -21,22 +21,56 @@ const heuristicMatch = (user, job) => {
     const missing = jobSkills.filter((s) => !userSkills.includes(s));
     let score = 0;
     if (jobSkills.length > 0) {
-        score = (matched.length / jobSkills.length) * 70;
+        score = (matched.length / jobSkills.length) * 50;
     }
     else if (userSkills.length > 0) {
         const overlap = userSkills.filter((s) => desc.includes(s)).length;
-        score = (overlap / userSkills.length) * 70;
+        score = (overlap / userSkills.length) * 50;
     }
     const userRoles = (user.profile.preferredRoles || []).map((r) => r.toLowerCase());
     if (userRoles.some((r) => job.title.toLowerCase().includes(r)))
         score += 15;
+    const exp = user.profile.experienceYears ?? 0;
+    const expMin = job.experienceMinYears;
+    const expMax = job.experienceMaxYears;
+    if (typeof expMin === 'number' || typeof expMax === 'number') {
+        const lo = expMin ?? 0;
+        const hi = expMax ?? Math.max(lo, exp);
+        if (exp >= lo && exp <= hi) {
+            score += 15;
+        }
+        else {
+            const gap = exp < lo ? lo - exp : exp - hi;
+            if (gap <= 2)
+                score += 8;
+            else if (gap <= 4)
+                score += 3;
+        }
+    }
     const userLocs = (user.profile.preferredLocations || []).map((l) => l.toLowerCase());
     if (userLocs.some((l) => job.location.toLowerCase().includes(l) || (l === 'remote' && job.remoteType === 'remote'))) {
         score += 10;
     }
+    const expected = user.profile.expectedSalaryMin;
+    const jobMin = job.salaryMin;
+    const jobMax = job.salaryMax;
+    if (typeof expected === 'number' && (typeof jobMin === 'number' || typeof jobMax === 'number')) {
+        const offerHi = jobMax ?? jobMin ?? 0;
+        const offerLo = jobMin ?? jobMax ?? 0;
+        if (expected <= offerHi && expected >= offerLo * 0.9) {
+            score += 5;
+        }
+        else if (offerHi >= expected) {
+            score += 3;
+        }
+    }
     if (user.profile.preferredJobTypes?.length &&
         user.profile.preferredJobTypes.includes(job.jobType)) {
-        score += 5;
+        score += 3;
+    }
+    if (user.profile.preferredRemote?.length &&
+        user.profile.preferredRemote.includes(job.remoteType)) {
+        score += 2;
     }
     return {
         jobId: job._id.toString(),
