@@ -37,6 +37,10 @@ const otherParticipant = (conv, me) => {
     const other = conv.participants.find((p) => p.toString() !== me.toString());
     return other ?? me;
 };
+const jobLitePopulate = {
+    path: 'job',
+    select: 'title company companyLogoUrl',
+};
 exports.listConversations = (0, asyncHandler_1.asyncHandler)(async (req, res) => {
     if (!req.user)
         throw ApiError_1.ApiError.unauthorized();
@@ -49,18 +53,27 @@ exports.listConversations = (0, asyncHandler_1.asyncHandler)(async (req, res) =>
         path: 'participants',
         select: 'email profile.fullName profile.avatar',
     })
+        .populate(jobLitePopulate)
         .lean();
     res.json({
         success: true,
-        data: items.map((c) => ({
-            id: c._id.toString(),
-            participants: c.participants,
-            application: c.application,
-            job: c.job,
-            lastMessage: c.lastMessage,
-            unreadCount: c.unreadCount?.[req.user.id] ?? 0,
-            updatedAt: c.updatedAt,
-        })),
+        data: items.map((c) => {
+            const job = c.job;
+            const isPopulated = job && typeof job === 'object' && '_id' in job && 'title' in job;
+            const populated = isPopulated ? job : null;
+            return {
+                id: c._id.toString(),
+                participants: c.participants,
+                application: c.application,
+                job: populated?._id.toString() ?? job ?? null,
+                jobTitle: populated?.title,
+                companyName: populated?.company,
+                companyLogo: populated?.companyLogoUrl,
+                lastMessage: c.lastMessage,
+                unreadCount: c.unreadCount?.[req.user.id] ?? 0,
+                updatedAt: c.updatedAt,
+            };
+        }),
     });
 });
 exports.getConversation = (0, asyncHandler_1.asyncHandler)(async (req, res) => {
@@ -85,17 +98,16 @@ exports.startConversation = (0, asyncHandler_1.asyncHandler)(async (req, res) =>
     const existingFilter = isSelf
         ? { participants: { $all: [req.user._id], $size: 1 } }
         : { participants: { $all: [req.user._id, other._id], $size: 2 } };
-    const existing = await Conversation_1.Conversation.findOne(existingFilter).populate({
+    const existing = await Conversation_1.Conversation.findOne(existingFilter)
+        .populate({
         path: 'participants',
         select: 'email profile.fullName profile.avatar',
-    });
+    })
+        .populate(jobLitePopulate);
     if (existing) {
         res.json({
             success: true,
-            data: {
-                ...existing.toObject(),
-                unreadCount: existing.unreadCount?.[req.user.id] ?? 0,
-            },
+            data: enrichConversation(existing.toObject(), req.user.id),
         });
         return;
     }
@@ -108,18 +120,34 @@ exports.startConversation = (0, asyncHandler_1.asyncHandler)(async (req, res) =>
         job: jobId && isObjectId(jobId) ? jobId : undefined,
         unreadCount: unreadInit,
     });
-    const conv = await Conversation_1.Conversation.findById(created._id).populate({
+    const conv = await Conversation_1.Conversation.findById(created._id)
+        .populate({
         path: 'participants',
         select: 'email profile.fullName profile.avatar',
-    });
+    })
+        .populate(jobLitePopulate);
     res.status(201).json({
         success: true,
-        data: {
-            ...(conv ?? created).toObject(),
-            unreadCount: 0,
-        },
+        data: enrichConversation((conv ?? created).toObject(), req.user.id),
     });
 });
+const enrichConversation = (raw, userId) => {
+    const job = raw.job;
+    const isPopulated = job && typeof job === 'object' && '_id' in job && 'title' in job;
+    const populated = isPopulated ? job : null;
+    const unreadMap = raw.unreadCount;
+    const unread = unreadMap instanceof Map
+        ? unreadMap.get(userId) ?? 0
+        : unreadMap?.[userId] ?? 0;
+    return {
+        ...raw,
+        job: populated?._id.toString() ?? job ?? null,
+        jobTitle: populated?.title,
+        companyName: populated?.company,
+        companyLogo: populated?.companyLogoUrl,
+        unreadCount: unread,
+    };
+};
 exports.listMessages = (0, asyncHandler_1.asyncHandler)(async (req, res) => {
     if (!req.user)
         throw ApiError_1.ApiError.unauthorized();

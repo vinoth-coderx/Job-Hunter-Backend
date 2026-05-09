@@ -62,6 +62,20 @@ const otherParticipant = (
 // Controllers
 // ─────────────────────────────────────────────────────────────────────────
 
+// Shape returned alongside the populated job. Keeping it narrow so the
+// payload doesn't balloon with the entire job document for every row.
+interface PopulatedJobLite {
+  _id: mongoose.Types.ObjectId;
+  title?: string;
+  company?: string;
+  companyLogoUrl?: string;
+}
+
+const jobLitePopulate = {
+  path: 'job',
+  select: 'title company companyLogoUrl',
+} as const;
+
 export const listConversations = asyncHandler(async (req: AuthRequest, res: Response) => {
   if (!req.user) throw ApiError.unauthorized();
 
@@ -74,19 +88,31 @@ export const listConversations = asyncHandler(async (req: AuthRequest, res: Resp
       path: 'participants',
       select: 'email profile.fullName profile.avatar',
     })
+    .populate(jobLitePopulate)
     .lean();
 
   res.json({
     success: true,
-    data: items.map((c) => ({
-      id: c._id.toString(),
-      participants: c.participants,
-      application: c.application,
-      job: c.job,
-      lastMessage: c.lastMessage,
-      unreadCount: (c.unreadCount as unknown as Record<string, number>)?.[req.user!.id] ?? 0,
-      updatedAt: c.updatedAt,
-    })),
+    data: items.map((c) => {
+      const job = c.job as unknown as PopulatedJobLite | mongoose.Types.ObjectId | null;
+      const isPopulated = job && typeof job === 'object' && '_id' in job && 'title' in job;
+      const populated = isPopulated ? (job as PopulatedJobLite) : null;
+      return {
+        id: c._id.toString(),
+        participants: c.participants,
+        application: c.application,
+        // Surface the job id alongside the populated company branding —
+        // seeker UIs use companyLogo as the chat header avatar instead
+        // of the recruiter's personal profile picture.
+        job: populated?._id.toString() ?? job ?? null,
+        jobTitle: populated?.title,
+        companyName: populated?.company,
+        companyLogo: populated?.companyLogoUrl,
+        lastMessage: c.lastMessage,
+        unreadCount: (c.unreadCount as unknown as Record<string, number>)?.[req.user!.id] ?? 0,
+        updatedAt: c.updatedAt,
+      };
+    }),
   });
 });
 
@@ -117,20 +143,19 @@ export const startConversation = asyncHandler(async (req: AuthRequest, res: Resp
     ? { participants: { $all: [req.user._id], $size: 1 } }
     : { participants: { $all: [req.user._id, other._id], $size: 2 } };
 
-  const existing = await Conversation.findOne(existingFilter).populate({
-    path: 'participants',
-    select: 'email profile.fullName profile.avatar',
-  });
+  const existing = await Conversation.findOne(existingFilter)
+    .populate({
+      path: 'participants',
+      select: 'email profile.fullName profile.avatar',
+    })
+    .populate(jobLitePopulate);
   if (existing) {
     res.json({
       success: true,
-      data: {
-        ...existing.toObject(),
-        unreadCount:
-          (existing.unreadCount as unknown as Record<string, number>)?.[
-            req.user.id
-          ] ?? 0,
-      },
+      data: enrichConversation(
+        existing.toObject() as unknown as Record<string, unknown>,
+        req.user.id,
+      ),
     });
     return;
   }
@@ -145,21 +170,58 @@ export const startConversation = asyncHandler(async (req: AuthRequest, res: Resp
     unreadCount: unreadInit,
   });
 
-  // Populate participants so the client can render the peer's name and
-  // avatar immediately without a follow-up fetch.
-  const conv = await Conversation.findById(created._id).populate({
-    path: 'participants',
-    select: 'email profile.fullName profile.avatar',
-  });
+  // Populate participants + job's company branding so the client can
+  // render the peer's name, avatar, and (for seekers) the recruiter's
+  // company logo immediately without a follow-up fetch.
+  const conv = await Conversation.findById(created._id)
+    .populate({
+      path: 'participants',
+      select: 'email profile.fullName profile.avatar',
+    })
+    .populate(jobLitePopulate);
 
   res.status(201).json({
     success: true,
-    data: {
-      ...(conv ?? created).toObject(),
-      unreadCount: 0,
-    },
+    data: enrichConversation(
+      (conv ?? created).toObject() as unknown as Record<string, unknown>,
+      req.user.id,
+    ),
   });
 });
+
+/// Mirror of the per-row mapping in `listConversations` but for a single
+/// conversation document. Pulls the populated job's branding to the top
+/// level (`companyLogo`, `companyName`, `jobTitle`) and replaces the
+/// `job` field with a plain id so the response stays compact.
+const enrichConversation = (
+  raw: Record<string, unknown>,
+  userId: string,
+) => {
+  const job = raw.job as unknown as
+    | PopulatedJobLite
+    | mongoose.Types.ObjectId
+    | null
+    | undefined;
+  const isPopulated =
+    job && typeof job === 'object' && '_id' in job && 'title' in job;
+  const populated = isPopulated ? (job as PopulatedJobLite) : null;
+  const unreadMap = raw.unreadCount as
+    | unknown as Record<string, number>
+    | Map<string, number>
+    | undefined;
+  const unread =
+    unreadMap instanceof Map
+      ? unreadMap.get(userId) ?? 0
+      : (unreadMap as Record<string, number> | undefined)?.[userId] ?? 0;
+  return {
+    ...raw,
+    job: populated?._id.toString() ?? job ?? null,
+    jobTitle: populated?.title,
+    companyName: populated?.company,
+    companyLogo: populated?.companyLogoUrl,
+    unreadCount: unread,
+  };
+};
 
 export const listMessages = asyncHandler(async (req: AuthRequest, res: Response) => {
   if (!req.user) throw ApiError.unauthorized();

@@ -103,12 +103,16 @@ const jobSchema = new Schema<IJob>(
     hirerProfile: { type: Schema.Types.ObjectId, ref: 'HirerProfile', index: true, sparse: true },
     postedBy: { type: Schema.Types.ObjectId, ref: 'User', index: true, sparse: true },
 
-    title: { type: String, required: true, trim: true, maxlength: 200, index: 'text' },
+    // Field-level `index: 'text'` is intentionally NOT used here because
+    // MongoDB allows only ONE text index per collection. The compound
+    // text index covering title/company/description/skills is declared
+    // explicitly below via `jobSchema.index({...: 'text'})`.
+    title: { type: String, required: true, trim: true, maxlength: 200 },
     company: { type: String, required: true, trim: true, maxlength: 200, index: true },
     companyLogoUrl: String,
     department: { type: String, trim: true, maxlength: 100 },
     location: { type: String, required: true, trim: true, maxlength: 200, index: true },
-    description: { type: String, required: true, maxlength: 20000, index: 'text' },
+    description: { type: String, required: true, maxlength: 20000 },
     responsibilities: { type: [String], default: undefined },
     url: { type: String, required: true, maxlength: 2000 },
 
