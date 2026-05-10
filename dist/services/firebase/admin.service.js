@@ -43,15 +43,6 @@ const logger_1 = require("../../utils/logger");
 let cached = null;
 let initAttempted = false;
 const loadServiceAccount = () => {
-    if (env_1.env.FIREBASE_SERVICE_ACCOUNT_JSON) {
-        try {
-            return JSON.parse(env_1.env.FIREBASE_SERVICE_ACCOUNT_JSON);
-        }
-        catch (err) {
-            logger_1.logger.error('firebase-admin: invalid FIREBASE_SERVICE_ACCOUNT_JSON', err);
-            return null;
-        }
-    }
     if (env_1.env.FIREBASE_SERVICE_ACCOUNT_PATH) {
         try {
             const raw = node_fs_1.default.readFileSync(env_1.env.FIREBASE_SERVICE_ACCOUNT_PATH, 'utf8');
@@ -93,5 +84,5 @@ const getFirebaseAdmin = async () => {
     }
 };
 exports.getFirebaseAdmin = getFirebaseAdmin;
-const isFirebaseConfigured = () => Boolean(env_1.env.FIREBASE_SERVICE_ACCOUNT_JSON || env_1.env.FIREBASE_SERVICE_ACCOUNT_PATH);
+const isFirebaseConfigured = () => Boolean(env_1.env.FIREBASE_SERVICE_ACCOUNT_PATH);
 exports.isFirebaseConfigured = isFirebaseConfigured;

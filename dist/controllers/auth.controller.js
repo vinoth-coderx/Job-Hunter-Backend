@@ -219,7 +219,7 @@ exports.checkEmailExistsSchema = zod_1.z.object({
 exports.checkEmailExists = (0, asyncHandler_1.asyncHandler)(async (req, res) => {
     const admin = await (0, admin_service_1.getFirebaseAdmin)();
     if (!admin) {
-        throw ApiError_1.ApiError.internal('Firebase Auth is not configured on the server (set FIREBASE_SERVICE_ACCOUNT_JSON)');
+        throw ApiError_1.ApiError.internal('Firebase Auth is not configured on the server (set FIREBASE_SERVICE_ACCOUNT_PATH)');
     }
     const email = req.body.email.toLowerCase().trim();
     try {
@@ -239,7 +239,7 @@ exports.checkEmailExists = (0, asyncHandler_1.asyncHandler)(async (req, res) => 
 exports.firebaseLogin = (0, asyncHandler_1.asyncHandler)(async (req, res) => {
     const admin = await (0, admin_service_1.getFirebaseAdmin)();
     if (!admin) {
-        throw ApiError_1.ApiError.internal('Firebase Auth is not configured on the server (set FIREBASE_SERVICE_ACCOUNT_JSON)');
+        throw ApiError_1.ApiError.internal('Firebase Auth is not configured on the server (set FIREBASE_SERVICE_ACCOUNT_PATH)');
     }
     const { idToken, fullName, phone } = req.body;
     let decoded;

@@ -60,7 +60,6 @@ const envSchema = z.object({
   STRIPE_WEBHOOK_SECRET: z.string().optional(),
 
   // ── Firebase (FCM push + Auth ID-token verification) ───
-  FIREBASE_SERVICE_ACCOUNT_JSON: z.string().optional(),
   FIREBASE_SERVICE_ACCOUNT_PATH: z.string().optional(),
   FIREBASE_PROJECT_ID: z.string().optional(),
 

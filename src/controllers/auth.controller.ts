@@ -269,7 +269,7 @@ export const checkEmailExists = asyncHandler(async (req: Request, res: Response)
   const admin = await getFirebaseAdmin();
   if (!admin) {
     throw ApiError.internal(
-      'Firebase Auth is not configured on the server (set FIREBASE_SERVICE_ACCOUNT_JSON)',
+      'Firebase Auth is not configured on the server (set FIREBASE_SERVICE_ACCOUNT_PATH)',
     );
   }
 
@@ -293,7 +293,7 @@ export const firebaseLogin = asyncHandler(async (req: Request, res: Response) =>
   const admin = await getFirebaseAdmin();
   if (!admin) {
     throw ApiError.internal(
-      'Firebase Auth is not configured on the server (set FIREBASE_SERVICE_ACCOUNT_JSON)',
+      'Firebase Auth is not configured on the server (set FIREBASE_SERVICE_ACCOUNT_PATH)',
     );
   }
 

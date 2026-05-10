@@ -18,14 +18,6 @@ let cached: Admin | null = null;
 let initAttempted = false;
 
 const loadServiceAccount = (): Record<string, unknown> | null => {
-  if (env.FIREBASE_SERVICE_ACCOUNT_JSON) {
-    try {
-      return JSON.parse(env.FIREBASE_SERVICE_ACCOUNT_JSON);
-    } catch (err) {
-      logger.error('firebase-admin: invalid FIREBASE_SERVICE_ACCOUNT_JSON', err);
-      return null;
-    }
-  }
   if (env.FIREBASE_SERVICE_ACCOUNT_PATH) {
     try {
       const raw = fs.readFileSync(env.FIREBASE_SERVICE_ACCOUNT_PATH, 'utf8');
@@ -72,4 +64,4 @@ export const getFirebaseAdmin = async (): Promise<Admin | null> => {
 };
 
 export const isFirebaseConfigured = (): boolean =>
-  Boolean(env.FIREBASE_SERVICE_ACCOUNT_JSON || env.FIREBASE_SERVICE_ACCOUNT_PATH);
+  Boolean(env.FIREBASE_SERVICE_ACCOUNT_PATH);

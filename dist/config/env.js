@@ -36,7 +36,6 @@ const envSchema = zod_1.z.object({
     RAZORPAY_TEST_WEBHOOK_SECRET: zod_1.z.string().optional(),
     STRIPE_SECRET_KEY: zod_1.z.string().optional(),
     STRIPE_WEBHOOK_SECRET: zod_1.z.string().optional(),
-    FIREBASE_SERVICE_ACCOUNT_JSON: zod_1.z.string().optional(),
     FIREBASE_SERVICE_ACCOUNT_PATH: zod_1.z.string().optional(),
     FIREBASE_PROJECT_ID: zod_1.z.string().optional(),
     CLOUDINARY_CLOUD_NAME: zod_1.z.string().optional(),
