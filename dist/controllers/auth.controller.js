@@ -1,8 +1,7 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.firebaseLogin = exports.checkEmailExists = exports.checkEmailExistsSchema = exports.firebaseLoginSchema = exports.googleMobileLogin = exports.googleMobileSchema = exports.guestLogin = exports.googleCallback = exports.me = exports.logout = exports.refreshToken = exports.login = exports.register = exports.loginSchema = exports.registerSchema = void 0;
+exports.firebaseLogin = exports.checkEmailExists = exports.checkEmailExistsSchema = exports.firebaseLoginSchema = exports.guestLogin = exports.me = exports.logout = exports.refreshToken = exports.login = exports.register = exports.loginSchema = exports.registerSchema = void 0;
 const zod_1 = require("zod");
-const google_auth_library_1 = require("google-auth-library");
 const User_1 = require("../models/User");
 const ApiError_1 = require("../utils/ApiError");
 const jwt_1 = require("../utils/jwt");
@@ -11,14 +10,7 @@ const asyncHandler_1 = require("../utils/asyncHandler");
 const logger_1 = require("../utils/logger");
 const crypto_2 = require("../utils/crypto");
 const security_1 = require("../middleware/security");
-const env_1 = require("../config/env");
 const admin_service_1 = require("../services/firebase/admin.service");
-const googleAudiences = [
-    env_1.env.GOOGLE_CLIENT_ID,
-    env_1.env.GOOGLE_ANDROID_CLIENT_ID,
-    env_1.env.GOOGLE_IOS_CLIENT_ID,
-].filter((id) => Boolean(id));
-const googleClient = new google_auth_library_1.OAuth2Client();
 const strongPassword = zod_1.z
     .string()
     .min(8, 'Password must be at least 8 characters')
@@ -188,27 +180,6 @@ exports.me = (0, asyncHandler_1.asyncHandler)(async (req, res) => {
         },
     });
 });
-exports.googleCallback = (0, asyncHandler_1.asyncHandler)(async (req, res) => {
-    const user = req.user;
-    if (!user)
-        throw ApiError_1.ApiError.unauthorized('Google authentication failed');
-    const tokens = (0, jwt_1.generateTokenPair)({
-        userId: user._id.toString(),
-        email: user.email,
-        role: user.role,
-    });
-    const dbUser = await User_1.User.findById(user._id).select('+refreshTokens');
-    if (dbUser) {
-        dbUser.refreshTokens = [...(dbUser.refreshTokens || []).slice(-4), tokens.refreshToken];
-        dbUser.lastLogin = new Date();
-        await dbUser.save();
-    }
-    res.json({
-        success: true,
-        message: 'Google login successful',
-        data: { ...tokens },
-    });
-});
 exports.guestLogin = (0, asyncHandler_1.asyncHandler)(async (_req, res) => {
     const guestId = `guest:${(0, crypto_1.randomUUID)()}`;
     const accessToken = (0, jwt_1.generateGuestAccessToken)({
@@ -230,88 +201,6 @@ exports.guestLogin = (0, asyncHandler_1.asyncHandler)(async (_req, res) => {
             },
             accessToken,
             refreshToken: null,
-        },
-    });
-});
-exports.googleMobileSchema = zod_1.z.object({
-    body: zod_1.z.object({
-        idToken: zod_1.z.string().min(20),
-        platform: zod_1.z.enum(['android', 'ios', 'web']).optional(),
-    }),
-});
-exports.googleMobileLogin = (0, asyncHandler_1.asyncHandler)(async (req, res) => {
-    if (!googleAudiences.length) {
-        throw ApiError_1.ApiError.internal('Google login not configured (set GOOGLE_CLIENT_ID/ANDROID_CLIENT_ID/IOS_CLIENT_ID)');
-    }
-    const { idToken } = req.body;
-    let payload;
-    try {
-        const ticket = await googleClient.verifyIdToken({
-            idToken,
-            audience: googleAudiences,
-        });
-        payload = ticket.getPayload();
-    }
-    catch (err) {
-        logger_1.logger.warn('Invalid Google ID token', err);
-        throw ApiError_1.ApiError.unauthorized('Invalid Google ID token');
-    }
-    if (!payload)
-        throw ApiError_1.ApiError.unauthorized('Empty Google token payload');
-    if (!payload.email)
-        throw ApiError_1.ApiError.unauthorized('Google account has no email');
-    if (payload.email_verified === false)
-        throw ApiError_1.ApiError.unauthorized('Google email not verified');
-    const email = payload.email.toLowerCase();
-    let user = await User_1.User.findOne({ $or: [{ googleId: payload.sub }, { email }] }).select('+refreshTokens');
-    if (!user) {
-        user = await User_1.User.create({
-            email,
-            googleId: payload.sub,
-            authProvider: 'google',
-            isEmailVerified: true,
-            profile: {
-                fullName: payload.name || email.split('@')[0],
-                avatar: payload.picture,
-                skills: [],
-                experienceYears: 0,
-                preferredRoles: [],
-                preferredLocations: [],
-                preferredJobTypes: [],
-                preferredRemote: [],
-            },
-            subscription: { tier: 'free', status: 'active' },
-        });
-    }
-    else if (!user.googleId) {
-        user.googleId = payload.sub;
-        user.isEmailVerified = true;
-        if (!user.profile.avatar && payload.picture)
-            user.profile.avatar = payload.picture;
-        await user.save();
-    }
-    const tokens = (0, jwt_1.generateTokenPair)({
-        userId: user._id.toString(),
-        email: user.email,
-        role: user.role,
-    });
-    user.refreshTokens = [...(user.refreshTokens || []).slice(-4), tokens.refreshToken];
-    user.lastLogin = new Date();
-    await user.save();
-    logger_1.logger.info(`Google mobile login: ${email}`);
-    res.json({
-        success: true,
-        message: 'Google login successful',
-        data: {
-            user: {
-                id: user._id,
-                email: user.email,
-                fullName: user.profile.fullName,
-                avatar: user.profile.avatar,
-                role: user.role,
-                subscription: user.subscription,
-            },
-            ...tokens,
         },
     });
 });

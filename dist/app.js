@@ -10,10 +10,8 @@ const helmet_1 = __importDefault(require("helmet"));
 const compression_1 = __importDefault(require("compression"));
 const morgan_1 = __importDefault(require("morgan"));
 const cookie_parser_1 = __importDefault(require("cookie-parser"));
-const passport_1 = __importDefault(require("passport"));
 const env_1 = require("./config/env");
 const constants_1 = require("./config/constants");
-const passport_2 = require("./config/passport");
 const routes_1 = __importDefault(require("./routes"));
 const errorHandler_1 = require("./middleware/errorHandler");
 const rateLimiter_1 = require("./middleware/rateLimiter");
@@ -78,8 +76,6 @@ const createApp = () => {
             skip: (req) => req.url === '/' || req.url.endsWith('/health'),
         }));
     }
-    (0, passport_2.initPassport)();
-    app.use(passport_1.default.initialize());
     app.use(rateLimiter_1.generalLimiter);
     app.get('/', (_req, res) => {
         res.json({
