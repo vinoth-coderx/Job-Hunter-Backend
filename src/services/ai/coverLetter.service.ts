@@ -1,20 +1,29 @@
-import Anthropic from '@anthropic-ai/sdk';
-import { env } from '../../config/env';
 import { logger } from '../../utils/logger';
 import { IUser } from '../../models/User';
 import { IJob } from '../../models/Job';
 import { redis } from '../../config/redis';
-
-const client = env.ANTHROPIC_API_KEY
-  ? new Anthropic({ apiKey: env.ANTHROPIC_API_KEY })
-  : null;
-
-const MODEL = 'claude-haiku-4-5-20251001';
+import { generate, isAiEnabled } from './providers';
 
 export type CoverLetterTone = 'professional' | 'friendly' | 'technical';
 
 const cacheKey = (userId: string, jobId: string, tone: string) =>
   `coverletter:${userId}:${jobId}:${tone}`;
+
+/**
+ * Cheap cache check used by the controller to skip enforceQuota when we
+ * know we'll just hand back a cached letter — saves the user a quota
+ * slot for re-opening a draft they already generated.
+ */
+export const hasCoverLetterCached = async (params: {
+  userId: string;
+  jobId: string;
+  tone: CoverLetterTone;
+}): Promise<boolean> => {
+  const exists = await redis.exists(
+    cacheKey(params.userId, params.jobId, params.tone),
+  );
+  return exists === 1;
+};
 
 const profileBlock = (user: IUser): string => {
   const p = user.profile;
@@ -90,7 +99,7 @@ export const generateCoverLetter = async (params: {
   const cached = await redis.get(key);
   if (cached) return { letter: cached, usedAi: true };
 
-  if (!client) {
+  if (!isAiEnabled()) {
     return { letter: fallback(params.user, params.job), usedAi: false };
   }
 
@@ -112,17 +121,14 @@ ${params.baseTemplate ? `User-supplied base template (treat as guidance, do not 
 Write the cover letter now.`;
 
   try {
-    const res = await client.messages.create({
-      model: MODEL,
-      max_tokens: 600,
+    const res = await generate({
+      tier: 'lite',
       system,
-      messages: [{ role: 'user', content: user }],
+      user,
+      maxTokens: 600,
+      temperature: 0.5,
     });
-    const block = res.content[0];
-    const text =
-      block && block.type === 'text' && typeof block.text === 'string'
-        ? block.text.trim()
-        : '';
+    const text = res.text.trim();
     if (!text) {
       return { letter: fallback(params.user, params.job), usedAi: false };
     }

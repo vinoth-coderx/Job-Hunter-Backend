@@ -19,6 +19,7 @@ import skillAssessmentRoutes from './skillAssessment.routes';
 import mockInterviewRoutes from './mockInterview.routes';
 import teamRoutes from './team.routes';
 import gamificationRoutes from './gamification.routes';
+import referralRoutes from './referrals.routes';
 
 const router = Router();
 
@@ -42,5 +43,6 @@ router.use('/skill-assessments', skillAssessmentRoutes);
 router.use('/mock-interviews', mockInterviewRoutes);
 router.use('/hirer/team', teamRoutes);
 router.use('/seeker', gamificationRoutes);
+router.use('/seeker/referrals', referralRoutes);
 
 export default router;

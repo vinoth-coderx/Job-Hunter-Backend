@@ -36,6 +36,28 @@ export const JOB_FRESHNESS_DAYS = 10;
 // see something instead of an empty list.
 export const AI_MATCH_THRESHOLD = 50;
 
+// ─── AI providers / models ───────────────────────────────────────────
+// Gemini (free tier) is primary. Two models:
+//   - "smart"   → 2.5 Flash, used for reasoning-heavy ops (matching, chat,
+//                 JD generation, anticipatory recommendations).
+//   - "lite"    → 2.5 Flash-Lite, used for fast structured extraction
+//                 (resume parsing, suggestion lists) — costs less quota.
+// Claude (paid, future) maps to Haiku 4.5 / Sonnet 4.6 via the same
+// "lite" / "smart" buckets in providers/claude.provider.ts.
+export const GEMINI_MODEL_SMART = 'gemini-2.5-flash';
+export const GEMINI_MODEL_LITE = 'gemini-2.5-flash-lite';
+export const CLAUDE_MODEL_LITE = 'claude-haiku-4-5-20251001';
+export const CLAUDE_MODEL_SMART = 'claude-sonnet-4-6';
+
+// ─── AI quota (free tier protection) ─────────────────────────────────
+// Per-user daily cap → soft limit, blocks just that user when hit.
+// Global daily cap → hard limit on total project requests, must stay
+// safely below Gemini free-tier RPD (~500) so we never get throttled
+// at the SDK layer. Both reset at IST midnight (Asia/Kolkata).
+export const AI_QUOTA_PER_USER_PER_DAY = 30;
+export const AI_QUOTA_GLOBAL_PER_DAY = 400;
+export const AI_QUOTA_TIMEZONE = 'Asia/Kolkata';
+
 // ─── Cron schedules ──────────────────────────────────────────────────
 // Hourly job fetch from external APIs.
 export const CRON_JOB_FETCH_SCHEDULE = '0 * * * *';

@@ -84,24 +84,15 @@ export const runAutoApplyForUser = async (
     Date.now() - settings.matchingRules.reapplyCooldownDays * 24 * 60 * 60 * 1000,
   );
 
-  // Candidate pool — recent native+active jobs, optionally external too.
-  const sources = settings.preferences.sources?.length
-    ? settings.preferences.sources
-    : ['native'];
-  const orFilters: Record<string, unknown>[] = [];
-  if (sources.includes('native')) {
-    orFilters.push({ isNative: true, status: 'active' });
-  }
-  if (sources.includes('external')) {
-    orFilters.push({ isNative: false, isActive: true });
-  }
-  if (orFilters.length === 0) {
-    orFilters.push({ isNative: true, status: 'active' });
-  }
-
+  // Candidate pool — native easy-apply jobs only. External / aggregator
+  // listings need a custom form or a third-party site, neither of which
+  // we can submit to without a human in the loop. The `sources` setting
+  // is ignored on purpose so a stale "external" preference can't drag
+  // in jobs we can't safely auto-apply to.
   const baseFilter: Record<string, unknown> = {
     postedAt: { $gte: cutoff },
-    $or: orFilters,
+    isNative: true,
+    status: 'active',
   };
   if (settings.preferences.locations?.length) {
     baseFilter.location = {
@@ -204,7 +195,10 @@ export const runAutoApplyForUser = async (
   const coverLetterEnabled =
     settings.aiCoverLetter.enabled && tier === 'yearly';
 
-  if (!settings.reviewMode && !options.dryRun) {
+  // Direct-apply mode (no review). The legacy `settings.reviewMode`
+  // field is intentionally ignored — auto-apply now always submits
+  // immediately for the easy-apply jobs that survived the filters.
+  if (!options.dryRun) {
     for (const cand of selected) {
       try {
         let quickNote: string | undefined;
@@ -241,32 +235,16 @@ export const runAutoApplyForUser = async (
     }
   }
 
-  // In auto-send mode, `applied` reflects already-submitted applications.
-  // In review mode, we persist the staged candidates (status='pending_review')
-  // so the review screen has them in one place; nothing has been submitted.
-  const appliedForLog: IAutoApplyAppliedEntry[] = settings.reviewMode
-    ? selected.map((cand) => ({
-        job: cand.job._id,
-        companyName: cand.job.company,
-        jobTitle: cand.job.title,
-        matchScore: cand.score,
-        source: cand.job.isNative ? 'native' : 'external',
-        appliedAt: new Date(),
-        coverLetterUsed: false,
-        status: 'pending_review',
-      }))
-    : applied;
-
   const log = await AutoApplyLog.create({
     user: user._id,
     runDate: new Date(),
     jobsScanned: pool.length,
     jobsMatched: ranked.length,
-    jobsApplied: settings.reviewMode ? 0 : applied.length,
+    jobsApplied: applied.length,
     jobsSkipped: skipped.length,
-    appliedJobs: appliedForLog,
+    appliedJobs: applied,
     skippedJobs: skipped,
-    awaitingApproval: settings.reviewMode && selected.length > 0,
+    awaitingApproval: false,
     notificationSent: false,
     triggeredManually: !!options.manual,
   });
@@ -278,19 +256,17 @@ export const runAutoApplyForUser = async (
   }
   await settings.save();
 
-  // Daily summary in-app notification.
+  // Daily summary in-app notification — only when something actually
+  // got applied, since direct-apply mode means a no-op run isn't worth
+  // pinging the user about.
   try {
-    if (applied.length > 0 || (settings.reviewMode && selected.length > 0)) {
+    if (applied.length > 0) {
       await Notification.create({
         user: user._id,
         role: 'seeker',
         type: 'auto_apply_summary',
-        title: settings.reviewMode
-          ? `${selected.length} matches ready to review`
-          : `Applied to ${applied.length} jobs for you`,
-        body: settings.reviewMode
-          ? 'Open Auto-Apply to approve or skip today\'s matches.'
-          : `Best match: ${applied[0]?.jobTitle ?? '—'} @ ${applied[0]?.companyName ?? '—'}`,
+        title: `Applied to ${applied.length} jobs for you`,
+        body: `Best match: ${applied[0]?.jobTitle ?? '—'} @ ${applied[0]?.companyName ?? '—'}`,
         data: { logId: log._id.toString() },
       });
       log.notificationSent = true;
@@ -307,7 +283,7 @@ export const runAutoApplyForUser = async (
     jobsMatched: ranked.length,
     jobsApplied: applied.length,
     jobsSkipped: skipped.length,
-    awaitingApproval: settings.reviewMode && selected.length > 0,
+    awaitingApproval: false,
     logId: log._id.toString(),
   };
 };

@@ -1,12 +1,5 @@
-import Anthropic from '@anthropic-ai/sdk';
-import { env } from '../../config/env';
 import { logger } from '../../utils/logger';
-
-const client = env.ANTHROPIC_API_KEY
-  ? new Anthropic({ apiKey: env.ANTHROPIC_API_KEY })
-  : null;
-
-const MODEL = 'claude-haiku-4-5-20251001';
+import { generateJson, isAiEnabled } from './providers';
 
 export interface ParsedEmployment {
   designation: string;
@@ -223,33 +216,22 @@ Rules:
 export const parseResumeText = async (resumeText: string): Promise<ParsedResume> => {
   const text = (resumeText || '').trim();
   if (text.length < 50) return empty;
-  if (!client) {
-    logger.info('resumeParser: ANTHROPIC_API_KEY not configured, returning empty');
+  if (!isAiEnabled()) {
+    logger.info('resumeParser: no AI provider configured, returning empty');
     return empty;
   }
 
-  // Cap input — Haiku handles 200k tokens but we already truncate text
-  // extraction to 20k chars upstream. Keep an explicit ceiling here too.
   const input = text.slice(0, 18000);
 
   try {
-    const res = await client.messages.create({
-      model: MODEL,
-      max_tokens: 4000,
+    const parsed = await generateJson<unknown>({
+      tier: 'lite',
       system: SYSTEM_PROMPT,
-      messages: [
-        {
-          role: 'user',
-          content: `Resume text:\n\n${input}\n\nReturn the JSON now.`,
-        },
-      ],
+      user: `Resume text:\n\n${input}\n\nReturn the JSON now.`,
+      maxTokens: 4000,
+      temperature: 0.2,
     });
-    const block = res.content[0];
-    const raw =
-      block && block.type === 'text' && typeof block.text === 'string' ? block.text.trim() : '';
-    // Strip accidental fences if the model adds them despite instructions.
-    const cleaned = raw.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '');
-    const parsed: unknown = JSON.parse(cleaned);
+    if (!parsed) return empty;
     return sanitize(parsed);
   } catch (err) {
     logger.warn(`resumeParser failed: ${(err as Error).message}`);

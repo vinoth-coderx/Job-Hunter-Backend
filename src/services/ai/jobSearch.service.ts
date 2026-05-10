@@ -1,16 +1,9 @@
-import Anthropic from '@anthropic-ai/sdk';
 import crypto from 'crypto';
-import { env } from '../../config/env';
 import { JOB_FRESHNESS_DAYS } from '../../config/constants';
 import { logger } from '../../utils/logger';
 import { redis } from '../../config/redis';
 import { Job, IJob } from '../../models/Job';
-
-const client = env.ANTHROPIC_API_KEY
-  ? new Anthropic({ apiKey: env.ANTHROPIC_API_KEY })
-  : null;
-
-const MODEL = 'claude-haiku-4-5-20251001';
+import { generateJson, isAiEnabled } from './providers';
 
 // Intent extracted from a free-form search query. Every field is optional —
 // the user can be vague ("frontend jobs") or precise ("senior react roles
@@ -134,27 +127,18 @@ export const extractSearchIntent = async (query: string): Promise<SearchIntent> 
     }
   }
 
-  if (!client) {
+  if (!isAiEnabled()) {
     const intent = heuristicIntent(trimmed);
     await redis.setex(cacheKeyForIntent(trimmed), 86400, JSON.stringify(intent));
     return intent;
   }
 
   try {
-    const response = await client.beta.messages.create({
-      model: MODEL,
-      max_tokens: 500,
-      system: [
-        {
-          type: 'text',
-          text: 'You parse a job seeker\'s natural-language query into structured filters. Identify role/title keywords, skills, target companies, location, job type, remote preference, experience range, and salary expectation. Return strict JSON only — no prose, no markdown.',
-          cache_control: { type: 'ephemeral' },
-        },
-      ],
-      messages: [
-        {
-          role: 'user',
-          content: `Parse this job search query into structured filters.
+    const parsed = await generateJson<Record<string, unknown>>({
+      tier: 'lite',
+      system:
+        "You parse a job seeker's natural-language query into structured filters. Identify role/title keywords, skills, target companies, location, job type, remote preference, experience range, and salary expectation. Return strict JSON only — no prose, no markdown.",
+      user: `Parse this job search query into structured filters.
 
 Query: "${trimmed}"
 
@@ -177,19 +161,11 @@ Examples:
 - "senior react dev in bangalore" → titleKeywords=["senior","react","developer"], skills=["react"], roleKeywords=["frontend developer"], location="bangalore"
 - "remote flutter jobs 15 LPA" → skills=["flutter"], remoteType="remote", salaryMinLpa=15
 - "full time data scientist with python at faang" → titleKeywords=["data","scientist"], skills=["python"], jobType="full-time", companyKeywords=["google","meta","amazon","apple","netflix"]`,
-        },
-      ],
+      maxTokens: 500,
+      temperature: 0.2,
     });
 
-    const text = response.content
-      .filter((b): b is Anthropic.TextBlock => b.type === 'text')
-      .map((b) => b.text)
-      .join('')
-      .trim();
-
-    // Strip code fences if the model wrapped the JSON
-    const jsonStr = text.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '');
-    const parsed = JSON.parse(jsonStr) as Record<string, unknown>;
+    if (!parsed) throw new Error('No JSON in response');
 
     const intent: SearchIntent = {
       titleKeywords: cleanList(parsed.titleKeywords),

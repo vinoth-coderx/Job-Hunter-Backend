@@ -1,13 +1,6 @@
-import Anthropic from '@anthropic-ai/sdk';
-import { env } from '../../config/env';
 import { logger } from '../../utils/logger';
 import { ISkillAssessmentQuestion, AssessmentLevel } from '../../models/SkillAssessment';
-
-const client = env.ANTHROPIC_API_KEY
-  ? new Anthropic({ apiKey: env.ANTHROPIC_API_KEY })
-  : null;
-
-const MODEL = 'claude-haiku-4-5-20251001';
+import { generateJson, isAiEnabled } from './providers';
 
 /**
  * Generate a multiple-choice assessment for the given skill and level.
@@ -26,7 +19,7 @@ export const generateAssessment = async (params: {
   const level = params.level ?? 'intermediate';
   const count = Math.min(20, Math.max(5, params.count ?? 8));
 
-  if (!client) return fallbackQuestions(skill, level, count);
+  if (!isAiEnabled()) return fallbackQuestions(skill, level, count);
 
   const system = `You write short, fair multiple-choice technical assessments. Output strict JSON:
 {
@@ -51,18 +44,14 @@ Rules:
   const prompt = `Skill: ${skill}\nGenerate ${count} questions.`;
 
   try {
-    const res = await client.messages.create({
-      model: MODEL,
-      max_tokens: 3000,
+    const parsed = await generateJson<{ questions?: unknown }>({
+      tier: 'lite',
       system,
-      messages: [{ role: 'user', content: prompt }],
+      user: prompt,
+      maxTokens: 3000,
+      temperature: 0.5,
     });
-    const block = res.content[0];
-    const raw =
-      block && block.type === 'text' && typeof block.text === 'string'
-        ? block.text.trim()
-        : '';
-    const parsed = JSON.parse(raw) as { questions?: unknown };
+    if (!parsed) return fallbackQuestions(skill, level, count);
     const arr = Array.isArray(parsed.questions) ? parsed.questions : [];
     const questions = arr
       .filter((x): x is Record<string, unknown> => typeof x === 'object' && x !== null)

@@ -19,10 +19,12 @@ import {
   updateJobStatus,
   deleteJob,
   getJobAnalytics,
+  generateJdEndpoint,
   createJobSchema,
   updateJobSchema,
   listMyJobsSchema,
   updateStatusSchema,
+  generateJdSchema,
 } from '../controllers/hirerJob.controller';
 import {
   listJobApplicants,
@@ -59,6 +61,9 @@ router.delete('/profile/photos/:filename', authenticate, deleteOfficePhoto);
 
 router.get('/stats', authenticate, getHirerStats);
 router.get('/analytics', authenticate, getHirerAnalytics);
+
+// AI: generate JD draft from role + keywords
+router.post('/jobs/generate', authenticate, validate(generateJdSchema), generateJdEndpoint);
 
 // Native job CRUD
 router.post('/jobs', authenticate, validate(createJobSchema), createJob);

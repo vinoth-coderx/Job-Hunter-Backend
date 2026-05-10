@@ -4,10 +4,12 @@ import mongoose from 'mongoose';
 import { Conversation } from '../models/Conversation';
 import { Message } from '../models/Message';
 import { User } from '../models/User';
+import { DeviceToken } from '../models/DeviceToken';
 import { asyncHandler } from '../utils/asyncHandler';
 import { ApiError } from '../utils/ApiError';
 import { AuthRequest } from '../types';
 import { emitToUser } from '../services/chat/socket';
+import { sendToTokens } from '../services/notification/fcm.service';
 import { uploadBuffer, CLOUDINARY_FOLDERS } from '../config/cloudinary';
 import { logger } from '../utils/logger';
 
@@ -452,8 +454,62 @@ export const sendMessage = asyncHandler(async (req: AuthRequest, res: Response) 
     // socket layer is optional — REST clients still get the response.
   }
 
+  // Push fan-out for backgrounded receivers. Non-blocking, errors
+  // swallowed — REST clients (and the in-app socket banner) already
+  // got the message, so push is purely a "wake the OS tray" extra.
+  // Skipped for self-chat (the sender is the only participant).
+  if (receiver.toString() !== req.user.id) {
+    void pushChatMessage({
+      senderId: req.user.id,
+      receiverId: receiver.toString(),
+      conversationId: conv._id.toString(),
+      preview: previewContent,
+    }).catch((err) => {
+      logger.warn(`chat push failed: ${(err as Error).message}`);
+    });
+  }
+
   res.status(201).json({ success: true, data: message });
 });
+
+/// Send an FCM push for a new chat message. Loads sender name (for the
+/// banner title), receiver's push preference, and registered device
+/// tokens, then dispatches via `sendToTokens`. Invalid tokens are
+/// pruned so dead devices stop receiving.
+const pushChatMessage = async (params: {
+  senderId: string;
+  receiverId: string;
+  conversationId: string;
+  preview: string;
+}): Promise<void> => {
+  const [sender, receiver, tokens] = await Promise.all([
+    User.findById(params.senderId).select('profile.fullName email').lean(),
+    User.findById(params.receiverId).select('notificationPreferences').lean(),
+    DeviceToken.find({ user: params.receiverId }).select('token').lean(),
+  ]);
+
+  if (!receiver) return;
+  if (receiver.notificationPreferences?.push === false) return;
+  const tokenStrs = tokens.map((t) => t.token).filter(Boolean);
+  if (tokenStrs.length === 0) return;
+
+  const senderName =
+    sender?.profile?.fullName?.trim() || sender?.email || 'New message';
+  const body = params.preview.trim().length > 0 ? params.preview : 'sent a message';
+
+  const result = await sendToTokens(tokenStrs, {
+    title: senderName,
+    body,
+    data: {
+      type: 'new_message',
+      conversationId: params.conversationId,
+    },
+  });
+
+  if (result.invalidTokens && result.invalidTokens.length > 0) {
+    await DeviceToken.deleteMany({ token: { $in: result.invalidTokens } });
+  }
+};
 
 export const markRead = asyncHandler(async (req: AuthRequest, res: Response) => {
   if (!req.user) throw ApiError.unauthorized();

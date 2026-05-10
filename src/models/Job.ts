@@ -37,6 +37,11 @@ export interface IJob extends Document {
   description: string;
   responsibilities?: string[];
   url: string;
+  // Direct company-careers / employer site link extracted from the
+  // listing when available. Preferred over `url` for external applies
+  // so seekers land on the employer's own form instead of the
+  // aggregator listing page.
+  applyUrl?: string;
 
   salaryMin?: number;
   salaryMax?: number;
@@ -115,6 +120,7 @@ const jobSchema = new Schema<IJob>(
     description: { type: String, required: true, maxlength: 20000 },
     responsibilities: { type: [String], default: undefined },
     url: { type: String, required: true, maxlength: 2000 },
+    applyUrl: { type: String, maxlength: 2000 },
 
     salaryMin: { type: Number, min: 0 },
     salaryMax: { type: Number, min: 0 },

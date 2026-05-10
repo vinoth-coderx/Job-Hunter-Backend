@@ -12,6 +12,8 @@ import {
   razorpayWebhook,
   createRazorpayOrderSchema,
   verifyRazorpayPaymentSchema,
+  redeemWithCoins,
+  redeemWithCoinsSchema,
 } from '../controllers/subscription.controller';
 import { authenticate } from '../middleware/auth';
 import { validate } from '../middleware/validate';
@@ -44,6 +46,12 @@ router.post(
   '/razorpay/verify',
   validate(verifyRazorpayPaymentSchema),
   razorpayVerifyPayment,
+);
+
+router.post(
+  '/redeem-with-coins',
+  validate(redeemWithCoinsSchema),
+  redeemWithCoins,
 );
 
 export default router;

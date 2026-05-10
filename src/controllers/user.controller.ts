@@ -5,6 +5,8 @@ import { HirerProfile } from '../models/HirerProfile';
 import { ApiError } from '../utils/ApiError';
 import { asyncHandler } from '../utils/asyncHandler';
 import { AuthRequest } from '../types';
+import { invalidateProfileOptimizerCache } from '../services/ai/profileOptimizer.service';
+import { maybeGrantProfileCompleteBonus } from '../services/coins/coin.service';
 
 export const updateProfileSchema = z.object({
   body: z.object({
@@ -69,7 +71,24 @@ export const updateProfile = asyncHandler(async (req: AuthRequest, res: Response
   const user = await User.findByIdAndUpdate(req.user._id, { $set: updates }, { new: true, runValidators: true });
   if (!user) throw ApiError.notFound('User not found');
 
-  res.json({ success: true, message: 'Profile updated', data: user.profile });
+  // Invalidate the Profile Coach cache so the next /ai/profile-optimizer
+  // fetch reflects the changes the user just made (otherwise it'd keep
+  // suggesting fields they already filled).
+  await invalidateProfileOptimizerCache(String(user._id));
+
+  // Profile-completion milestone bonus. Returns null when the user
+  // isn't at 100% yet; returns a result (with granted=false on replay)
+  // when they are. Either way the response carries the freshest wallet.
+  const completenessGrant = await maybeGrantProfileCompleteBonus(user);
+
+  res.json({
+    success: true,
+    message: 'Profile updated',
+    data: user.profile,
+    coinsAwarded: completenessGrant?.amount ?? 0,
+    coinsBalance:
+      completenessGrant?.balance ?? user.gamification?.coins ?? 0,
+  });
 });
 
 export const changePassword = asyncHandler(async (req: AuthRequest, res: Response) => {

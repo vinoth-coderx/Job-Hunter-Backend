@@ -39,7 +39,12 @@ const envSchema = z.object({
   THEIRSTACK_API_KEY: z.string().optional(),
 
   // ── AI ──────────────────────────────────────────────────
+  // Provider switch: 'gemini' (free tier, default) → swap to 'claude' once
+  // user volume justifies the spend. Each AI service routes through
+  // services/ai/providers/index.ts so swapping requires no service changes.
+  AI_PROVIDER: z.enum(['gemini', 'claude']).default('gemini'),
   ANTHROPIC_API_KEY: z.string().optional(),
+  GEMINI_API_KEY: z.string().optional(),
 
   // ── Cron toggle (per-env: prod=true, tests=false) ───────
   CRON_ENABLED: z.string().default('true').transform((v) => v === 'true'),

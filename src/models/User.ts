@@ -22,6 +22,10 @@ export interface IUser extends Document {
   passwordResetToken?: string;
   passwordResetExpires?: Date;
   refreshTokens: string[];
+  // Human-friendly share code (e.g. "RA8F2Q") generated lazily on first
+  // /seeker/referrals/code call. Indexed unique-sparse so existing rows
+  // without a code are valid and only generated codes have to be unique.
+  referralCode?: string;
   profile: {
     fullName: string;
     avatar?: string;
@@ -84,6 +88,11 @@ export interface IUser extends Document {
     longestStreak: number;
     lastCheckinDate?: Date;
     earnedBadges: { badgeId: string; earnedAt: Date }[];
+    // Soft currency wallet. Earned via applies / resume completion /
+    // daily check-ins / referrals; spent to unlock subscription tiers.
+    // Authoritative balance — never trust a client-supplied delta;
+    // all mutations go through server-side ledger entries.
+    coins: number;
   };
   lastLogin?: Date;
   createdAt: Date;
@@ -117,6 +126,14 @@ const userSchema = new Schema<IUser>(
     passwordResetToken: String,
     passwordResetExpires: Date,
     refreshTokens: { type: [String], default: [], select: false },
+    referralCode: {
+      type: String,
+      unique: true,
+      sparse: true,
+      uppercase: true,
+      trim: true,
+      maxlength: 12,
+    },
     profile: {
       fullName: { type: String, required: true, trim: true },
       avatar: String,
@@ -206,6 +223,7 @@ const userSchema = new Schema<IUser>(
         ],
         default: [],
       },
+      coins: { type: Number, default: 0, min: 0 },
     },
     lastLogin: Date,
   },

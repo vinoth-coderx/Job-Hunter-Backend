@@ -10,7 +10,14 @@ import { ApiError } from '../utils/ApiError';
 import { AuthRequest } from '../types';
 import { heuristicMatch } from '../services/ai/matcher.service';
 import { User } from '../models/User';
-import { APPLIED_JOB_RETENTION_DAYS } from '../jobs/jobScraper.cron';
+import { APPLIED_JOB_VIEW_DAYS } from '../jobs/jobScraper.cron';
+import { grantCoins } from '../services/coins/coin.service';
+
+// Apply earn rate. 5 coins per apply, capped at 50/day so the user can
+// still earn meaningfully (10 applies a day) without farming via spam-
+// applying to dozens of unrelated jobs.
+const APPLY_COIN_AMOUNT = 5;
+const APPLY_DAILY_CAP = 50;
 
 export const applySchema = z.object({
   body: z.object({
@@ -66,7 +73,7 @@ export const applyToJob = asyncHandler(async (req: AuthRequest, res: Response) =
       title: job.title,
       company: job.company,
       location: job.location,
-      url: job.url,
+      url: job.applyUrl || job.url,
     },
     applyType: job.isNative ? 'one_click' : 'external_manual',
     source: job.isNative ? 'native' : (job.source || 'other'),
@@ -109,7 +116,25 @@ export const applyToJob = asyncHandler(async (req: AuthRequest, res: Response) =
     }
   }
 
-  res.status(201).json({ success: true, message: 'Marked as applied', data: applied });
+  // Coin grant — best-effort, never fails the apply. Idempotency key is
+  // per-AppliedJob so the same record can never credit twice even if
+  // this controller somehow fires again for the same row.
+  const coinGrant = await grantCoins({
+    user: req.user.id,
+    amount: APPLY_COIN_AMOUNT,
+    source: 'apply',
+    idempotencyKey: `apply:${applied._id.toString()}`,
+    sourceRefId: applied._id.toString(),
+    dailyCap: APPLY_DAILY_CAP,
+  });
+
+  res.status(201).json({
+    success: true,
+    message: 'Marked as applied',
+    data: applied,
+    coinsAwarded: coinGrant.amount,
+    coinsBalance: coinGrant.balance,
+  });
 });
 
 /**
@@ -172,7 +197,7 @@ export const quickApply = asyncHandler(async (req: AuthRequest, res: Response) =
       title: job.title,
       company: job.company,
       location: job.location,
-      url: job.url,
+      url: job.applyUrl || job.url,
     },
     applyType: 'one_click',
     source: 'native',
@@ -186,6 +211,18 @@ export const quickApply = asyncHandler(async (req: AuthRequest, res: Response) =
 
   // Increment job-level counters atomically.
   await Job.updateOne({ _id: job._id }, { $inc: { applicationsCount: 1 } });
+
+  // Coin grant for the seeker. Same key/cap shape as applyToJob so the
+  // two paths share one daily ceiling. Best-effort: if the grant fails,
+  // the apply still succeeds.
+  const coinGrant = await grantCoins({
+    user: req.user.id,
+    amount: APPLY_COIN_AMOUNT,
+    source: 'apply',
+    idempotencyKey: `apply:${applied._id.toString()}`,
+    sourceRefId: applied._id.toString(),
+    dailyCap: APPLY_DAILY_CAP,
+  });
 
   // Notify the hirer (if any) — best-effort, never fails the apply.
   if (job.hirerProfile) {
@@ -217,7 +254,13 @@ export const quickApply = asyncHandler(async (req: AuthRequest, res: Response) =
     }
   }
 
-  res.status(201).json({ success: true, message: 'Application sent', data: applied });
+  res.status(201).json({
+    success: true,
+    message: 'Application sent',
+    data: applied,
+    coinsAwarded: coinGrant.amount,
+    coinsBalance: coinGrant.balance,
+  });
 });
 
 export const listApplied = asyncHandler(async (req: AuthRequest, res: Response) => {
@@ -229,10 +272,11 @@ export const listApplied = asyncHandler(async (req: AuthRequest, res: Response) 
   const limit = Math.min(100, Number.isFinite(limitRaw) && limitRaw > 0 ? limitRaw : 20);
   const skip = (page - 1) * limit;
 
-  // Cap the visible window to the retention period so the UI never shows
-  // records that the nightly cleanup is about to (or already did) purge.
+  // Cap the visible window to the last 30 days so the UI stays focused
+  // on actionable recent activity. Records between 30 and 90 days remain
+  // in the DB (covered by retention) and can be surfaced later if needed.
   const cutoff = new Date(
-    Date.now() - APPLIED_JOB_RETENTION_DAYS * 24 * 60 * 60 * 1000,
+    Date.now() - APPLIED_JOB_VIEW_DAYS * 24 * 60 * 60 * 1000,
   );
   const filter: Record<string, unknown> = {
     user: req.user._id,

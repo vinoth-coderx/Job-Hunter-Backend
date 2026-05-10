@@ -64,7 +64,7 @@ export interface ISubscription extends Document {
   endDate: Date;
   amountPaid: number;
   currency: string;
-  paymentMethod?: 'razorpay' | 'stripe' | 'manual';
+  paymentMethod?: 'razorpay' | 'stripe' | 'manual' | 'coins';
   paymentId?: string;
   orderId?: string;
   invoiceUrl?: string;
@@ -92,7 +92,7 @@ const subscriptionSchema = new Schema<ISubscription>(
     endDate: { type: Date, required: true, index: true },
     amountPaid: { type: Number, required: true, min: 0 },
     currency: { type: String, default: 'INR' },
-    paymentMethod: { type: String, enum: ['razorpay', 'stripe', 'manual'] },
+    paymentMethod: { type: String, enum: ['razorpay', 'stripe', 'manual', 'coins'] },
     paymentId: String,
     orderId: String,
     invoiceUrl: String,

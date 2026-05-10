@@ -6,6 +6,8 @@ import { HirerProfile } from '../models/HirerProfile';
 import { asyncHandler } from '../utils/asyncHandler';
 import { ApiError } from '../utils/ApiError';
 import { AuthRequest, JobStatus } from '../types';
+import { generateJd } from '../services/ai/jdGenerator.service';
+import { enforceQuota, refundQuota } from '../services/ai/quota.service';
 
 // ─────────────────────────────────────────────────────────────────────────
 // Schemas
@@ -344,4 +346,49 @@ export const getJobAnalytics = asyncHandler(async (req: AuthRequest, res: Respon
       isBoosted: job.isBoosted,
     },
   });
+});
+
+export const generateJdSchema = z.object({
+  body: z.object({
+    role: z.string().min(2).max(120),
+    experienceMinYears: z.coerce.number().min(0).max(60).optional(),
+    experienceMaxYears: z.coerce.number().min(0).max(60).optional(),
+    location: z.string().max(120).optional(),
+    remoteType: z.enum(['onsite', 'hybrid', 'remote']).optional(),
+    jobType: z.string().max(40).optional(),
+    keywords: z.array(z.string().min(1).max(40)).max(8).optional(),
+    toneHint: z.enum(['professional', 'casual', 'startup']).optional(),
+  }),
+});
+
+/**
+ * Generate a JD draft from a role + few keywords. The hirer always gets to
+ * edit before posting — this is a starting point, not the final post. One
+ * AI quota slot, refunded on failure.
+ */
+export const generateJdEndpoint = asyncHandler(async (req: AuthRequest, res: Response) => {
+  if (!req.user) throw ApiError.unauthorized();
+  const userId = String(req.user._id);
+
+  const profile = await HirerProfile.findOne({ user: userId }).select('companyName');
+  if (!profile) throw ApiError.forbidden('Hirer profile required to generate JD');
+
+  const body = req.body as z.infer<typeof generateJdSchema>['body'];
+  const quota = await enforceQuota(userId);
+
+  let jd;
+  try {
+    jd = await generateJd({ ...body, companyName: profile.companyName });
+  } catch (err) {
+    await refundQuota(userId);
+    throw err;
+  }
+
+  if (!jd) {
+    await refundQuota(userId);
+    res.json({ success: true, data: null, message: 'AI unavailable', quota });
+    return;
+  }
+
+  res.json({ success: true, data: jd, quota });
 });

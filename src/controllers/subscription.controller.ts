@@ -18,6 +18,16 @@ import {
   getRazorpayKeyId,
   RazorpayMode,
 } from '../services/razorpay.service';
+import { grantCoins, getBalance } from '../services/coins/coin.service';
+
+// Coin price per redeemable tier. Yearly is intentionally absent — at the
+// current earn rates a user would need months of streaks to hit 4-figure
+// yearly cost, so the alt-payment path stays focused on shorter tiers
+// where coins actually move the needle.
+const TIER_COIN_COST: Partial<Record<SubscriptionTier, number>> = {
+  weekly: 500,
+  monthly: 1500,
+};
 
 /**
  * Idempotently activate a subscription for a captured Razorpay payment.
@@ -113,8 +123,157 @@ export const subscribeSchema = z.object({
 });
 
 export const listPlans = asyncHandler(async (_req: AuthRequest, res: Response) => {
-  res.json({ success: true, data: Object.values(SUBSCRIPTION_PLANS) });
+  // Surface the coin price alongside each plan so the client can render
+  // the "Buy with coins" CTA without a second lookup.
+  const plans = Object.values(SUBSCRIPTION_PLANS).map((p) => ({
+    ...p,
+    coinCost: TIER_COIN_COST[p.tier as SubscriptionTier] ?? null,
+  }));
+  res.json({ success: true, data: plans });
 });
+
+export const redeemWithCoinsSchema = z.object({
+  body: z.object({
+    tier: z.enum(['weekly', 'monthly']),
+  }),
+});
+
+const todayKey = (): string => {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+};
+
+/**
+ * Activates a paid tier using the seeker's coin balance instead of a
+ * Razorpay payment. Designed defensively because coins are a soft
+ * currency the user *earned* — losing them to a partial failure is the
+ * worst possible UX:
+ *
+ *   1. Cheap pre-check rejects insufficient balance up-front so we
+ *      never half-commit just to bounce the user.
+ *   2. Coin deduction is idempotency-keyed `plan_redeem:<tier>:<date>`
+ *      so accidental double-taps within the same day return the
+ *      original deduction's result instead of charging twice.
+ *   3. If the subscription write fails AFTER the deduction lands, we
+ *      issue a compensating refund grant tagged with the same source
+ *      ref so the audit trail makes the rollback obvious.
+ */
+export const redeemWithCoins = asyncHandler(
+  async (req: AuthRequest, res: Response) => {
+    if (!req.user) throw ApiError.unauthorized();
+    const { tier } = req.body as z.infer<
+      typeof redeemWithCoinsSchema
+    >['body'];
+
+    const cost = TIER_COIN_COST[tier];
+    if (!cost || cost <= 0) {
+      throw ApiError.badRequest(`Tier '${tier}' is not redeemable with coins`);
+    }
+
+    const plan = SUBSCRIPTION_PLANS[tier];
+    if (!plan) throw ApiError.badRequest('Invalid subscription tier');
+
+    // 1. Cheap pre-check — saves a CoinLedger insert + rollback in the
+    //    common "user mis-clicked while broke" path.
+    const currentBalance = await getBalance(req.user.id);
+    if (currentBalance < cost) {
+      throw ApiError.badRequest(
+        `Not enough coins. Need ${cost}, you have ${currentBalance}.`,
+      );
+    }
+
+    // 2. Deduct. Date-keyed idempotency = at most one redemption per
+    //    tier per day; a double-tap returns 409 instead of double-spending.
+    const idempotencyKey = `plan_redeem:${tier}:${todayKey()}`;
+    const deduction = await grantCoins({
+      user: req.user.id,
+      amount: -cost,
+      source: 'plan_redeem',
+      idempotencyKey,
+      meta: { tier },
+    });
+    if (!deduction.granted) {
+      if (deduction.reason === 'duplicate') {
+        throw ApiError.conflict(
+          `This plan was already redeemed today. Try again tomorrow.`,
+        );
+      }
+      if (deduction.reason === 'invalid_amount') {
+        // Concurrent race or balance changed between pre-check and deduct.
+        throw ApiError.badRequest(
+          `Not enough coins. Have ${deduction.balance}, need ${cost}.`,
+        );
+      }
+      throw ApiError.internal('Could not deduct coins');
+    }
+
+    // 3. Activate the subscription. Anything failing past this point
+    //    triggers a compensating refund so the user never loses coins
+    //    without getting their plan.
+    try {
+      const startDate = new Date();
+      const endDate = new Date(
+        startDate.getTime() + plan.durationDays * 24 * 60 * 60 * 1000,
+      );
+
+      await Subscription.updateMany(
+        { user: req.user._id, status: 'active' },
+        { $set: { status: 'cancelled', cancelledAt: new Date() } },
+      );
+
+      const sub = await Subscription.create({
+        user: req.user._id,
+        tier,
+        status: 'active',
+        startDate,
+        endDate,
+        amountPaid: 0,
+        currency: 'INR',
+        paymentMethod: 'coins',
+        paymentId: `coins:${cost}:${idempotencyKey}`,
+        autoRenew: false,
+      });
+
+      await User.findByIdAndUpdate(req.user._id, {
+        $set: {
+          'subscription.tier': tier,
+          'subscription.status': 'active',
+          'subscription.startDate': startDate,
+          'subscription.endDate': endDate,
+          'subscription.paymentId': sub.paymentId,
+        },
+      });
+
+      logger.info(
+        `Coin redemption: user=${req.user.id} tier=${tier} cost=${cost}`,
+      );
+
+      res.status(201).json({
+        success: true,
+        message: 'Plan activated with coins',
+        data: sub,
+        coinsSpent: cost,
+        coinsBalance: deduction.balance,
+      });
+    } catch (err) {
+      // Compensating refund. Same idempotency-key prefix so the refund
+      // is permanently tied to the failed redemption attempt.
+      logger.error(
+        `Coin redemption rollback for user=${req.user.id}: ${err instanceof Error ? err.message : err}`,
+      );
+      await grantCoins({
+        user: req.user.id,
+        amount: cost,
+        source: 'admin_adjust',
+        idempotencyKey: `${idempotencyKey}:refund`,
+        meta: { reason: 'subscription_activation_failed', tier },
+      }).catch((refundErr) => {
+        logger.error('Refund failed — manual intervention needed', refundErr);
+      });
+      throw err;
+    }
+  },
+);
 
 export const currentSubscription = asyncHandler(async (req: AuthRequest, res: Response) => {
   if (!req.user) throw ApiError.unauthorized();

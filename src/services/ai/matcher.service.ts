@@ -1,16 +1,19 @@
-import Anthropic from '@anthropic-ai/sdk';
-import { env } from '../../config/env';
 import { AI_MATCH_THRESHOLD } from '../../config/constants';
 import { logger } from '../../utils/logger';
 import { IUser } from '../../models/User';
 import { IJob } from '../../models/Job';
 import { redis } from '../../config/redis';
+import { generateJson, isAiEnabled } from './providers';
+import { completenessFromUser } from '../profile/completeness.service';
 
-const client = env.ANTHROPIC_API_KEY
-  ? new Anthropic({ apiKey: env.ANTHROPIC_API_KEY })
-  : null;
-
-const MODEL = 'claude-haiku-4-5-20251001';
+// Soft blend so empty profiles still see meaningful scores (60% floor)
+// but a fully-filled profile gets the un-discounted match. Pulls users
+// toward profile completion without locking them out at zero state.
+const blendWithCompleteness = (rawScore: number, user: IUser): number => {
+  const completeness = completenessFromUser(user);
+  const factor = 0.6 + 0.4 * (completeness / 100);
+  return Math.max(0, Math.min(100, Math.round(rawScore * factor)));
+};
 
 export interface MatchResult {
   jobId: string;
@@ -84,9 +87,6 @@ export const heuristicMatch = (user: IUser, job: IJob): MatchResult => {
     score += 10;
   }
 
-  // Salary alignment — only awards when both the candidate and the job
-  // exposed a number. Full credit if the candidate's expected min sits
-  // inside the job's range; partial when the job exceeds expectations
   // (a positive surprise); zero when the job offers materially less.
   const expected = user.profile.expectedSalaryMin;
   const jobMin = job.salaryMin;
@@ -117,7 +117,7 @@ export const heuristicMatch = (user: IUser, job: IJob): MatchResult => {
 
   return {
     jobId: job._id.toString(),
-    score: Math.min(100, Math.round(score)),
+    score: blendWithCompleteness(score, user),
     matchedSkills: matched,
     missingSkills: missing.slice(0, 5),
   };
@@ -127,7 +127,7 @@ export const aiMatch = async (user: IUser, job: IJob): Promise<MatchResult> => {
   const cached = await redis.get(cacheKey(user._id.toString(), job._id.toString()));
   if (cached) return JSON.parse(cached) as MatchResult;
 
-  if (!client) {
+  if (!isAiEnabled()) {
     const heuristic = heuristicMatch(user, job);
     await redis.setex(cacheKey(user._id.toString(), job._id.toString()), 86400, JSON.stringify(heuristic));
     return heuristic;
@@ -154,20 +154,16 @@ Required Skills: ${(job.skills || []).join(', ')}
 Description: ${job.description.slice(0, 2000)}
 `.trim();
 
-    const response = await client.beta.messages.create({
-      model: MODEL,
-      max_tokens: 400,
-      system: [
-        {
-          type: 'text',
-          text: 'You are a career matching expert. Score how well a candidate matches a job from 0-100 based on skills, experience, role fit, and location. Return strict JSON only.',
-          cache_control: { type: 'ephemeral' },
-        },
-      ],
-      messages: [
-        {
-          role: 'user',
-          content: `Score the candidate-job match.
+    const parsed = await generateJson<{
+      score: number;
+      reasoning?: string;
+      matchedSkills?: string[];
+      missingSkills?: string[];
+    }>({
+      tier: 'lite',
+      system:
+        'You are a career matching expert. Score how well a candidate matches a job from 0-100 based on skills, experience, role fit, and location. Return strict JSON only.',
+      user: `Score the candidate-job match.
 
 CANDIDATE PROFILE:
 ${profileText}
@@ -177,25 +173,16 @@ ${jobText}
 
 Return JSON only with this exact shape:
 {"score": <0-100>, "reasoning": "<one short sentence>", "matchedSkills": ["..."], "missingSkills": ["..."]}`,
-        },
-      ],
+      maxTokens: 400,
+      temperature: 0.2,
     });
 
-    const block = response.content[0];
-    const text = block.type === 'text' ? block.text : '';
-    const jsonMatch = text.match(/\{[\s\S]*\}/);
-    if (!jsonMatch) throw new Error('No JSON in response');
+    if (!parsed) throw new Error('No JSON in response');
 
-    const parsed = JSON.parse(jsonMatch[0]) as {
-      score: number;
-      reasoning?: string;
-      matchedSkills?: string[];
-      missingSkills?: string[];
-    };
-
+    const rawScore = Math.max(0, Math.min(100, Math.round(parsed.score)));
     const result: MatchResult = {
       jobId: job._id.toString(),
-      score: Math.max(0, Math.min(100, Math.round(parsed.score))),
+      score: blendWithCompleteness(rawScore, user),
       reasoning: parsed.reasoning,
       matchedSkills: parsed.matchedSkills || [],
       missingSkills: parsed.missingSkills || [],
@@ -215,7 +202,7 @@ export const matchJobsForUser = async (
   threshold = AI_MATCH_THRESHOLD,
   useAi = false,
 ): Promise<Array<{ job: IJob; match: MatchResult }>> => {
-  const matcher = useAi && client ? aiMatch : async (u: IUser, j: IJob) => heuristicMatch(u, j);
+  const matcher = useAi && isAiEnabled() ? aiMatch : async (u: IUser, j: IJob) => heuristicMatch(u, j);
 
   const matched: Array<{ job: IJob; match: MatchResult }> = [];
   const concurrency = useAi ? 5 : 50;

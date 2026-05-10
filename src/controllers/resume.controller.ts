@@ -6,6 +6,11 @@ import { AuthRequest } from '../types';
 import { User } from '../models/User';
 import { logger } from '../utils/logger';
 import { parseResumeText } from '../services/ai/resumeParser.service';
+import { runResumeOnboarding } from '../services/ai/combined/resumeOnboarding.service';
+import { enforceQuota, refundQuota } from '../services/ai/quota.service';
+import { maybeGrantProfileCompleteBonus } from '../services/coins/coin.service';
+import { Job } from '../models/Job';
+import { JOB_FRESHNESS_DAYS } from '../config/constants';
 import {
   CLOUDINARY_FOLDERS,
   destroyAsset,
@@ -101,6 +106,11 @@ export const uploadResumeHandler = asyncHandler(async (req: AuthRequest, res: Re
     await destroyAsset(oldPublicId, 'raw', 'authenticated');
   }
 
+  // A resume upload often pushes the user across the 100% threshold —
+  // check immediately so the seeker sees the bonus reflected in the
+  // upload response (no separate refresh needed).
+  const completenessGrant = await maybeGrantProfileCompleteBonus(user);
+
   res.status(201).json({
     success: true,
     message: 'Resume uploaded',
@@ -110,6 +120,9 @@ export const uploadResumeHandler = asyncHandler(async (req: AuthRequest, res: Re
       // Clients should call GET /resume to obtain a fresh signed URL each time.
       downloadUrl: `/api/v1/users/resume`,
     },
+    coinsAwarded: completenessGrant?.amount ?? 0,
+    coinsBalance:
+      completenessGrant?.balance ?? user.gamification?.coins ?? 0,
   });
 });
 
@@ -175,6 +188,64 @@ export const parseResumeHandler = asyncHandler(async (req: AuthRequest, res: Res
 
   const parsed = await parseResumeText(text);
   res.json({ success: true, data: parsed });
+});
+
+/**
+ * Single-call onboarding: takes the user's stored resume text + the freshest
+ * native+external job pool, runs ONE Gemini "smart" call, and returns the
+ * parsed resume, top matches, and concrete resume improvement suggestions.
+ *
+ * Counts as a single AI quota slot. Refunds the slot if the LLM produces no
+ * usable result (quota over → 429 with countdown payload).
+ */
+export const resumeOnboardHandler = asyncHandler(async (req: AuthRequest, res: Response) => {
+  if (!req.user) throw ApiError.unauthorized();
+  const userId = String(req.user._id);
+
+  const user = await User.findById(userId).select('profile.resumeText profile.fullName profile.skills');
+  if (!user) throw ApiError.notFound('User not found');
+
+  const text = user.profile.resumeText || '';
+  if (!text) {
+    res.json({
+      success: true,
+      message: 'No resume text available — upload a text-based PDF or DOCX first.',
+      data: null,
+    });
+    return;
+  }
+
+  const quota = await enforceQuota(userId);
+
+  const sinceMs = Date.now() - JOB_FRESHNESS_DAYS * 24 * 60 * 60 * 1000;
+  const candidates = await Job.find({
+    status: 'active',
+    postedAt: { $gte: new Date(sinceMs) },
+  })
+    .sort({ postedAt: -1 })
+    .limit(30)
+    .lean();
+
+  let result;
+  try {
+    result = await runResumeOnboarding(text, candidates as never);
+  } catch (err) {
+    await refundQuota(userId);
+    throw err;
+  }
+
+  if (!result) {
+    await refundQuota(userId);
+    res.json({
+      success: true,
+      message: 'Resume too short or AI unavailable',
+      data: null,
+      quota,
+    });
+    return;
+  }
+
+  res.json({ success: true, data: result, quota });
 });
 
 export const deleteResumeHandler = asyncHandler(async (req: AuthRequest, res: Response) => {

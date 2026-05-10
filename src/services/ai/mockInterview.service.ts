@@ -1,17 +1,10 @@
-import Anthropic from '@anthropic-ai/sdk';
-import { env } from '../../config/env';
 import { logger } from '../../utils/logger';
 import {
   ICandidateProfileSnapshot,
   IMockInterviewTurn,
   MockInterviewType,
 } from '../../models/MockInterview';
-
-const client = env.ANTHROPIC_API_KEY
-  ? new Anthropic({ apiKey: env.ANTHROPIC_API_KEY })
-  : null;
-
-const MODEL = 'claude-haiku-4-5-20251001';
+import { generateJson, isAiEnabled } from './providers';
 
 const SYSTEM_BY_TYPE: Record<MockInterviewType, string> = {
   hr: 'You are conducting an HR / fit interview. Focus on motivation, communication, teamwork, and resilience. Avoid coding questions.',
@@ -77,7 +70,7 @@ export const nextInterviewerTurn = async (params: {
     params;
   const questionsAsked = turns.filter((t) => t.role === 'interviewer').length;
 
-  if (!client) {
+  if (!isAiEnabled()) {
     return fallbackTurn(role, interviewType, questionsAsked, questionsTarget);
   }
 
@@ -116,18 +109,7 @@ Rules:
     : `Conversation so far:\n${transcript}\n\nGive the next interviewer turn.`;
 
   try {
-    const res = await client.messages.create({
-      model: MODEL,
-      max_tokens: 800,
-      system,
-      messages: [{ role: 'user', content: prompt }],
-    });
-    const block = res.content[0];
-    const raw =
-      block && block.type === 'text' && typeof block.text === 'string'
-        ? block.text.trim()
-        : '';
-    const parsed = JSON.parse(raw) as {
+    const parsed = await generateJson<{
       question?: string;
       feedback?: {
         relevance?: number;
@@ -137,7 +119,16 @@ Rules:
       };
       shouldFinish?: boolean;
       answerWasIrrelevant?: boolean;
-    };
+    }>({
+      tier: 'smart',
+      system,
+      user: prompt,
+      maxTokens: 800,
+      temperature: 0.6,
+    });
+    if (!parsed) {
+      return fallbackTurn(role, interviewType, questionsAsked, questionsTarget);
+    }
     const question = String(parsed.question ?? '').trim();
     if (!question) {
       return fallbackTurn(role, interviewType, questionsAsked, questionsTarget);
@@ -263,7 +254,7 @@ export const summariseInterview = async (params: {
     };
   };
 
-  if (!client) return heuristic();
+  if (!isAiEnabled()) return heuristic();
 
   const transcript = turns
     .map((t) => `${t.role === 'interviewer' ? 'Q' : 'A'}: ${t.text}`)
@@ -277,21 +268,17 @@ Output strict JSON:
 {"finalScore": 0-100, "finalSummary": "3-5 sentences. Lead with biggest strength, then biggest gap, then concrete next step. No fluff."}`;
 
   try {
-    const res = await client.messages.create({
-      model: MODEL,
-      max_tokens: 600,
-      system,
-      messages: [{ role: 'user', content: transcript }],
-    });
-    const block = res.content[0];
-    const raw =
-      block && block.type === 'text' && typeof block.text === 'string'
-        ? block.text.trim()
-        : '';
-    const parsed = JSON.parse(raw) as {
+    const parsed = await generateJson<{
       finalScore?: number;
       finalSummary?: string;
-    };
+    }>({
+      tier: 'smart',
+      system,
+      user: transcript,
+      maxTokens: 600,
+      temperature: 0.4,
+    });
+    if (!parsed) return heuristic();
     const score = typeof parsed.finalScore === 'number'
       ? Math.max(0, Math.min(100, Math.round(parsed.finalScore)))
       : 0;

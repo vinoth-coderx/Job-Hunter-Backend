@@ -6,6 +6,22 @@ import { SkillAssessment } from '../models/SkillAssessment';
 import { asyncHandler } from '../utils/asyncHandler';
 import { ApiError } from '../utils/ApiError';
 import { AuthRequest } from '../types';
+import { completenessFromUser } from '../services/profile/completeness.service';
+import { grantCoins } from '../services/coins/coin.service';
+
+// Daily check-in coin economy. Conservative defaults — see project memory
+// "Coin economy default values" for the agreed table.
+const CHECKIN_COIN_BASE = 10;
+const CHECKIN_COIN_PER_STREAK_DAY = 5;
+const CHECKIN_COIN_CAP = 30;
+
+const computeCheckinReward = (streakCount: number): number => {
+  const reward = CHECKIN_COIN_BASE + (streakCount - 1) * CHECKIN_COIN_PER_STREAK_DAY;
+  return Math.max(CHECKIN_COIN_BASE, Math.min(CHECKIN_COIN_CAP, reward));
+};
+
+const dateKey = (d: Date): string =>
+  `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 
 interface BadgeDef {
   id: string;
@@ -96,23 +112,6 @@ const BADGES: BadgeDef[] = [
     evaluate: (c) => c.passedAssessments >= 1,
   },
 ];
-
-const completenessFromUser = (user: { profile: { fullName: string; headline?: string; experienceYears: number; skills: string[]; preferredRoles: string[]; preferredLocations: string[]; expectedSalaryMin?: number; resumeUrl?: string; resumeText?: string; preferredJobTypes: string[]; resumeFile?: unknown } }): number => {
-  const p = user.profile;
-  let s = 0;
-  if (p.fullName) s += 5;
-  if (p.headline && p.headline.length >= 10) s += 10;
-  if (p.experienceYears > 0) s += 5;
-  if (p.skills?.length >= 5) s += 20;
-  else if (p.skills?.length >= 1) s += 10;
-  if (p.preferredRoles?.length > 0) s += 10;
-  if (p.preferredLocations?.length > 0) s += 10;
-  if (p.preferredJobTypes?.length > 0) s += 5;
-  if (p.expectedSalaryMin && p.expectedSalaryMin > 0) s += 5;
-  if (p.resumeUrl || p.resumeFile) s += 20;
-  if (p.resumeText && p.resumeText.length > 200) s += 10;
-  return Math.max(0, Math.min(100, s));
-};
 
 const buildContext = async (userId: string): Promise<BadgeContext> => {
   const user = await User.findById(userId).lean();
@@ -213,6 +212,25 @@ export const checkInStreak = asyncHandler(async (req: AuthRequest, res: Response
   user.gamification.lastCheckinDate = today;
   await user.save();
 
+  // Coin grant — only when this is a fresh day's check-in (not the
+  // already-checked-in-today branch). The ledger's idempotency key
+  // also blocks same-day replays as a belt-and-braces guard if the
+  // streakChanged flag ever drifts from the actual ledger state.
+  let coinsAwarded = 0;
+  let coinsBalance = user.gamification.coins ?? 0;
+  if (streakChanged) {
+    const reward = computeCheckinReward(user.gamification.streakCount);
+    const grant = await grantCoins({
+      user: user._id,
+      amount: reward,
+      source: 'checkin',
+      idempotencyKey: `checkin:${dateKey(today)}`,
+      meta: { streakCount: user.gamification.streakCount },
+    });
+    coinsAwarded = grant.amount;
+    coinsBalance = grant.balance;
+  }
+
   res.json({
     success: true,
     data: {
@@ -220,6 +238,23 @@ export const checkInStreak = asyncHandler(async (req: AuthRequest, res: Response
       longestStreak: user.gamification.longestStreak,
       lastCheckinDate: user.gamification.lastCheckinDate,
       streakChanged,
+      coinsAwarded,
+      coinsBalance,
+    },
+  });
+});
+
+export const getCoins = asyncHandler(async (req: AuthRequest, res: Response) => {
+  if (!req.user) throw ApiError.unauthorized();
+  const user = await User.findById(req.user._id)
+    .select('gamification.coins')
+    .lean();
+  if (!user) throw ApiError.notFound('User not found');
+
+  res.json({
+    success: true,
+    data: {
+      balance: user.gamification?.coins ?? 0,
     },
   });
 });

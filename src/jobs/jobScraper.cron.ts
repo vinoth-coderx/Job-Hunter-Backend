@@ -17,6 +17,12 @@ let isRunning = false;
 // recent activity.
 export const APPLIED_JOB_RETENTION_DAYS = 90;
 
+// User-visible window for the Applied list. Records older than this are
+// hidden from the UI even though they still live in the DB until the
+// retention sweep removes them. Kept shorter than retention so a future
+// "show all history" toggle can still surface the buffered records.
+export const APPLIED_JOB_VIEW_DAYS = 30;
+
 export const startJobScraperCron = (): void => {
   if (!env.CRON_ENABLED) {
     logger.info('Cron disabled by config');

@@ -1,14 +1,7 @@
-import Anthropic from '@anthropic-ai/sdk';
-import { env } from '../../config/env';
 import { logger } from '../../utils/logger';
 import { IUser } from '../../models/User';
 import { redis } from '../../config/redis';
-
-const client = env.ANTHROPIC_API_KEY
-  ? new Anthropic({ apiKey: env.ANTHROPIC_API_KEY })
-  : null;
-
-const MODEL = 'claude-haiku-4-5-20251001';
+import { generateJson, isAiEnabled } from './providers';
 
 export type SuggestionPriority = 'high' | 'medium' | 'low';
 export type SuggestionField =
@@ -38,6 +31,18 @@ export interface ProfileOptimizationResult {
 }
 
 const cacheKey = (userId: string) => `profile-opt:${userId}`;
+
+/**
+ * Invalidate the optimizer cache for a user. Call this from anywhere
+ * that mutates the user's profile so the next /ai/profile-optimizer
+ * fetch sees fresh suggestions reflecting the change instead of stale
+ * advice ("Add a headline" after the user just added one).
+ */
+export const invalidateProfileOptimizerCache = async (
+  userId: string,
+): Promise<void> => {
+  await redis.del(cacheKey(userId));
+};
 
 const profileBlock = (user: IUser): string => {
   const p = user.profile;
@@ -154,21 +159,24 @@ const heuristicSuggestions = (user: IUser): ProfileSuggestion[] => {
  */
 export const optimizeProfile = async (
   user: IUser,
+  opts: { forceRefresh?: boolean } = {},
 ): Promise<ProfileOptimizationResult> => {
   const id = user._id.toString();
-  const cached = await redis.get(cacheKey(id));
-  if (cached) {
-    try {
-      return JSON.parse(cached) as ProfileOptimizationResult;
-    } catch {
-      // fall through and recompute
+  if (!opts.forceRefresh) {
+    const cached = await redis.get(cacheKey(id));
+    if (cached) {
+      try {
+        return JSON.parse(cached) as ProfileOptimizationResult;
+      } catch {
+        // fall through and recompute
+      }
     }
   }
 
   const completenessScore = computeCompletenessScore(user);
   const heuristics = heuristicSuggestions(user);
 
-  if (!client) {
+  if (!isAiEnabled()) {
     const result: ProfileOptimizationResult = {
       completenessScore,
       suggestions: heuristics,
@@ -205,20 +213,20 @@ ${profileBlock(user)}
 Generate suggestions now.`;
 
   try {
-    const res = await client.messages.create({
-      model: MODEL,
-      max_tokens: 900,
-      system,
-      messages: [{ role: 'user', content: prompt }],
+    // On forceRefresh we crank the temperature so the user genuinely
+    // sees a different angle/wording, not the same suggestion list with
+    // a fresh timestamp.
+    const parsed = await generateJson<{ suggestions?: unknown }>({
+      tier: 'lite',
+      system: opts.forceRefresh
+        ? `${system}\n\nIMPORTANT: This is a re-analysis. Surface ANGLES and SPECIFIC SUGGESTIONS that differ from a typical first pass — pick less-obvious gaps, novel phrasings, or sections you'd usually mention second.`
+        : system,
+      user: prompt,
+      maxTokens: 900,
+      temperature: opts.forceRefresh ? 0.85 : 0.4,
     });
-    const block = res.content[0];
-    const raw =
-      block && block.type === 'text' && typeof block.text === 'string'
-        ? block.text.trim()
-        : '';
     let suggestions: ProfileSuggestion[] = [];
-    try {
-      const parsed = JSON.parse(raw) as { suggestions?: unknown };
+    if (parsed) {
       const arr = Array.isArray(parsed.suggestions) ? parsed.suggestions : [];
       // Sanitise — never trust the LLM blindly.
       suggestions = arr
@@ -249,8 +257,6 @@ Generate suggestions now.`;
               : undefined,
         }))
         .filter((s) => s.title.length >= 3);
-    } catch (e) {
-      logger.warn(`profileOptimizer JSON parse failed: ${(e as Error).message}`);
     }
 
     if (suggestions.length === 0) suggestions = heuristics;

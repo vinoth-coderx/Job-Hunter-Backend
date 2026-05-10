@@ -1,15 +1,8 @@
-import Anthropic from '@anthropic-ai/sdk';
-import { env } from '../../config/env';
 import { logger } from '../../utils/logger';
 import { IUser } from '../../models/User';
 import { Job } from '../../models/Job';
 import { redis } from '../../config/redis';
-
-const client = env.ANTHROPIC_API_KEY
-  ? new Anthropic({ apiKey: env.ANTHROPIC_API_KEY })
-  : null;
-
-const MODEL = 'claude-haiku-4-5-20251001';
+import { generateJson, isAiEnabled } from './providers';
 
 export interface SkillGapResult {
   role: string;
@@ -107,7 +100,7 @@ export const analyseSkillGap = async (
 
   let resources: SkillResource[] = [];
   let usedAi = false;
-  if (client && missing.length > 0) {
+  if (isAiEnabled() && missing.length > 0) {
     try {
       const top = missing.slice(0, 6).map((m) => m.skill);
       const system = `Suggest concise learning resources to fill skill gaps for a Job seeker. Output strict JSON:
@@ -116,19 +109,14 @@ export const analyseSkillGap = async (
 ]}
 Rules: ONLY JSON, no prose. Up to 2 resources per skill, max 12 total. Prefer free / well-known options. URLs must be real (skip if unsure).`;
       const userPrompt = `Skills to fill: ${top.join(', ')}\nTarget role: ${role}\nCandidate experience: ${user.profile.experienceYears} years.`;
-      const res = await client.messages.create({
-        model: MODEL,
-        max_tokens: 900,
+      const parsed = await generateJson<{ resources?: unknown }>({
+        tier: 'lite',
         system,
-        messages: [{ role: 'user', content: userPrompt }],
+        user: userPrompt,
+        maxTokens: 900,
+        temperature: 0.4,
       });
-      const block = res.content[0];
-      const raw =
-        block && block.type === 'text' && typeof block.text === 'string'
-          ? block.text.trim()
-          : '';
-      try {
-        const parsed = JSON.parse(raw) as { resources?: unknown };
+      if (parsed) {
         const arr = Array.isArray(parsed.resources) ? parsed.resources : [];
         resources = arr
           .filter((x): x is Record<string, unknown> => typeof x === 'object' && x !== null)
@@ -147,8 +135,6 @@ Rules: ONLY JSON, no prose. Up to 2 resources per skill, max 12 total. Prefer fr
           }))
           .filter((r) => r.skill.length > 0 && r.title.length > 2);
         usedAi = true;
-      } catch (e) {
-        logger.warn(`skillGap JSON parse failed: ${(e as Error).message}`);
       }
     } catch (err) {
       logger.warn(`skillGap LLM failed: ${(err as Error).message}`);
