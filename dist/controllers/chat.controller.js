@@ -8,6 +8,8 @@ const User_1 = require("../models/User");
 const asyncHandler_1 = require("../utils/asyncHandler");
 const ApiError_1 = require("../utils/ApiError");
 const socket_1 = require("../services/chat/socket");
+const cloudinary_1 = require("../config/cloudinary");
+const logger_1 = require("../utils/logger");
 const isObjectId = (s) => /^[a-f0-9]{24}$/i.test(s);
 exports.startConversationSchema = zod_1.z.object({
     body: zod_1.z.object({
@@ -18,10 +20,12 @@ exports.startConversationSchema = zod_1.z.object({
 });
 exports.sendMessageSchema = zod_1.z.object({
     body: zod_1.z.object({
-        content: zod_1.z.string().min(1).max(4000),
+        content: zod_1.z.string().max(4000).optional().default(''),
         type: zod_1.z.enum(['text', 'file', 'interview_invite']).default('text'),
     }),
 });
+const IMAGE_MIME_PREFIXES = ['image/'];
+const isImage = (mime) => IMAGE_MIME_PREFIXES.some((p) => mime.startsWith(p));
 const ensureParticipant = async (userId, conversationId) => {
     if (!isObjectId(conversationId))
         throw ApiError_1.ApiError.badRequest('Invalid conversation id');
@@ -231,18 +235,48 @@ exports.sendMessage = (0, asyncHandler_1.asyncHandler)(async (req, res) => {
     if (!req.user)
         throw ApiError_1.ApiError.unauthorized();
     const conv = await ensureParticipant(req.user._id, String(req.params.id));
-    const { content, type } = req.body;
+    const parsed = req.body;
+    let { content, type } = parsed;
+    content = (content ?? '').trim();
+    const uploaded = req.file;
+    if (!uploaded && content.length === 0) {
+        throw ApiError_1.ApiError.badRequest('Message must have content or a file attachment.');
+    }
+    let filePayload;
+    if (uploaded) {
+        try {
+            const result = await (0, cloudinary_1.uploadBuffer)(uploaded.buffer, {
+                folder: cloudinary_1.CLOUDINARY_FOLDERS.CHAT_ATTACHMENT,
+                resourceType: isImage(uploaded.mimetype) ? 'image' : 'raw',
+            });
+            filePayload = {
+                url: result.url,
+                filename: uploaded.originalname,
+                sizeBytes: uploaded.size,
+                type: uploaded.mimetype,
+            };
+            type = 'file';
+        }
+        catch (err) {
+            logger_1.logger.error('Chat attachment upload failed', err);
+            throw ApiError_1.ApiError.internal('Could not upload attachment. Try again.');
+        }
+    }
     const receiver = otherParticipant(conv, req.user._id);
     const message = await Message_1.Message.create({
         conversation: conv._id,
         sender: req.user._id,
         receiver,
         type,
-        content,
+        content: content.length > 0 ? content : (filePayload?.filename ?? ''),
+        file: filePayload,
         sentAt: new Date(),
     });
+    const previewContent = filePayload && content.length === 0
+        ? `📎 ${filePayload.filename}`
+        : content;
     conv.lastMessage = {
-        content,
+        content: previewContent,
         sentAt: message.sentAt,
         sender: req.user._id,
     };

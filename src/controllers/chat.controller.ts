@@ -8,6 +8,8 @@ import { asyncHandler } from '../utils/asyncHandler';
 import { ApiError } from '../utils/ApiError';
 import { AuthRequest } from '../types';
 import { emitToUser } from '../services/chat/socket';
+import { uploadBuffer, CLOUDINARY_FOLDERS } from '../config/cloudinary';
+import { logger } from '../utils/logger';
 
 const isObjectId = (s: string) => /^[a-f0-9]{24}$/i.test(s);
 
@@ -23,12 +25,18 @@ export const startConversationSchema = z.object({
   }),
 });
 
+// `content` is optional at the schema layer because file-only messages
+// are valid (image with no caption). The controller enforces "either
+// content or file" before persisting so we never store empty rows.
 export const sendMessageSchema = z.object({
   body: z.object({
-    content: z.string().min(1).max(4000),
+    content: z.string().max(4000).optional().default(''),
     type: z.enum(['text', 'file', 'interview_invite']).default('text'),
   }),
 });
+
+const IMAGE_MIME_PREFIXES = ['image/'];
+const isImage = (mime: string) => IMAGE_MIME_PREFIXES.some((p) => mime.startsWith(p));
 
 // ─────────────────────────────────────────────────────────────────────────
 // Helpers
@@ -364,7 +372,40 @@ export const listMessages = asyncHandler(async (req: AuthRequest, res: Response)
 export const sendMessage = asyncHandler(async (req: AuthRequest, res: Response) => {
   if (!req.user) throw ApiError.unauthorized();
   const conv = await ensureParticipant(req.user._id!, String(req.params.id));
-  const { content, type } = req.body as z.infer<typeof sendMessageSchema>['body'];
+  const parsed = req.body as z.infer<typeof sendMessageSchema>['body'];
+  let { content, type } = parsed;
+  content = (content ?? '').trim();
+
+  const uploaded = req.file;
+  if (!uploaded && content.length === 0) {
+    throw ApiError.badRequest('Message must have content or a file attachment.');
+  }
+
+  // When a file rides along, push it to Cloudinary first. Images go to
+  // the regular 'image' resource type so they get the CDN's auto-format
+  // / responsive transforms; everything else (PDF/DOC/XLS/TXT) is 'raw'.
+  let filePayload: { url: string; filename: string; sizeBytes: number; type: string } | undefined;
+  if (uploaded) {
+    try {
+      const result = await uploadBuffer(uploaded.buffer, {
+        folder: CLOUDINARY_FOLDERS.CHAT_ATTACHMENT,
+        resourceType: isImage(uploaded.mimetype) ? 'image' : 'raw',
+      });
+      filePayload = {
+        url: result.url,
+        filename: uploaded.originalname,
+        sizeBytes: uploaded.size,
+        type: uploaded.mimetype,
+      };
+      // Force the message type to 'file' when an attachment is present —
+      // saves the client from having to set it explicitly and keeps the
+      // DB consistent for inbox/preview rendering.
+      type = 'file';
+    } catch (err) {
+      logger.error('Chat attachment upload failed', err);
+      throw ApiError.internal('Could not upload attachment. Try again.');
+    }
+  }
 
   const receiver = otherParticipant(conv, req.user._id!);
 
@@ -373,13 +414,19 @@ export const sendMessage = asyncHandler(async (req: AuthRequest, res: Response) 
     sender: req.user._id,
     receiver,
     type,
-    content,
+    content: content.length > 0 ? content : (filePayload?.filename ?? ''),
+    file: filePayload,
     sentAt: new Date(),
   });
 
-  // Bump conversation summary + bump receiver's unread counter.
+  // Bump conversation summary + bump receiver's unread counter. Show a
+  // friendly icon-prefixed preview when the message is file-only so the
+  // inbox row reads "📎 resume.pdf" rather than the bare filename.
+  const previewContent = filePayload && content.length === 0
+    ? `📎 ${filePayload.filename}`
+    : content;
   conv.lastMessage = {
-    content,
+    content: previewContent,
     sentAt: message.sentAt,
     sender: req.user._id!,
   };

@@ -31,6 +31,7 @@ exports.CLOUDINARY_FOLDERS = {
     RESUME: 'job_hunter/resumes',
     COMPANY_LOGO: 'job_hunter/company_logos',
     OFFICE_PHOTO: 'job_hunter/office_photos',
+    CHAT_ATTACHMENT: 'job_hunter/chat_attachments',
 };
 const uploadBuffer = (buffer, opts) => {
     if (!ensureConfigured()) {
