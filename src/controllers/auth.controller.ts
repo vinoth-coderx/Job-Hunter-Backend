@@ -1,6 +1,5 @@
 import { Request, Response } from 'express';
 import { z } from 'zod';
-import { OAuth2Client } from 'google-auth-library';
 import { User } from '../models/User';
 import { ApiError } from '../utils/ApiError';
 import { generateTokenPair, generateGuestAccessToken, verifyRefreshToken } from '../utils/jwt';
@@ -10,16 +9,7 @@ import { AuthRequest } from '../types';
 import { logger } from '../utils/logger';
 import { randomToken } from '../utils/crypto';
 import { recordFailedLogin, isLockedOut, clearFailedLogins } from '../middleware/security';
-import { env } from '../config/env';
 import { getFirebaseAdmin } from '../services/firebase/admin.service';
-
-const googleAudiences = [
-  env.GOOGLE_CLIENT_ID,
-  env.GOOGLE_ANDROID_CLIENT_ID,
-  env.GOOGLE_IOS_CLIENT_ID,
-].filter((id): id is string => Boolean(id));
-
-const googleClient = new OAuth2Client();
 
 const strongPassword = z
   .string()
@@ -211,30 +201,6 @@ export const me = asyncHandler(async (req: AuthRequest, res: Response) => {
   });
 });
 
-export const googleCallback = asyncHandler(async (req: Request, res: Response) => {
-  const user = req.user as { _id: { toString: () => string }; email: string; role: 'user' | 'admin' } | undefined;
-  if (!user) throw ApiError.unauthorized('Google authentication failed');
-
-  const tokens = generateTokenPair({
-    userId: user._id.toString(),
-    email: user.email,
-    role: user.role,
-  });
-
-  const dbUser = await User.findById(user._id).select('+refreshTokens');
-  if (dbUser) {
-    dbUser.refreshTokens = [...(dbUser.refreshTokens || []).slice(-4), tokens.refreshToken];
-    dbUser.lastLogin = new Date();
-    await dbUser.save();
-  }
-
-  res.json({
-    success: true,
-    message: 'Google login successful',
-    data: { ...tokens },
-  });
-});
-
 // Stateless guest session: no DB record, no refresh token. The client gets
 // a short-lived access token whose `role: 'guest'` claim is honoured by the
 // `authenticateOrGuest` middleware. Privileged endpoints (apply, profile,
@@ -263,93 +229,6 @@ export const guestLogin = asyncHandler(async (_req: Request, res: Response) => {
       accessToken,
       // Refresh token deliberately omitted — guest tokens are not refreshable.
       refreshToken: null,
-    },
-  });
-});
-
-export const googleMobileSchema = z.object({
-  body: z.object({
-    idToken: z.string().min(20),
-    platform: z.enum(['android', 'ios', 'web']).optional(),
-  }),
-});
-
-export const googleMobileLogin = asyncHandler(async (req: Request, res: Response) => {
-  if (!googleAudiences.length) {
-    throw ApiError.internal('Google login not configured (set GOOGLE_CLIENT_ID/ANDROID_CLIENT_ID/IOS_CLIENT_ID)');
-  }
-
-  const { idToken } = req.body as { idToken: string };
-
-  let payload;
-  try {
-    const ticket = await googleClient.verifyIdToken({
-      idToken,
-      audience: googleAudiences,
-    });
-    payload = ticket.getPayload();
-  } catch (err) {
-    logger.warn('Invalid Google ID token', err);
-    throw ApiError.unauthorized('Invalid Google ID token');
-  }
-
-  if (!payload) throw ApiError.unauthorized('Empty Google token payload');
-  if (!payload.email) throw ApiError.unauthorized('Google account has no email');
-  if (payload.email_verified === false) throw ApiError.unauthorized('Google email not verified');
-
-  const email = payload.email.toLowerCase();
-  let user = await User.findOne({ $or: [{ googleId: payload.sub }, { email }] }).select('+refreshTokens');
-
-  if (!user) {
-    user = await User.create({
-      email,
-      googleId: payload.sub,
-      authProvider: 'google',
-      isEmailVerified: true,
-      profile: {
-        fullName: payload.name || email.split('@')[0],
-        avatar: payload.picture,
-        skills: [],
-        experienceYears: 0,
-        preferredRoles: [],
-        preferredLocations: [],
-        preferredJobTypes: [],
-        preferredRemote: [],
-      },
-      subscription: { tier: 'free', status: 'active' },
-    });
-  } else if (!user.googleId) {
-    user.googleId = payload.sub;
-    user.isEmailVerified = true;
-    if (!user.profile.avatar && payload.picture) user.profile.avatar = payload.picture;
-    await user.save();
-  }
-
-  const tokens = generateTokenPair({
-    userId: user._id.toString(),
-    email: user.email,
-    role: user.role,
-  });
-
-  user.refreshTokens = [...(user.refreshTokens || []).slice(-4), tokens.refreshToken];
-  user.lastLogin = new Date();
-  await user.save();
-
-  logger.info(`Google mobile login: ${email}`);
-
-  res.json({
-    success: true,
-    message: 'Google login successful',
-    data: {
-      user: {
-        id: user._id,
-        email: user.email,
-        fullName: user.profile.fullName,
-        avatar: user.profile.avatar,
-        role: user.role,
-        subscription: user.subscription,
-      },
-      ...tokens,
     },
   });
 });

@@ -31,13 +31,6 @@ const envSchema = z.object({
   JWT_SECRET: z.string().min(32),
   JWT_REFRESH_SECRET: z.string().min(32),
 
-  // ── Google OAuth (sign-in) ──────────────────────────────
-  GOOGLE_CLIENT_ID: z.string().optional(),
-  GOOGLE_CLIENT_SECRET: z.string().optional(),
-  GOOGLE_CALLBACK_URL: z.string().optional(),
-  GOOGLE_ANDROID_CLIENT_ID: z.string().optional(),
-  GOOGLE_IOS_CLIENT_ID: z.string().optional(),
-
   // ── Job-board APIs (keys only) ──────────────────────────
   ADZUNA_APP_ID: z.string().optional(),
   ADZUNA_APP_KEY: z.string().optional(),

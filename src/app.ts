@@ -4,10 +4,8 @@ import helmet from 'helmet';
 import compression from 'compression';
 import morgan from 'morgan';
 import cookieParser from 'cookie-parser';
-import passport from 'passport';
 import { env } from './config/env';
 import { API_VERSION } from './config/constants';
-import { initPassport } from './config/passport';
 import routes from './routes';
 import { errorHandler, notFoundHandler } from './middleware/errorHandler';
 import { generalLimiter } from './middleware/rateLimiter';
@@ -88,9 +86,6 @@ export const createApp = (): Application => {
       }),
     );
   }
-
-  initPassport();
-  app.use(passport.initialize());
 
   app.use(generalLimiter);
 

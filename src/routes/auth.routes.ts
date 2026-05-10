@@ -1,26 +1,21 @@
 import { Router } from 'express';
-import passport from 'passport';
 import {
   register,
   login,
   refreshToken,
   logout,
   me,
-  googleCallback,
-  googleMobileLogin,
   guestLogin,
   firebaseLogin,
   checkEmailExists,
   registerSchema,
   loginSchema,
-  googleMobileSchema,
   firebaseLoginSchema,
   checkEmailExistsSchema,
 } from '../controllers/auth.controller';
 import { authenticate } from '../middleware/auth';
 import { authLimiter } from '../middleware/rateLimiter';
 import { validate } from '../middleware/validate';
-import { env } from '../config/env';
 
 const router = Router();
 
@@ -30,11 +25,12 @@ router.post('/refresh', refreshToken);
 router.post('/logout', authenticate, logout);
 router.get('/me', authenticate, me);
 
-router.post('/google', authLimiter, validate(googleMobileSchema), googleMobileLogin);
-router.post('/google/mobile', authLimiter, validate(googleMobileSchema), googleMobileLogin);
-
-// Firebase Auth hybrid: client supplies a Firebase ID token, we verify it
-// and mint our own JWT pair. Same rate limiter as the password endpoint.
+// Firebase Auth hybrid: client supplies a Firebase ID token (from any
+// Firebase provider — Google, email/password, phone, …), we verify it
+// and mint our own JWT pair. This is the only Google sign-in path now;
+// the legacy passport-google-oauth20 web flow and the direct
+// /auth/google/mobile fallback were removed when the app committed
+// fully to Firebase.
 router.post('/firebase', authLimiter, validate(firebaseLoginSchema), firebaseLogin);
 
 // Pre-flight for the forgot-password flow — Firebase silently succeeds on
@@ -48,17 +44,5 @@ router.post(
 );
 
 router.post('/guest', authLimiter, guestLogin);
-
-if (env.GOOGLE_CLIENT_ID && env.GOOGLE_CLIENT_SECRET) {
-  router.get(
-    '/google/web',
-    passport.authenticate('google', { scope: ['profile', 'email'], session: false }),
-  );
-  router.get(
-    '/google/web/callback',
-    passport.authenticate('google', { session: false, failureRedirect: '/login' }),
-    googleCallback,
-  );
-}
 
 export default router;
