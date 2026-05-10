@@ -6,7 +6,6 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.PuppeteerScraper = void 0;
 const puppeteer_1 = __importDefault(require("puppeteer"));
 const base_1 = require("./base");
-const env_1 = require("../../config/env");
 const constants_1 = require("../../config/constants");
 class PuppeteerScraper extends base_1.BaseScraper {
     source = 'puppeteer';
@@ -34,7 +33,7 @@ class PuppeteerScraper extends base_1.BaseScraper {
         page.setDefaultTimeout(constants_1.SCRAPER_TIMEOUT_MS);
         await page.setUserAgent('Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36');
         try {
-            const url = `https://www.indeed.com/jobs?q=${encodeURIComponent(query)}&l=${encodeURIComponent(location)}&fromage=${env_1.env.JOB_FRESHNESS_DAYS}&sort=date`;
+            const url = `https://www.indeed.com/jobs?q=${encodeURIComponent(query)}&l=${encodeURIComponent(location)}&fromage=${constants_1.JOB_FRESHNESS_DAYS}&sort=date`;
             await page.goto(url, { waitUntil: 'domcontentloaded' });
             const jobs = (await page.evaluate(`(() => {
         const src = ${JSON.stringify(this.source)};

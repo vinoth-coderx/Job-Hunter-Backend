@@ -1,46 +1,55 @@
 import { Response } from 'express';
-import path from 'path';
-import fs from 'fs/promises';
 import { asyncHandler } from '../utils/asyncHandler';
 import { ApiError } from '../utils/ApiError';
 import { AuthRequest } from '../types';
 import { User } from '../models/User';
 import { redis, CACHE_KEYS } from '../config/redis';
-import { AVATAR_DIR } from '../middleware/upload';
-
-const removeFileQuiet = async (filename?: string): Promise<void> => {
-  if (!filename) return;
-  try {
-    await fs.unlink(path.join(AVATAR_DIR, filename));
-  } catch {
-    // already gone
-  }
-};
+import {
+  CLOUDINARY_FOLDERS,
+  destroyAsset,
+  isCloudinaryConfigured,
+  uploadBuffer,
+} from '../config/cloudinary';
 
 export const uploadAvatarHandler = asyncHandler(async (req: AuthRequest, res: Response) => {
   if (!req.user) throw ApiError.unauthorized();
-  if (!req.file) throw ApiError.badRequest('No file uploaded — field name must be "avatar"');
-
-  const user = await User.findById(req.user._id);
-  if (!user) {
-    await removeFileQuiet(req.file.filename);
-    throw ApiError.notFound('User not found');
+  if (!req.file || !req.file.buffer) {
+    throw ApiError.badRequest('No file uploaded — field name must be "avatar"');
+  }
+  if (!isCloudinaryConfigured()) {
+    throw ApiError.internal('Cloudinary is not configured on the server');
   }
 
-  const oldFilename = user.profile.avatarFile?.filename;
+  const user = await User.findById(req.user._id);
+  if (!user) throw ApiError.notFound('User not found');
+
+  const oldPublicId = user.profile.avatarFile?.publicId;
+
+  const result = await uploadBuffer(req.file.buffer, {
+    folder: CLOUDINARY_FOLDERS.AVATAR,
+    publicId: `user_${user._id.toString()}`,
+    resourceType: 'image',
+    overwrite: true,
+    tags: ['avatar', `user:${user._id.toString()}`],
+  });
 
   user.profile.avatarFile = {
-    filename: req.file.filename,
+    publicId: result.publicId,
+    url: result.url,
+    filename: result.publicId.split('/').pop() ?? result.publicId,
     originalName: req.file.originalname,
     mimeType: req.file.mimetype,
-    size: req.file.size,
+    size: result.bytes || req.file.size,
     uploadedAt: new Date(),
   };
-  user.profile.avatar = `/api/v1/users/avatar/${req.user.id}`;
+  user.profile.avatar = result.url;
   await user.save();
 
-  if (oldFilename && oldFilename !== req.file.filename) {
-    await removeFileQuiet(oldFilename);
+  // Clean up the previous asset only when Cloudinary minted a new
+  // public_id (we use a deterministic id so this is usually a no-op,
+  // but covers the case where the schema-generated id changes).
+  if (oldPublicId && oldPublicId !== result.publicId) {
+    await destroyAsset(oldPublicId, 'image');
   }
 
   await redis.del(CACHE_KEYS.USER_PROFILE(req.user.id));
@@ -55,23 +64,17 @@ export const uploadAvatarHandler = asyncHandler(async (req: AuthRequest, res: Re
   });
 });
 
+// Backward-compat: clients still hit `/api/v1/users/avatar/:userId` to
+// resolve the avatar URL. We now redirect to the Cloudinary CDN URL.
 export const getAvatarHandler = asyncHandler(async (req: AuthRequest, res: Response) => {
   if (!req.user) throw ApiError.unauthorized();
 
   const targetUserId = (req.params.userId && String(req.params.userId)) || req.user.id;
-  const user = await User.findById(targetUserId).select('profile.avatarFile');
-  if (!user || !user.profile.avatarFile) throw ApiError.notFound('No avatar');
+  const user = await User.findById(targetUserId).select('profile.avatar profile.avatarFile');
+  const url = user?.profile.avatar || user?.profile.avatarFile?.url;
+  if (!url) throw ApiError.notFound('No avatar');
 
-  const filePath = path.join(AVATAR_DIR, user.profile.avatarFile.filename);
-  try {
-    await fs.access(filePath);
-  } catch {
-    throw ApiError.notFound('Avatar file missing on disk');
-  }
-
-  res.setHeader('Content-Type', user.profile.avatarFile.mimeType);
-  res.setHeader('Cache-Control', 'private, max-age=3600');
-  res.sendFile(filePath);
+  res.redirect(302, url);
 });
 
 export const deleteAvatarHandler = asyncHandler(async (req: AuthRequest, res: Response) => {
@@ -79,12 +82,12 @@ export const deleteAvatarHandler = asyncHandler(async (req: AuthRequest, res: Re
   const user = await User.findById(req.user._id);
   if (!user || !user.profile.avatarFile) throw ApiError.notFound('No avatar to delete');
 
-  const filename = user.profile.avatarFile.filename;
+  const publicId = user.profile.avatarFile.publicId;
   user.profile.avatarFile = undefined;
   user.profile.avatar = undefined;
   await user.save();
 
-  await removeFileQuiet(filename);
+  if (publicId) await destroyAsset(publicId, 'image');
   await redis.del(CACHE_KEYS.USER_PROFILE(req.user.id));
 
   res.json({ success: true, message: 'Avatar deleted' });

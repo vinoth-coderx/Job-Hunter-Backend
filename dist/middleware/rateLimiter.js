@@ -3,7 +3,7 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.scrapeLimiter = exports.authLimiter = exports.generalLimiter = void 0;
+exports.aiSearchLimiter = exports.scrapeLimiter = exports.authLimiter = exports.generalLimiter = void 0;
 const express_rate_limit_1 = __importDefault(require("express-rate-limit"));
 const crypto_1 = require("crypto");
 const constants_1 = require("../config/constants");
@@ -37,4 +37,15 @@ exports.scrapeLimiter = (0, express_rate_limit_1.default)({
     windowMs: 60 * 1000,
     max: 5,
     message: { success: false, message: 'Scraping rate limit exceeded.' },
+});
+exports.aiSearchLimiter = (0, express_rate_limit_1.default)({
+    windowMs: 60 * 1000,
+    max: 30,
+    standardHeaders: true,
+    legacyHeaders: false,
+    keyGenerator: tokenAwareKey,
+    message: {
+        success: false,
+        message: 'Too many searches in a row. Take a breath and try again in a minute.',
+    },
 });

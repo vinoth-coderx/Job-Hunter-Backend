@@ -12,6 +12,7 @@ const morgan_1 = __importDefault(require("morgan"));
 const cookie_parser_1 = __importDefault(require("cookie-parser"));
 const passport_1 = __importDefault(require("passport"));
 const env_1 = require("./config/env");
+const constants_1 = require("./config/constants");
 const passport_2 = require("./config/passport");
 const routes_1 = __importDefault(require("./routes"));
 const errorHandler_1 = require("./middleware/errorHandler");
@@ -85,10 +86,10 @@ const createApp = () => {
             success: true,
             service: 'Job Hunter Backend',
             version: '1.0.0',
-            docs: `/api/${env_1.env.API_VERSION}/health`,
+            docs: `/api/${constants_1.API_VERSION}/health`,
         });
     });
-    app.use(`/api/${env_1.env.API_VERSION}`, routes_1.default);
+    app.use(`/api/${constants_1.API_VERSION}`, routes_1.default);
     app.use(errorHandler_1.notFoundHandler);
     app.use(errorHandler_1.errorHandler);
     return app;

@@ -7,7 +7,7 @@ import { AppliedJob } from '../models/AppliedJob';
 import { asyncHandler } from '../utils/asyncHandler';
 import { ApiError } from '../utils/ApiError';
 import { AuthRequest } from '../types';
-import { env } from '../config/env';
+import { JOB_FRESHNESS_DAYS } from '../config/constants';
 import { matchJobsForUser } from '../services/ai/matcher.service';
 import { aiJobSearch } from '../services/ai/jobSearch.service';
 import { runJobFetchNow } from '../jobs/jobScraper.cron';
@@ -42,7 +42,7 @@ export const listJobsSchema = z.object({
 });
 
 const buildFilter = (q: Record<string, unknown>): Record<string, unknown> => {
-  const cutoff = new Date(Date.now() - env.JOB_FRESHNESS_DAYS * 24 * 60 * 60 * 1000);
+  const cutoff = new Date(Date.now() - JOB_FRESHNESS_DAYS * 24 * 60 * 60 * 1000);
   const filter: Record<string, unknown> = {
     isActive: true,
     postedAt: { $gte: cutoff },
@@ -146,7 +146,7 @@ export const matchedJobs = asyncHandler(async (req: AuthRequest, res: Response) 
   const limitRaw = typeof req.query.limit === 'string' ? Number(req.query.limit) : NaN;
   const limit = Math.min(100, Math.max(1, Number.isFinite(limitRaw) ? Math.floor(limitRaw) : 20));
   const skip = (page - 1) * limit;
-  const cutoff = new Date(Date.now() - env.JOB_FRESHNESS_DAYS * 24 * 60 * 60 * 1000);
+  const cutoff = new Date(Date.now() - JOB_FRESHNESS_DAYS * 24 * 60 * 60 * 1000);
 
   // Guests have no profile to match against, so we serve a recency-sorted
   // public listing wrapped in the same shape as the matched response. No
@@ -355,6 +355,7 @@ export const aiSearchJobs = asyncHandler(
       meta: {
         intent: result.intent,
         total: result.total,
+        scope: result.scope,
       },
     });
   },

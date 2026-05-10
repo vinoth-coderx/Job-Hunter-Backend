@@ -1,24 +1,21 @@
-import multer, { FileFilterCallback, StorageEngine } from 'multer';
+/**
+ * Multer middleware — uses memory storage exclusively. Files arrive in
+ * `req.file.buffer` (or `req.files[].buffer`) and the controllers stream
+ * them straight to Cloudinary; nothing is ever written to local disk.
+ *
+ * Size + MIME limits live here so the multipart parser rejects bad
+ * payloads before any controller logic runs.
+ */
+
+import multer, { FileFilterCallback } from 'multer';
 import path from 'path';
-import fs from 'fs';
-import crypto from 'crypto';
 import { Request } from 'express';
 import { ApiError } from '../utils/ApiError';
-
-const UPLOAD_ROOT = path.resolve(process.cwd(), 'uploads');
-export const RESUME_DIR = path.join(UPLOAD_ROOT, 'resumes');
-export const AVATAR_DIR = path.join(UPLOAD_ROOT, 'avatars');
-export const COMPANY_LOGO_DIR = path.join(UPLOAD_ROOT, 'company-logos');
-export const OFFICE_PHOTO_DIR = path.join(UPLOAD_ROOT, 'office-photos');
 
 export const RESUME_MAX_SIZE_BYTES = 5 * 1024 * 1024;
 export const AVATAR_MAX_SIZE_BYTES = 2 * 1024 * 1024;
 export const COMPANY_LOGO_MAX_SIZE_BYTES = 2 * 1024 * 1024;
 export const OFFICE_PHOTO_MAX_SIZE_BYTES = 5 * 1024 * 1024;
-
-for (const dir of [RESUME_DIR, AVATAR_DIR, COMPANY_LOGO_DIR, OFFICE_PHOTO_DIR]) {
-  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-}
 
 const RESUME_MIME = new Set([
   'application/pdf',
@@ -27,19 +24,8 @@ const RESUME_MIME = new Set([
 ]);
 const RESUME_EXT = new Set(['.pdf', '.doc', '.docx']);
 
-const AVATAR_MIME = new Set(['image/jpeg', 'image/jpg', 'image/png', 'image/webp']);
-const AVATAR_EXT = new Set(['.jpg', '.jpeg', '.png', '.webp']);
-
-const buildStorage = (dir: string): StorageEngine =>
-  multer.diskStorage({
-    destination: (_req, _file, cb) => cb(null, dir),
-    filename: (req, file, cb) => {
-      const userId = req.user?.id || 'anon';
-      const ext = path.extname(file.originalname).toLowerCase();
-      const random = crypto.randomBytes(8).toString('hex');
-      cb(null, `${userId}-${Date.now()}-${random}${ext}`);
-    },
-  });
+const IMAGE_MIME = new Set(['image/jpeg', 'image/jpg', 'image/png', 'image/webp']);
+const IMAGE_EXT = new Set(['.jpg', '.jpeg', '.png', '.webp']);
 
 const buildFilter =
   (allowedMime: Set<string>, allowedExt: Set<string>, label: string) =>
@@ -52,26 +38,28 @@ const buildFilter =
     cb(null, true);
   };
 
+const memoryStorage = multer.memoryStorage();
+
 export const uploadResume = multer({
-  storage: buildStorage(RESUME_DIR),
+  storage: memoryStorage,
   fileFilter: buildFilter(RESUME_MIME, RESUME_EXT, 'PDF, DOC, or DOCX'),
   limits: { fileSize: RESUME_MAX_SIZE_BYTES, files: 1 },
 }).single('resume');
 
 export const uploadAvatar = multer({
-  storage: buildStorage(AVATAR_DIR),
-  fileFilter: buildFilter(AVATAR_MIME, AVATAR_EXT, 'JPG, PNG, or WEBP image'),
+  storage: memoryStorage,
+  fileFilter: buildFilter(IMAGE_MIME, IMAGE_EXT, 'JPG, PNG, or WEBP image'),
   limits: { fileSize: AVATAR_MAX_SIZE_BYTES, files: 1 },
 }).single('avatar');
 
 export const uploadCompanyLogo = multer({
-  storage: buildStorage(COMPANY_LOGO_DIR),
-  fileFilter: buildFilter(AVATAR_MIME, AVATAR_EXT, 'JPG, PNG, or WEBP image'),
+  storage: memoryStorage,
+  fileFilter: buildFilter(IMAGE_MIME, IMAGE_EXT, 'JPG, PNG, or WEBP image'),
   limits: { fileSize: COMPANY_LOGO_MAX_SIZE_BYTES, files: 1 },
 }).single('logo');
 
 export const uploadOfficePhotos = multer({
-  storage: buildStorage(OFFICE_PHOTO_DIR),
-  fileFilter: buildFilter(AVATAR_MIME, AVATAR_EXT, 'JPG, PNG, or WEBP image'),
+  storage: memoryStorage,
+  fileFilter: buildFilter(IMAGE_MIME, IMAGE_EXT, 'JPG, PNG, or WEBP image'),
   limits: { fileSize: OFFICE_PHOTO_MAX_SIZE_BYTES, files: 10 },
 }).array('photos', 10);

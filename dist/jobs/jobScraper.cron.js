@@ -6,6 +6,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.runJobFetchNow = exports.stopJobScraperCron = exports.startJobScraperCron = exports.APPLIED_JOB_RETENTION_DAYS = void 0;
 const node_cron_1 = __importDefault(require("node-cron"));
 const env_1 = require("../config/env");
+const constants_1 = require("../config/constants");
 const logger_1 = require("../utils/logger");
 const scrapers_1 = require("../services/scrapers");
 const Subscription_1 = require("../models/Subscription");
@@ -21,11 +22,11 @@ const startJobScraperCron = () => {
         logger_1.logger.info('Cron disabled by config');
         return;
     }
-    if (!node_cron_1.default.validate(env_1.env.CRON_JOB_FETCH_SCHEDULE)) {
-        logger_1.logger.error(`Invalid cron expression: ${env_1.env.CRON_JOB_FETCH_SCHEDULE}`);
+    if (!node_cron_1.default.validate(constants_1.CRON_JOB_FETCH_SCHEDULE)) {
+        logger_1.logger.error(`Invalid cron expression: ${constants_1.CRON_JOB_FETCH_SCHEDULE}`);
         return;
     }
-    jobScraperTask = node_cron_1.default.schedule(env_1.env.CRON_JOB_FETCH_SCHEDULE, async () => {
+    jobScraperTask = node_cron_1.default.schedule(constants_1.CRON_JOB_FETCH_SCHEDULE, async () => {
         if (isRunning) {
             logger_1.logger.warn('Previous job fetch still running — skipping this tick');
             return;
@@ -70,7 +71,7 @@ const startJobScraperCron = () => {
             logger_1.logger.error('Cron: applied-jobs cleanup failed', err);
         }
     }, { timezone: 'Asia/Kolkata' });
-    logger_1.logger.info(`Cron scheduled — job fetch: "${env_1.env.CRON_JOB_FETCH_SCHEDULE}", sub check: daily 00:00, applied-jobs cleanup: daily 02:00 (>${exports.APPLIED_JOB_RETENTION_DAYS}d)`);
+    logger_1.logger.info(`Cron scheduled — job fetch: "${constants_1.CRON_JOB_FETCH_SCHEDULE}", sub check: daily 00:00, applied-jobs cleanup: daily 02:00 (>${exports.APPLIED_JOB_RETENTION_DAYS}d)`);
 };
 exports.startJobScraperCron = startJobScraperCron;
 const stopJobScraperCron = () => {

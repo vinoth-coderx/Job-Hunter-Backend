@@ -6,6 +6,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.matchJobsForUser = exports.aiMatch = exports.heuristicMatch = void 0;
 const sdk_1 = __importDefault(require("@anthropic-ai/sdk"));
 const env_1 = require("../../config/env");
+const constants_1 = require("../../config/constants");
 const logger_1 = require("../../utils/logger");
 const redis_1 = require("../../config/redis");
 const client = env_1.env.ANTHROPIC_API_KEY
@@ -156,7 +157,7 @@ Return JSON only with this exact shape:
     }
 };
 exports.aiMatch = aiMatch;
-const matchJobsForUser = async (user, jobs, threshold = env_1.env.AI_MATCH_THRESHOLD, useAi = false) => {
+const matchJobsForUser = async (user, jobs, threshold = constants_1.AI_MATCH_THRESHOLD, useAi = false) => {
     const matcher = useAi && client ? exports.aiMatch : async (u, j) => (0, exports.heuristicMatch)(u, j);
     const matched = [];
     const concurrency = useAi ? 5 : 50;

@@ -1,32 +1,12 @@
 "use strict";
-var __importDefault = (this && this.__importDefault) || function (mod) {
-    return (mod && mod.__esModule) ? mod : { "default": mod };
-};
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.getHirerStats = exports.getPublicCompanyProfile = exports.deleteOfficePhoto = exports.getOfficePhoto = exports.uploadOfficePhotos = exports.getHirerLogo = exports.uploadHirerLogo = exports.updateHirerProfile = exports.createHirerProfile = exports.getMyHirerProfile = exports.updateHirerProfileSchema = exports.createHirerProfileSchema = void 0;
-const path_1 = __importDefault(require("path"));
-const promises_1 = __importDefault(require("fs/promises"));
+exports.getHirerStats = exports.getPublicCompanyProfile = exports.deleteOfficePhoto = exports.uploadOfficePhotos = exports.uploadHirerLogo = exports.updateHirerProfile = exports.createHirerProfile = exports.getMyHirerProfile = exports.updateHirerProfileSchema = exports.createHirerProfileSchema = void 0;
 const zod_1 = require("zod");
 const HirerProfile_1 = require("../models/HirerProfile");
 const Job_1 = require("../models/Job");
 const asyncHandler_1 = require("../utils/asyncHandler");
 const ApiError_1 = require("../utils/ApiError");
-const upload_1 = require("../middleware/upload");
-const removeFileQuiet = async (dir, filename) => {
-    if (!filename)
-        return;
-    try {
-        await promises_1.default.unlink(path_1.default.join(dir, filename));
-    }
-    catch {
-    }
-};
-const filenameFromUrl = (url) => {
-    if (!url)
-        return undefined;
-    const last = url.split('/').filter(Boolean).pop();
-    return last || undefined;
-};
+const cloudinary_1 = require("../config/cloudinary");
 const otherLocationSchema = zod_1.z.object({
     city: zod_1.z.string().min(1).max(100),
     state: zod_1.z.string().max(100).optional(),
@@ -139,34 +119,30 @@ exports.updateHirerProfile = (0, asyncHandler_1.asyncHandler)(async (req, res) =
 });
 exports.uploadHirerLogo = (0, asyncHandler_1.asyncHandler)(async (req, res) => {
     const { id } = requireUser(req);
-    if (!req.file)
+    if (!req.file || !req.file.buffer) {
         throw ApiError_1.ApiError.badRequest('No file uploaded — field name must be "logo"');
+    }
+    if (!(0, cloudinary_1.isCloudinaryConfigured)()) {
+        throw ApiError_1.ApiError.internal('Cloudinary is not configured on the server');
+    }
     const profile = await HirerProfile_1.HirerProfile.findOne({ user: id });
-    if (!profile) {
-        await removeFileQuiet(upload_1.COMPANY_LOGO_DIR, req.file.filename);
+    if (!profile)
         throw ApiError_1.ApiError.notFound('Hirer profile not found — create it first');
-    }
-    const old = filenameFromUrl(profile.companyLogoUrl);
-    profile.companyLogoUrl = `/api/v1/hirer/profile/logo/${profile._id.toString()}/${req.file.filename}`;
+    const oldPublicId = profile.companyLogoPublicId;
+    const result = await (0, cloudinary_1.uploadBuffer)(req.file.buffer, {
+        folder: cloudinary_1.CLOUDINARY_FOLDERS.COMPANY_LOGO,
+        publicId: `hirer_${profile._id.toString()}`,
+        resourceType: 'image',
+        overwrite: true,
+        tags: ['company-logo', `hirer:${profile._id.toString()}`],
+    });
+    profile.companyLogoUrl = result.url;
+    profile.companyLogoPublicId = result.publicId;
     await profile.save();
-    if (old && old !== req.file.filename)
-        await removeFileQuiet(upload_1.COMPANY_LOGO_DIR, old);
+    if (oldPublicId && oldPublicId !== result.publicId) {
+        await (0, cloudinary_1.destroyAsset)(oldPublicId, 'image');
+    }
     res.status(201).json({ success: true, data: { logoUrl: profile.companyLogoUrl } });
-});
-exports.getHirerLogo = (0, asyncHandler_1.asyncHandler)(async (req, res) => {
-    const filename = String(req.params.filename || '');
-    if (!filename || filename.includes('/') || filename.includes('..')) {
-        throw ApiError_1.ApiError.badRequest('Invalid filename');
-    }
-    const filePath = path_1.default.join(upload_1.COMPANY_LOGO_DIR, filename);
-    try {
-        await promises_1.default.access(filePath);
-    }
-    catch {
-        throw ApiError_1.ApiError.notFound('Logo not found');
-    }
-    res.setHeader('Cache-Control', 'public, max-age=86400');
-    res.sendFile(filePath);
 });
 exports.uploadOfficePhotos = (0, asyncHandler_1.asyncHandler)(async (req, res) => {
     const { id } = requireUser(req);
@@ -174,49 +150,47 @@ exports.uploadOfficePhotos = (0, asyncHandler_1.asyncHandler)(async (req, res) =
     if (files.length === 0) {
         throw ApiError_1.ApiError.badRequest('No files uploaded — field name must be "photos"');
     }
-    const profile = await HirerProfile_1.HirerProfile.findOne({ user: id });
-    if (!profile) {
-        await Promise.all(files.map((f) => removeFileQuiet(upload_1.OFFICE_PHOTO_DIR, f.filename)));
-        throw ApiError_1.ApiError.notFound('Hirer profile not found — create it first');
-    }
-    const newUrls = files.map((f) => `/api/v1/hirer/profile/photo/${profile._id.toString()}/${f.filename}`);
-    const merged = [...profile.officePhotos, ...newUrls].slice(-10);
-    const removed = [...profile.officePhotos, ...newUrls].slice(0, -10);
-    profile.officePhotos = merged;
-    await profile.save();
-    await Promise.all(removed.map((u) => removeFileQuiet(upload_1.OFFICE_PHOTO_DIR, filenameFromUrl(u))));
-    res.status(201).json({ success: true, data: { officePhotos: profile.officePhotos } });
-});
-exports.getOfficePhoto = (0, asyncHandler_1.asyncHandler)(async (req, res) => {
-    const filename = String(req.params.filename || '');
-    if (!filename || filename.includes('/') || filename.includes('..')) {
-        throw ApiError_1.ApiError.badRequest('Invalid filename');
-    }
-    const filePath = path_1.default.join(upload_1.OFFICE_PHOTO_DIR, filename);
-    try {
-        await promises_1.default.access(filePath);
-    }
-    catch {
-        throw ApiError_1.ApiError.notFound('Photo not found');
-    }
-    res.setHeader('Cache-Control', 'public, max-age=86400');
-    res.sendFile(filePath);
-});
-exports.deleteOfficePhoto = (0, asyncHandler_1.asyncHandler)(async (req, res) => {
-    const { id } = requireUser(req);
-    const filename = String(req.params.filename || '');
-    if (!filename || filename.includes('/') || filename.includes('..')) {
-        throw ApiError_1.ApiError.badRequest('Invalid filename');
+    if (!(0, cloudinary_1.isCloudinaryConfigured)()) {
+        throw ApiError_1.ApiError.internal('Cloudinary is not configured on the server');
     }
     const profile = await HirerProfile_1.HirerProfile.findOne({ user: id });
     if (!profile)
+        throw ApiError_1.ApiError.notFound('Hirer profile not found — create it first');
+    const tag = `hirer:${profile._id.toString()}`;
+    const uploads = await Promise.all(files.map((f) => (0, cloudinary_1.uploadBuffer)(f.buffer, {
+        folder: cloudinary_1.CLOUDINARY_FOLDERS.OFFICE_PHOTO,
+        resourceType: 'image',
+        tags: ['office-photo', tag],
+    })));
+    const newUrls = uploads.map((u) => u.url);
+    const combined = [...profile.officePhotos, ...newUrls];
+    const merged = combined.slice(-10);
+    const removed = combined.slice(0, combined.length - merged.length);
+    profile.officePhotos = merged;
+    await profile.save();
+    await Promise.all(removed
+        .map((u) => (0, cloudinary_1.publicIdFromUrl)(u))
+        .filter((p) => !!p)
+        .map((p) => (0, cloudinary_1.destroyAsset)(p, 'image')));
+    res.status(201).json({ success: true, data: { officePhotos: profile.officePhotos } });
+});
+exports.deleteOfficePhoto = (0, asyncHandler_1.asyncHandler)(async (req, res) => {
+    const { id } = requireUser(req);
+    const raw = String(req.params.filename || '').trim();
+    if (!raw)
+        throw ApiError_1.ApiError.badRequest('Missing public_id');
+    const profile = await HirerProfile_1.HirerProfile.findOne({ user: id });
+    if (!profile)
         throw ApiError_1.ApiError.notFound('Hirer profile not found');
+    const targetPid = raw.startsWith('http') ? (0, cloudinary_1.publicIdFromUrl)(raw) : raw;
+    if (!targetPid)
+        throw ApiError_1.ApiError.badRequest('Could not resolve public_id');
     const before = profile.officePhotos.length;
-    profile.officePhotos = profile.officePhotos.filter((u) => filenameFromUrl(u) !== filename);
+    profile.officePhotos = profile.officePhotos.filter((u) => (0, cloudinary_1.publicIdFromUrl)(u) !== targetPid);
     if (before === profile.officePhotos.length)
         throw ApiError_1.ApiError.notFound('Photo not in profile');
     await profile.save();
-    await removeFileQuiet(upload_1.OFFICE_PHOTO_DIR, filename);
+    await (0, cloudinary_1.destroyAsset)(targetPid, 'image');
     res.json({ success: true, data: { officePhotos: profile.officePhotos } });
 });
 exports.getPublicCompanyProfile = (0, asyncHandler_1.asyncHandler)(async (req, res) => {

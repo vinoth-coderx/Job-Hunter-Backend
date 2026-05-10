@@ -1,5 +1,6 @@
 import Anthropic from '@anthropic-ai/sdk';
 import { env } from '../../config/env';
+import { AI_MATCH_THRESHOLD } from '../../config/constants';
 import { logger } from '../../utils/logger';
 import { IUser } from '../../models/User';
 import { IJob } from '../../models/Job';
@@ -211,7 +212,7 @@ Return JSON only with this exact shape:
 export const matchJobsForUser = async (
   user: IUser,
   jobs: IJob[],
-  threshold = env.AI_MATCH_THRESHOLD,
+  threshold = AI_MATCH_THRESHOLD,
   useAi = false,
 ): Promise<Array<{ job: IJob; match: MatchResult }>> => {
   const matcher = useAi && client ? aiMatch : async (u: IUser, j: IJob) => heuristicMatch(u, j);

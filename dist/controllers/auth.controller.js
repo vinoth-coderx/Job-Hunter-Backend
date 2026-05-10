@@ -1,6 +1,6 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.googleMobileLogin = exports.googleMobileSchema = exports.guestLogin = exports.googleCallback = exports.me = exports.logout = exports.refreshToken = exports.login = exports.register = exports.loginSchema = exports.registerSchema = void 0;
+exports.firebaseLogin = exports.checkEmailExists = exports.checkEmailExistsSchema = exports.firebaseLoginSchema = exports.googleMobileLogin = exports.googleMobileSchema = exports.guestLogin = exports.googleCallback = exports.me = exports.logout = exports.refreshToken = exports.login = exports.register = exports.loginSchema = exports.registerSchema = void 0;
 const zod_1 = require("zod");
 const google_auth_library_1 = require("google-auth-library");
 const User_1 = require("../models/User");
@@ -12,6 +12,7 @@ const logger_1 = require("../utils/logger");
 const crypto_2 = require("../utils/crypto");
 const security_1 = require("../middleware/security");
 const env_1 = require("../config/env");
+const admin_service_1 = require("../services/firebase/admin.service");
 const googleAudiences = [
     env_1.env.GOOGLE_CLIENT_ID,
     env_1.env.GOOGLE_ANDROID_CLIENT_ID,
@@ -301,6 +302,116 @@ exports.googleMobileLogin = (0, asyncHandler_1.asyncHandler)(async (req, res) =>
     res.json({
         success: true,
         message: 'Google login successful',
+        data: {
+            user: {
+                id: user._id,
+                email: user.email,
+                fullName: user.profile.fullName,
+                avatar: user.profile.avatar,
+                role: user.role,
+                subscription: user.subscription,
+            },
+            ...tokens,
+        },
+    });
+});
+exports.firebaseLoginSchema = zod_1.z.object({
+    body: zod_1.z.object({
+        idToken: zod_1.z.string().min(20),
+        fullName: zod_1.z.string().min(2).max(100).optional(),
+        phone: zod_1.z.string().max(20).optional(),
+    }),
+});
+exports.checkEmailExistsSchema = zod_1.z.object({
+    body: zod_1.z.object({
+        email: zod_1.z.string().email(),
+    }),
+});
+exports.checkEmailExists = (0, asyncHandler_1.asyncHandler)(async (req, res) => {
+    const admin = await (0, admin_service_1.getFirebaseAdmin)();
+    if (!admin) {
+        throw ApiError_1.ApiError.internal('Firebase Auth is not configured on the server (set FIREBASE_SERVICE_ACCOUNT_JSON)');
+    }
+    const email = req.body.email.toLowerCase().trim();
+    try {
+        await admin.auth().getUserByEmail(email);
+        res.json({ success: true, data: { exists: true } });
+    }
+    catch (err) {
+        const code = err.code;
+        if (code === 'auth/user-not-found') {
+            res.json({ success: true, data: { exists: false } });
+            return;
+        }
+        logger_1.logger.warn('checkEmailExists lookup failed', err);
+        throw ApiError_1.ApiError.internal('Failed to check email');
+    }
+});
+exports.firebaseLogin = (0, asyncHandler_1.asyncHandler)(async (req, res) => {
+    const admin = await (0, admin_service_1.getFirebaseAdmin)();
+    if (!admin) {
+        throw ApiError_1.ApiError.internal('Firebase Auth is not configured on the server (set FIREBASE_SERVICE_ACCOUNT_JSON)');
+    }
+    const { idToken, fullName, phone } = req.body;
+    let decoded;
+    try {
+        decoded = await admin.auth().verifyIdToken(idToken, true);
+    }
+    catch (err) {
+        logger_1.logger.warn('Firebase ID token verification failed', err);
+        throw ApiError_1.ApiError.unauthorized('Invalid Firebase ID token');
+    }
+    const firebaseUid = decoded.uid;
+    const email = decoded.email?.toLowerCase();
+    if (!email) {
+        throw ApiError_1.ApiError.unauthorized('Firebase token has no email — provider must include email scope');
+    }
+    let user = await User_1.User.findOne({
+        $or: [{ firebaseUid }, { email }],
+    }).select('+refreshTokens');
+    if (!user) {
+        user = await User_1.User.create({
+            email,
+            firebaseUid,
+            authProvider: 'firebase',
+            isEmailVerified: decoded.email_verified ?? false,
+            profile: {
+                fullName: fullName?.trim() || decoded.name || email.split('@')[0],
+                phone: phone?.trim(),
+                avatar: decoded.picture,
+                skills: [],
+                experienceYears: 0,
+                preferredRoles: [],
+                preferredLocations: [],
+                preferredJobTypes: [],
+                preferredRemote: [],
+            },
+            subscription: { tier: 'free', status: 'active' },
+        });
+        logger_1.logger.info(`New user via Firebase Auth: ${email}`);
+    }
+    else if (!user.firebaseUid) {
+        user.firebaseUid = firebaseUid;
+        if (!user.isEmailVerified && decoded.email_verified) {
+            user.isEmailVerified = true;
+        }
+        if (!user.profile.avatar && decoded.picture) {
+            user.profile.avatar = decoded.picture;
+        }
+        await user.save();
+        logger_1.logger.info(`Linked Firebase UID to existing account: ${email}`);
+    }
+    const tokens = (0, jwt_1.generateTokenPair)({
+        userId: user._id.toString(),
+        email: user.email,
+        role: user.role,
+    });
+    user.refreshTokens = [...(user.refreshTokens || []).slice(-4), tokens.refreshToken];
+    user.lastLogin = new Date();
+    await user.save();
+    res.json({
+        success: true,
+        message: 'Firebase login successful',
         data: {
             user: {
                 id: user._id,

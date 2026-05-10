@@ -12,3 +12,8 @@ coverage/
 
 postman/
 uploads/
+secrets/
+
+# Firebase service-account JSON — credentials, never commit.
+**/firebase-service-account*.json
+**/*-firebase-adminsdk-*.json

@@ -8,6 +8,7 @@ const mongoose_1 = __importDefault(require("mongoose"));
 const redis_1 = require("../config/redis");
 const Job_1 = require("../models/Job");
 const env_1 = require("../config/env");
+const constants_1 = require("../config/constants");
 const router = (0, express_1.Router)();
 const startedAt = Date.now();
 const formatBytes = (bytes) => `${(bytes / 1024 / 1024).toFixed(2)} MB`;
@@ -62,7 +63,7 @@ router.get('/health/deep', async (_req, res) => {
     const [mongo, redisCheck] = await Promise.all([checkMongo(), checkRedis()]);
     let jobStats = {};
     try {
-        const cutoff = new Date(Date.now() - env_1.env.JOB_FRESHNESS_DAYS * 24 * 60 * 60 * 1000);
+        const cutoff = new Date(Date.now() - constants_1.JOB_FRESHNESS_DAYS * 24 * 60 * 60 * 1000);
         const [total, fresh, latest] = await Promise.all([
             Job_1.Job.estimatedDocumentCount(),
             Job_1.Job.countDocuments({ isActive: true, postedAt: { $gte: cutoff } }),

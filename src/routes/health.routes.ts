@@ -3,6 +3,7 @@ import mongoose from 'mongoose';
 import { redis } from '../config/redis';
 import { Job } from '../models/Job';
 import { env } from '../config/env';
+import { JOB_FRESHNESS_DAYS } from '../config/constants';
 
 const router = Router();
 const startedAt = Date.now();
@@ -64,7 +65,7 @@ router.get('/health/deep', async (_req: Request, res: Response) => {
 
   let jobStats: { total?: number; freshLast10Days?: number; lastFetchedAt?: Date | null; error?: string } = {};
   try {
-    const cutoff = new Date(Date.now() - env.JOB_FRESHNESS_DAYS * 24 * 60 * 60 * 1000);
+    const cutoff = new Date(Date.now() - JOB_FRESHNESS_DAYS * 24 * 60 * 60 * 1000);
     const [total, fresh, latest] = await Promise.all([
       Job.estimatedDocumentCount(),
       Job.countDocuments({ isActive: true, postedAt: { $gte: cutoff } }),

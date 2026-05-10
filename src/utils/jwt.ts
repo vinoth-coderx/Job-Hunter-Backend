@@ -1,16 +1,17 @@
 import jwt, { SignOptions } from 'jsonwebtoken';
 import { env } from '../config/env';
+import { JWT_EXPIRES_IN, JWT_REFRESH_EXPIRES_IN } from '../config/constants';
 import { JwtPayload } from '../types';
 
 export const generateAccessToken = (payload: JwtPayload): string => {
   return jwt.sign(payload, env.JWT_SECRET, {
-    expiresIn: env.JWT_EXPIRES_IN,
+    expiresIn: JWT_EXPIRES_IN,
   } as SignOptions);
 };
 
 export const generateRefreshToken = (payload: JwtPayload): string => {
   return jwt.sign(payload, env.JWT_REFRESH_SECRET, {
-    expiresIn: env.JWT_REFRESH_EXPIRES_IN,
+    expiresIn: JWT_REFRESH_EXPIRES_IN,
   } as SignOptions);
 };
 

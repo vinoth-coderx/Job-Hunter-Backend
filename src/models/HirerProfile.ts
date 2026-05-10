@@ -16,6 +16,9 @@ export interface IHirerProfile extends Document {
 
   companyName: string;
   companyLogoUrl?: string;
+  // Cloudinary public_id for the current logo — kept so we can delete
+  // the previous asset on re-upload without parsing URLs.
+  companyLogoPublicId?: string;
   industry?: string;
   companySize?: CompanySize;
   foundedYear?: number;
@@ -86,6 +89,7 @@ const hirerProfileSchema = new Schema<IHirerProfile>(
 
     companyName: { type: String, required: true, trim: true, maxlength: 200, index: true },
     companyLogoUrl: String,
+    companyLogoPublicId: String,
     industry: { type: String, trim: true, maxlength: 100, index: true },
     companySize: {
       type: String,

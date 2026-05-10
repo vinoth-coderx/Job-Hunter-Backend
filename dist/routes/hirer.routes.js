@@ -9,8 +9,6 @@ const validate_1 = require("../middleware/validate");
 const upload_1 = require("../middleware/upload");
 const hirerAnalytics_controller_1 = require("../controllers/hirerAnalytics.controller");
 const router = (0, express_1.Router)();
-router.get('/profile/logo/:id/:filename', hirer_controller_1.getHirerLogo);
-router.get('/profile/photo/:id/:filename', hirer_controller_1.getOfficePhoto);
 router.get('/profile/public/:id', auth_1.optionalAuth, hirer_controller_1.getPublicCompanyProfile);
 router.get('/profile', auth_1.authenticate, hirer_controller_1.getMyHirerProfile);
 router.post('/profile', auth_1.authenticate, (0, validate_1.validate)(hirer_controller_1.createHirerProfileSchema), hirer_controller_1.createHirerProfile);

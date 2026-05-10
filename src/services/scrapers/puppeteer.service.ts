@@ -1,8 +1,7 @@
 import puppeteer, { Browser } from 'puppeteer';
 import { BaseScraper } from './base';
 import { ScrapedJob } from '../../types';
-import { env } from '../../config/env';
-import { PUPPETEER_HEADLESS, SCRAPER_TIMEOUT_MS } from '../../config/constants';
+import { JOB_FRESHNESS_DAYS, PUPPETEER_HEADLESS, SCRAPER_TIMEOUT_MS } from '../../config/constants';
 
 export class PuppeteerScraper extends BaseScraper {
   source = 'puppeteer' as const;
@@ -35,7 +34,7 @@ export class PuppeteerScraper extends BaseScraper {
     );
 
     try {
-      const url = `https://www.indeed.com/jobs?q=${encodeURIComponent(query)}&l=${encodeURIComponent(location)}&fromage=${env.JOB_FRESHNESS_DAYS}&sort=date`;
+      const url = `https://www.indeed.com/jobs?q=${encodeURIComponent(query)}&l=${encodeURIComponent(location)}&fromage=${JOB_FRESHNESS_DAYS}&sort=date`;
       await page.goto(url, { waitUntil: 'domcontentloaded' });
 
       const jobs = (await page.evaluate(`(() => {

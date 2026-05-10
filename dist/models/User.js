@@ -55,7 +55,8 @@ const userSchema = new mongoose_1.Schema({
         select: false,
     },
     googleId: { type: String, sparse: true, unique: true },
-    authProvider: { type: String, enum: ['local', 'google'], default: 'local' },
+    firebaseUid: { type: String, sparse: true, unique: true },
+    authProvider: { type: String, enum: ['local', 'google', 'firebase'], default: 'local' },
     role: { type: String, enum: ['user', 'admin'], default: 'user' },
     activeRole: { type: String, enum: ['seeker', 'hirer'], default: 'seeker', index: true },
     isEmailVerified: { type: Boolean, default: false },
@@ -67,6 +68,8 @@ const userSchema = new mongoose_1.Schema({
         fullName: { type: String, required: true, trim: true },
         avatar: String,
         avatarFile: {
+            publicId: String,
+            url: String,
             filename: String,
             originalName: String,
             mimeType: String,
@@ -93,6 +96,8 @@ const userSchema = new mongoose_1.Schema({
         resumeUrl: String,
         resumeText: String,
         resumeFile: {
+            publicId: String,
+            url: String,
             filename: String,
             originalName: String,
             mimeType: String,

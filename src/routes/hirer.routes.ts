@@ -4,9 +4,7 @@ import {
   createHirerProfile,
   updateHirerProfile,
   uploadHirerLogo,
-  getHirerLogo,
   uploadOfficePhotos as uploadOfficePhotosHandler,
-  getOfficePhoto,
   deleteOfficePhoto,
   getPublicCompanyProfile,
   getHirerStats,
@@ -46,9 +44,8 @@ import { getHirerAnalytics } from '../controllers/hirerAnalytics.controller';
 
 const router = Router();
 
-// Public — anyone can view a company profile by id (logos served publicly).
-router.get('/profile/logo/:id/:filename', getHirerLogo);
-router.get('/profile/photo/:id/:filename', getOfficePhoto);
+// Public — anyone can view a company profile by id. Logos / photos
+// are served directly from Cloudinary now, so no file-proxy routes here.
 router.get('/profile/public/:id', optionalAuth, getPublicCompanyProfile);
 
 // Authenticated — current user's hirer profile.

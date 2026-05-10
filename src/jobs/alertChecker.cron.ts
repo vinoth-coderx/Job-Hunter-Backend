@@ -1,6 +1,7 @@
 import cron, { ScheduledTask } from 'node-cron';
 import { Types } from 'mongoose';
 import { env } from '../config/env';
+import { ALERT_PUSH_MAX_PER_RUN, CRON_ALERT_SCHEDULE } from '../config/constants';
 import { logger } from '../utils/logger';
 import { Alert, IAlert } from '../models/Alert';
 import { DeviceToken } from '../models/DeviceToken';
@@ -68,7 +69,7 @@ export const checkAlertsNow = async (): Promise<void> => {
       const filter = buildJobFilter(alert, since);
       const jobs = await Job.find(filter)
         .sort({ postedAt: -1 })
-        .limit(env.ALERT_PUSH_MAX_PER_RUN)
+        .limit(ALERT_PUSH_MAX_PER_RUN)
         .select('_id title company location url postedAt')
         .lean<JobLite[]>();
 
@@ -161,12 +162,12 @@ export const checkAlertsNow = async (): Promise<void> => {
 
 export const startAlertCheckerCron = (): void => {
   if (!env.CRON_ENABLED) return;
-  if (!cron.validate(env.CRON_ALERT_SCHEDULE)) {
-    logger.error(`Invalid alert cron expression: ${env.CRON_ALERT_SCHEDULE}`);
+  if (!cron.validate(CRON_ALERT_SCHEDULE)) {
+    logger.error(`Invalid alert cron expression: ${CRON_ALERT_SCHEDULE}`);
     return;
   }
   alertTask = cron.schedule(
-    env.CRON_ALERT_SCHEDULE,
+    CRON_ALERT_SCHEDULE,
     async () => {
       if (isRunning) {
         logger.warn('Alerts: previous tick still running — skipping');
@@ -185,7 +186,7 @@ export const startAlertCheckerCron = (): void => {
     },
     { timezone: 'Asia/Kolkata' },
   );
-  logger.info(`Alerts cron scheduled: "${env.CRON_ALERT_SCHEDULE}"`);
+  logger.info(`Alerts cron scheduled: "${CRON_ALERT_SCHEDULE}"`);
 };
 
 export const stopAlertCheckerCron = (): void => {

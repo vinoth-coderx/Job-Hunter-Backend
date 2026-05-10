@@ -1,15 +1,19 @@
 import { AdzunaScraper } from './adzuna.service';
 import { SerpApiScraper } from './serpapi.service';
 import { RapidApiScraper } from './rapidapi.service';
+import { ArbeitnowScraper } from './arbeitnow.service';
+import { TheirStackScraper } from './theirstack.service';
 import { PuppeteerScraper } from './puppeteer.service';
 import { Job } from '../../models/Job';
 import { ScrapedJob } from '../../types';
 import { logger } from '../../utils/logger';
-import { env } from '../../config/env';
+import { JOB_FRESHNESS_DAYS } from '../../config/constants';
 
 const adzuna = new AdzunaScraper();
 const serp = new SerpApiScraper();
 const rapid = new RapidApiScraper();
+const arbeitnow = new ArbeitnowScraper();
+const theirstack = new TheirStackScraper();
 const puppeteerScraper = new PuppeteerScraper();
 
 const DEFAULT_QUERIES = [
@@ -44,22 +48,30 @@ export const fetchAllJobs = async (opts: FetchOptions = {}): Promise<{
 
   logger.info(`Starting job fetch: ${queries.length} queries x ${locations.length} locations`);
 
-  for (const s of [adzuna, serp, rapid, puppeteerScraper]) s.resetForNewRun();
+  for (const s of [adzuna, serp, rapid, arbeitnow, theirstack, puppeteerScraper]) {
+    s.resetForNewRun();
+  }
 
   const all: ScrapedJob[] = [];
   const bySource: Record<string, number> = {
     adzuna: 0,
     serpapi: 0,
     rapidapi: 0,
+    arbeitnow: 0,
+    theirstack: 0,
     puppeteer: 0,
   };
 
   for (const query of queries) {
     for (const location of locations) {
+      // arbeitnow + theirstack self-throttle to one fetch per run; safe
+      // to invoke inside the loop — subsequent calls return [].
       const tasks = [
         adzuna.fetch(query, location),
         serp.fetch(query, location),
         rapid.fetch(query, location),
+        arbeitnow.fetch(query, location),
+        theirstack.fetch(query, location),
       ];
       if (usePuppeteer) tasks.push(puppeteerScraper.fetch(query, location));
 
@@ -115,7 +127,7 @@ export const fetchAllJobs = async (opts: FetchOptions = {}): Promise<{
     }
   }
 
-  const cutoff = new Date(Date.now() - env.JOB_FRESHNESS_DAYS * 24 * 60 * 60 * 1000);
+  const cutoff = new Date(Date.now() - JOB_FRESHNESS_DAYS * 24 * 60 * 60 * 1000);
   await Job.updateMany({ postedAt: { $lt: cutoff } }, { $set: { isActive: false } });
 
   logger.info(
@@ -126,4 +138,4 @@ export const fetchAllJobs = async (opts: FetchOptions = {}): Promise<{
   return { total: all.length, inserted, updated, bySource };
 };
 
-export { adzuna, serp, rapid, puppeteerScraper };
+export { adzuna, serp, rapid, arbeitnow, theirstack, puppeteerScraper };

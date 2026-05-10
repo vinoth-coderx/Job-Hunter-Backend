@@ -9,9 +9,13 @@ import {
   googleCallback,
   googleMobileLogin,
   guestLogin,
+  firebaseLogin,
+  checkEmailExists,
   registerSchema,
   loginSchema,
   googleMobileSchema,
+  firebaseLoginSchema,
+  checkEmailExistsSchema,
 } from '../controllers/auth.controller';
 import { authenticate } from '../middleware/auth';
 import { authLimiter } from '../middleware/rateLimiter';
@@ -28,6 +32,20 @@ router.get('/me', authenticate, me);
 
 router.post('/google', authLimiter, validate(googleMobileSchema), googleMobileLogin);
 router.post('/google/mobile', authLimiter, validate(googleMobileSchema), googleMobileLogin);
+
+// Firebase Auth hybrid: client supplies a Firebase ID token, we verify it
+// and mint our own JWT pair. Same rate limiter as the password endpoint.
+router.post('/firebase', authLimiter, validate(firebaseLoginSchema), firebaseLogin);
+
+// Pre-flight for the forgot-password flow — Firebase silently succeeds on
+// reset for unknown emails, so we ask the server first whether the email
+// is registered and surface a clear message in the UI.
+router.post(
+  '/check-email-exists',
+  authLimiter,
+  validate(checkEmailExistsSchema),
+  checkEmailExists,
+);
 
 router.post('/guest', authLimiter, guestLogin);
 

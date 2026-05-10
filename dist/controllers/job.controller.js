@@ -1,14 +1,15 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.triggerFetch = exports.matchedJobs = exports.getJob = exports.listAllJobs = exports.listJobs = exports.listJobsSchema = void 0;
+exports.aiSearchJobs = exports.aiSearchSchema = exports.triggerFetch = exports.matchedJobs = exports.getJob = exports.listAllJobs = exports.listJobs = exports.listJobsSchema = void 0;
 const zod_1 = require("zod");
 const Job_1 = require("../models/Job");
 const User_1 = require("../models/User");
 const AppliedJob_1 = require("../models/AppliedJob");
 const asyncHandler_1 = require("../utils/asyncHandler");
 const ApiError_1 = require("../utils/ApiError");
-const env_1 = require("../config/env");
+const constants_1 = require("../config/constants");
 const matcher_service_1 = require("../services/ai/matcher.service");
+const jobSearch_service_1 = require("../services/ai/jobSearch.service");
 const jobScraper_cron_1 = require("../jobs/jobScraper.cron");
 const jobCache_service_1 = require("../services/jobCache.service");
 const logger_1 = require("../utils/logger");
@@ -33,7 +34,7 @@ exports.listJobsSchema = zod_1.z.object({
     }),
 });
 const buildFilter = (q) => {
-    const cutoff = new Date(Date.now() - env_1.env.JOB_FRESHNESS_DAYS * 24 * 60 * 60 * 1000);
+    const cutoff = new Date(Date.now() - constants_1.JOB_FRESHNESS_DAYS * 24 * 60 * 60 * 1000);
     const filter = {
         isActive: true,
         postedAt: { $gte: cutoff },
@@ -124,7 +125,7 @@ exports.matchedJobs = (0, asyncHandler_1.asyncHandler)(async (req, res) => {
     const limitRaw = typeof req.query.limit === 'string' ? Number(req.query.limit) : NaN;
     const limit = Math.min(100, Math.max(1, Number.isFinite(limitRaw) ? Math.floor(limitRaw) : 20));
     const skip = (page - 1) * limit;
-    const cutoff = new Date(Date.now() - env_1.env.JOB_FRESHNESS_DAYS * 24 * 60 * 60 * 1000);
+    const cutoff = new Date(Date.now() - constants_1.JOB_FRESHNESS_DAYS * 24 * 60 * 60 * 1000);
     if (req.user.role === 'guest') {
         const baseFilter = { isActive: true, postedAt: { $gte: cutoff } };
         const [items, total] = await Promise.all([
@@ -271,4 +272,31 @@ exports.triggerFetch = (0, asyncHandler_1.asyncHandler)(async (req, res) => {
         logger_1.logger.error('Manual fetch failed', err);
         throw ApiError_1.ApiError.internal('Failed to trigger fetch');
     }
+});
+exports.aiSearchSchema = zod_1.z.object({
+    body: zod_1.z.object({
+        query: zod_1.z.string().min(1).max(500),
+        limit: zod_1.z.coerce.number().min(1).max(50).optional(),
+        excludeAppliedJobs: zod_1.z.boolean().optional().default(true),
+    }),
+});
+exports.aiSearchJobs = (0, asyncHandler_1.asyncHandler)(async (req, res) => {
+    const { query, limit, excludeAppliedJobs } = req.body;
+    const excludeIds = excludeAppliedJobs
+        ? (await fetchAppliedJobIds(req.user?._id)).map((id) => id.toString())
+        : [];
+    const result = await (0, jobSearch_service_1.aiJobSearch)({
+        query,
+        limit: limit ?? 30,
+        excludeJobIds: excludeIds,
+    });
+    res.json({
+        success: true,
+        data: result.jobs,
+        meta: {
+            intent: result.intent,
+            total: result.total,
+            scope: result.scope,
+        },
+    });
 });

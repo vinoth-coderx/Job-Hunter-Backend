@@ -7,6 +7,7 @@ require("dotenv/config");
 const http_1 = __importDefault(require("http"));
 const app_1 = require("./app");
 const env_1 = require("./config/env");
+const constants_1 = require("./config/constants");
 const database_1 = require("./config/database");
 const redis_1 = require("./config/redis");
 const jobScraper_cron_1 = require("./jobs/jobScraper.cron");
@@ -26,7 +27,7 @@ const start = async () => {
         (0, socket_1.initSocket)(server);
         server.listen(env_1.env.PORT, () => {
             const base = `http://localhost:${env_1.env.PORT}`;
-            const api = `${base}/api/${env_1.env.API_VERSION}`;
+            const api = `${base}/api/${constants_1.API_VERSION}`;
             logger_1.logger.info('================================================');
             logger_1.logger.info(`  Job Hunter Backend  [${env_1.env.NODE_ENV}]`);
             logger_1.logger.info('================================================');

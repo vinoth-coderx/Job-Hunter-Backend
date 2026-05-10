@@ -3,81 +3,78 @@ import { z } from 'zod';
 
 dotenv.config();
 
+/**
+ * Environment schema — secrets and per-deployment overrides only.
+ *
+ * Project-wide constants (cron schedules, JWT lifetimes, freshness
+ * windows, SMTP host, third-party API hosts, etc.) live in
+ * `src/config/constants.ts` and are imported directly. Don't add
+ * non-sensitive defaults here.
+ */
 const envSchema = z.object({
+  // ── Runtime ─────────────────────────────────────────────
   NODE_ENV: z.enum(['development', 'production', 'test']).default('development'),
   PORT: z.string().default('5000').transform(Number),
-  API_VERSION: z.string().default('v1'),
   CLIENT_URL: z.string().default('http://localhost:3000'),
 
+  // ── MongoDB ─────────────────────────────────────────────
   MONGODB_URI: z.string(),
 
+  // ── Redis ───────────────────────────────────────────────
   REDIS_HOST: z.string().default('localhost'),
   REDIS_PORT: z.string().default('6379').transform(Number),
   REDIS_USERNAME: z.string().optional(),
   REDIS_PASSWORD: z.string().optional(),
-  REDIS_DB: z.string().default('0').transform(Number),
-  REDIS_JOB_CACHE_TTL: z.string().default('3600').transform(Number),
-  REDIS_TLS: z.string().default('auto').transform((v) => v),
+  REDIS_TLS: z.string().default('auto'),
 
+  // ── JWT (secrets only — lifetimes are in constants.ts) ──
   JWT_SECRET: z.string().min(32),
-  JWT_EXPIRES_IN: z.string().default('7d'),
   JWT_REFRESH_SECRET: z.string().min(32),
-  JWT_REFRESH_EXPIRES_IN: z.string().default('30d'),
 
+  // ── Google OAuth (sign-in) ──────────────────────────────
   GOOGLE_CLIENT_ID: z.string().optional(),
   GOOGLE_CLIENT_SECRET: z.string().optional(),
   GOOGLE_CALLBACK_URL: z.string().optional(),
   GOOGLE_ANDROID_CLIENT_ID: z.string().optional(),
   GOOGLE_IOS_CLIENT_ID: z.string().optional(),
 
+  // ── Job-board APIs (keys only) ──────────────────────────
   ADZUNA_APP_ID: z.string().optional(),
   ADZUNA_APP_KEY: z.string().optional(),
-  ADZUNA_COUNTRY: z.string().default('in'),
-
   SERPAPI_KEY: z.string().optional(),
-
   RAPIDAPI_KEY: z.string().optional(),
-  RAPIDAPI_JSEARCH_HOST: z.string().default('jsearch.p.rapidapi.com'),
-  RAPIDAPI_LINKEDIN_HOST: z.string().default('linkedin-data-api.p.rapidapi.com'),
+  THEIRSTACK_API_KEY: z.string().optional(),
 
+  // ── AI ──────────────────────────────────────────────────
   ANTHROPIC_API_KEY: z.string().optional(),
-  AI_MATCH_THRESHOLD: z.string().default('50').transform(Number),
 
-  CRON_JOB_FETCH_SCHEDULE: z.string().default('0 * * * *'),
-  CRON_CACHE_WARM_SCHEDULE: z.string().default('0 */6 * * *'),
+  // ── Cron toggle (per-env: prod=true, tests=false) ───────
   CRON_ENABLED: z.string().default('true').transform((v) => v === 'true'),
-  JOB_FRESHNESS_DAYS: z.string().default('10').transform(Number),
 
-  SMTP_HOST: z.string().optional(),
-  SMTP_PORT: z.string().default('587').transform(Number),
+  // ── Email (credentials only) ────────────────────────────
   SMTP_USER: z.string().optional(),
   SMTP_PASS: z.string().optional(),
-  EMAIL_FROM: z.string().default('Job Hunter <noreply@jobhunter.com>'),
 
-  // Live keys — used in production AND when debug clients haven't been
-  // explicitly opted into test mode. Treated as the default.
+  // ── Subscriptions (Razorpay primary, Stripe optional) ───
   RAZORPAY_KEY_ID: z.string().optional(),
   RAZORPAY_KEY_SECRET: z.string().optional(),
   RAZORPAY_WEBHOOK_SECRET: z.string().optional(),
-  // Test keys — used when a debug-build client requests `mode: 'test'` and
-  // NODE_ENV is not 'production'. Production deployments ignore this even
-  // if a client asks, so a release-build user can't downgrade themselves
-  // into test mode and bypass real billing.
+  // Test keys — only honoured for debug-build clients in non-prod envs.
   RAZORPAY_TEST_KEY_ID: z.string().optional(),
   RAZORPAY_TEST_KEY_SECRET: z.string().optional(),
   RAZORPAY_TEST_WEBHOOK_SECRET: z.string().optional(),
   STRIPE_SECRET_KEY: z.string().optional(),
   STRIPE_WEBHOOK_SECRET: z.string().optional(),
 
-  // FCM push notifications. Either provide the full service-account JSON
-  // inline (FIREBASE_SERVICE_ACCOUNT_JSON, useful for hosted env vars)
-  // or a path to it (FIREBASE_SERVICE_ACCOUNT_PATH). When neither is set
-  // the alert cron still runs but skips push delivery.
+  // ── Firebase (FCM push + Auth ID-token verification) ───
   FIREBASE_SERVICE_ACCOUNT_JSON: z.string().optional(),
   FIREBASE_SERVICE_ACCOUNT_PATH: z.string().optional(),
   FIREBASE_PROJECT_ID: z.string().optional(),
-  CRON_ALERT_SCHEDULE: z.string().default('*/15 * * * *'),
-  ALERT_PUSH_MAX_PER_RUN: z.string().default('5').transform(Number),
+
+  // ── Cloudinary (file storage) ───────────────────────────
+  CLOUDINARY_CLOUD_NAME: z.string().optional(),
+  CLOUDINARY_API_KEY: z.string().optional(),
+  CLOUDINARY_API_SECRET: z.string().optional(),
 });
 
 const parsed = envSchema.safeParse(process.env);

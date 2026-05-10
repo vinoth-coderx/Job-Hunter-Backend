@@ -17,6 +17,7 @@ import {
 } from '../controllers/savedJobs.controller';
 import { recordJobView } from '../controllers/jobView.controller';
 import { authenticate, authenticateOrGuest, optionalAuth } from '../middleware/auth';
+import { aiSearchLimiter } from '../middleware/rateLimiter';
 import { validate } from '../middleware/validate';
 
 const router = Router();
@@ -41,6 +42,7 @@ router.get('/saved/ids', authenticate, listSavedJobIds);
 router.post(
   '/ai-search',
   authenticateOrGuest,
+  aiSearchLimiter,
   validate(aiSearchSchema),
   aiSearchJobs,
 );

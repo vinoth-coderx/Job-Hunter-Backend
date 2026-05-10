@@ -45,7 +45,7 @@ const jobSchema = new mongoose_1.Schema({
     isNative: { type: Boolean, default: false, index: true },
     source: {
         type: String,
-        enum: ['native', 'adzuna', 'serpapi', 'rapidapi', 'puppeteer', 'playwright'],
+        enum: ['native', 'adzuna', 'serpapi', 'rapidapi', 'arbeitnow', 'theirstack', 'puppeteer', 'playwright'],
         required: true,
         index: true,
     },

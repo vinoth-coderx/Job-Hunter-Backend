@@ -11,6 +11,7 @@ import { logger } from '../utils/logger';
 import { randomToken } from '../utils/crypto';
 import { recordFailedLogin, isLockedOut, clearFailedLogins } from '../middleware/security';
 import { env } from '../config/env';
+import { getFirebaseAdmin } from '../services/firebase/admin.service';
 
 const googleAudiences = [
   env.GOOGLE_CLIENT_ID,
@@ -339,6 +340,158 @@ export const googleMobileLogin = asyncHandler(async (req: Request, res: Response
   res.json({
     success: true,
     message: 'Google login successful',
+    data: {
+      user: {
+        id: user._id,
+        email: user.email,
+        fullName: user.profile.fullName,
+        avatar: user.profile.avatar,
+        role: user.role,
+        subscription: user.subscription,
+      },
+      ...tokens,
+    },
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────
+// Firebase Auth hybrid login
+//
+// The client signs in with the Firebase Auth SDK (any provider it
+// supports — email/password, Google, phone, …), grabs the ID token via
+// `user.getIdToken()`, and POSTs it here. We verify the token with
+// firebase-admin, look up or create the matching User document, then
+// mint our own JWT pair so the rest of the API stays unchanged.
+//
+// Existing JWT-based middleware doesn't need to change. /auth/login and
+// the password flow keep working for accounts that haven't migrated.
+// ─────────────────────────────────────────────────────────────────────
+
+export const firebaseLoginSchema = z.object({
+  body: z.object({
+    idToken: z.string().min(20),
+    fullName: z.string().min(2).max(100).optional(),
+    phone: z.string().max(20).optional(),
+  }),
+});
+
+export const checkEmailExistsSchema = z.object({
+  body: z.object({
+    email: z.string().email(),
+  }),
+});
+
+// Firebase enables "email enumeration protection" by default which makes
+// sendPasswordResetEmail silently succeed for non-existent accounts. To
+// give users honest "no account found" feedback before triggering the
+// reset flow, look the email up via firebase-admin and return whether it
+// exists. Note: this re-introduces enumeration risk by design.
+export const checkEmailExists = asyncHandler(async (req: Request, res: Response) => {
+  const admin = await getFirebaseAdmin();
+  if (!admin) {
+    throw ApiError.internal(
+      'Firebase Auth is not configured on the server (set FIREBASE_SERVICE_ACCOUNT_JSON)',
+    );
+  }
+
+  const email = (req.body.email as string).toLowerCase().trim();
+
+  try {
+    await admin.auth().getUserByEmail(email);
+    res.json({ success: true, data: { exists: true } });
+  } catch (err) {
+    const code = (err as { code?: string }).code;
+    if (code === 'auth/user-not-found') {
+      res.json({ success: true, data: { exists: false } });
+      return;
+    }
+    logger.warn('checkEmailExists lookup failed', err);
+    throw ApiError.internal('Failed to check email');
+  }
+});
+
+export const firebaseLogin = asyncHandler(async (req: Request, res: Response) => {
+  const admin = await getFirebaseAdmin();
+  if (!admin) {
+    throw ApiError.internal(
+      'Firebase Auth is not configured on the server (set FIREBASE_SERVICE_ACCOUNT_JSON)',
+    );
+  }
+
+  const { idToken, fullName, phone } = req.body as {
+    idToken: string;
+    fullName?: string;
+    phone?: string;
+  };
+
+  let decoded;
+  try {
+    decoded = await admin.auth().verifyIdToken(idToken, true);
+  } catch (err) {
+    logger.warn('Firebase ID token verification failed', err);
+    throw ApiError.unauthorized('Invalid Firebase ID token');
+  }
+
+  const firebaseUid = decoded.uid;
+  const email = decoded.email?.toLowerCase();
+  if (!email) {
+    throw ApiError.unauthorized('Firebase token has no email — provider must include email scope');
+  }
+
+  // Find by firebaseUid first (fast path for returning users), fall back
+  // to email so we can link Firebase to a pre-existing local account.
+  let user = await User.findOne({
+    $or: [{ firebaseUid }, { email }],
+  }).select('+refreshTokens');
+
+  if (!user) {
+    user = await User.create({
+      email,
+      firebaseUid,
+      authProvider: 'firebase',
+      isEmailVerified: decoded.email_verified ?? false,
+      profile: {
+        fullName: fullName?.trim() || decoded.name || email.split('@')[0],
+        phone: phone?.trim(),
+        avatar: decoded.picture,
+        skills: [],
+        experienceYears: 0,
+        preferredRoles: [],
+        preferredLocations: [],
+        preferredJobTypes: [],
+        preferredRemote: [],
+      },
+      subscription: { tier: 'free', status: 'active' },
+    });
+    logger.info(`New user via Firebase Auth: ${email}`);
+  } else if (!user.firebaseUid) {
+    // Existing local/google account — link the Firebase UID so future
+    // sign-ins take the fast path. Don't overwrite name/avatar fields
+    // the user has already personalised.
+    user.firebaseUid = firebaseUid;
+    if (!user.isEmailVerified && decoded.email_verified) {
+      user.isEmailVerified = true;
+    }
+    if (!user.profile.avatar && decoded.picture) {
+      user.profile.avatar = decoded.picture;
+    }
+    await user.save();
+    logger.info(`Linked Firebase UID to existing account: ${email}`);
+  }
+
+  const tokens = generateTokenPair({
+    userId: user._id.toString(),
+    email: user.email,
+    role: user.role,
+  });
+
+  user.refreshTokens = [...(user.refreshTokens || []).slice(-4), tokens.refreshToken];
+  user.lastLogin = new Date();
+  await user.save();
+
+  res.json({
+    success: true,
+    message: 'Firebase login successful',
     data: {
       user: {
         id: user._id,

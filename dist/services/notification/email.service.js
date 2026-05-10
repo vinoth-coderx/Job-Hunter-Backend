@@ -6,17 +6,18 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.sendTeamInviteEmail = exports.sendJobAlertEmail = void 0;
 const nodemailer_1 = __importDefault(require("nodemailer"));
 const env_1 = require("../../config/env");
+const constants_1 = require("../../config/constants");
 const logger_1 = require("../../utils/logger");
 let transporter = null;
 const getTransporter = () => {
     if (transporter)
         return transporter;
-    if (!env_1.env.SMTP_HOST || !env_1.env.SMTP_USER || !env_1.env.SMTP_PASS)
+    if (!env_1.env.SMTP_USER || !env_1.env.SMTP_PASS)
         return null;
     transporter = nodemailer_1.default.createTransport({
-        host: env_1.env.SMTP_HOST,
-        port: env_1.env.SMTP_PORT,
-        secure: env_1.env.SMTP_PORT === 465,
+        host: constants_1.SMTP_HOST,
+        port: constants_1.SMTP_PORT,
+        secure: constants_1.SMTP_PORT === 465,
         auth: { user: env_1.env.SMTP_USER, pass: env_1.env.SMTP_PASS },
     });
     return transporter;
@@ -94,7 +95,7 @@ const sendJobAlertEmail = async (params) => {
     });
     try {
         await t.sendMail({
-            from: env_1.env.EMAIL_FROM,
+            from: constants_1.EMAIL_FROM,
             to: params.toEmail,
             subject,
             html,
@@ -149,7 +150,7 @@ const sendTeamInviteEmail = async (params) => {
     const html = renderTeamInviteHtml(params);
     try {
         await t.sendMail({
-            from: env_1.env.EMAIL_FROM,
+            from: constants_1.EMAIL_FROM,
             to: params.toEmail,
             subject,
             html,

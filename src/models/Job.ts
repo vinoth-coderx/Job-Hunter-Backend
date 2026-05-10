@@ -95,7 +95,7 @@ const jobSchema = new Schema<IJob>(
     isNative: { type: Boolean, default: false, index: true },
     source: {
       type: String,
-      enum: ['native', 'adzuna', 'serpapi', 'rapidapi', 'puppeteer', 'playwright'],
+      enum: ['native', 'adzuna', 'serpapi', 'rapidapi', 'arbeitnow', 'theirstack', 'puppeteer', 'playwright'],
       required: true,
       index: true,
     },

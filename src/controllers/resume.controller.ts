@@ -1,20 +1,26 @@
 import { Response } from 'express';
-import path from 'path';
-import fs from 'fs/promises';
+import crypto from 'node:crypto';
 import { asyncHandler } from '../utils/asyncHandler';
 import { ApiError } from '../utils/ApiError';
 import { AuthRequest } from '../types';
 import { User } from '../models/User';
 import { logger } from '../utils/logger';
-import { RESUME_DIR } from '../middleware/upload';
 import { parseResumeText } from '../services/ai/resumeParser.service';
+import {
+  CLOUDINARY_FOLDERS,
+  destroyAsset,
+  isCloudinaryConfigured,
+  signedDeliveryUrl,
+  uploadBuffer,
+} from '../config/cloudinary';
 
-const extractText = async (filePath: string, mime: string): Promise<string> => {
+const SIGNED_URL_TTL_SEC = 600; // 10 min — long enough to start a download.
+
+const extractTextFromBuffer = async (buffer: Buffer, mime: string): Promise<string> => {
   try {
     if (mime === 'application/pdf') {
       const { PDFParse } = await import('pdf-parse');
-      const buf = await fs.readFile(filePath);
-      const parser = new PDFParse({ data: new Uint8Array(buf) });
+      const parser = new PDFParse({ data: new Uint8Array(buffer) });
       try {
         const result = await parser.getText();
         const text = result.pages?.map((p) => p.text || '').join('\n') || result.text || '';
@@ -28,51 +34,71 @@ const extractText = async (filePath: string, mime: string): Promise<string> => {
       mime === 'application/msword'
     ) {
       const mammoth = await import('mammoth');
-      const result = await mammoth.extractRawText({ path: filePath });
+      const result = await mammoth.extractRawText({ buffer });
       return (result.value || '').trim().slice(0, 20000);
     }
     return '';
   } catch (err) {
-    logger.warn('Resume text extraction failed', { filePath, err });
+    logger.warn('Resume text extraction failed', { err });
     return '';
   }
 };
 
-const removeFileQuiet = async (filename?: string): Promise<void> => {
-  if (!filename) return;
-  try {
-    await fs.unlink(path.join(RESUME_DIR, filename));
-  } catch {
-    // already gone
+const formatFromMime = (mime: string): string => {
+  if (mime === 'application/pdf') return 'pdf';
+  if (mime === 'application/msword') return 'doc';
+  if (mime === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document') {
+    return 'docx';
   }
+  return 'bin';
 };
 
 export const uploadResumeHandler = asyncHandler(async (req: AuthRequest, res: Response) => {
   if (!req.user) throw ApiError.unauthorized();
-  if (!req.file) throw ApiError.badRequest('No file uploaded — field name must be "resume"');
-
-  const user = await User.findById(req.user._id);
-  if (!user) {
-    await removeFileQuiet(req.file.filename);
-    throw ApiError.notFound('User not found');
+  if (!req.file || !req.file.buffer) {
+    throw ApiError.badRequest('No file uploaded — field name must be "resume"');
+  }
+  if (!isCloudinaryConfigured()) {
+    throw ApiError.internal('Cloudinary is not configured on the server');
   }
 
-  const oldFilename = user.profile.resumeFile?.filename;
+  const user = await User.findById(req.user._id);
+  if (!user) throw ApiError.notFound('User not found');
 
-  const resumeText = await extractText(req.file.path, req.file.mimetype);
+  const oldPublicId = user.profile.resumeFile?.publicId;
+
+  // Random suffix in the public_id so even if a URL leaks, a fresh
+  // upload immediately invalidates it.
+  const suffix = crypto.randomBytes(6).toString('hex');
+  const fmt = formatFromMime(req.file.mimetype);
+
+  const result = await uploadBuffer(req.file.buffer, {
+    folder: CLOUDINARY_FOLDERS.RESUME,
+    publicId: `user_${user._id.toString()}_${suffix}`,
+    resourceType: 'raw',
+    type: 'authenticated',
+    overwrite: false,
+    tags: ['resume', `user:${user._id.toString()}`],
+    format: fmt,
+  });
+
+  const resumeText = await extractTextFromBuffer(req.file.buffer, req.file.mimetype);
 
   user.profile.resumeFile = {
-    filename: req.file.filename,
+    publicId: result.publicId,
+    url: result.url,
+    filename: result.publicId.split('/').pop() ?? result.publicId,
     originalName: req.file.originalname,
     mimeType: req.file.mimetype,
-    size: req.file.size,
+    size: result.bytes || req.file.size,
     uploadedAt: new Date(),
   };
+  user.profile.resumeUrl = result.url;
   if (resumeText) user.profile.resumeText = resumeText;
   await user.save();
 
-  if (oldFilename && oldFilename !== req.file.filename) {
-    await removeFileQuiet(oldFilename);
+  if (oldPublicId && oldPublicId !== result.publicId) {
+    await destroyAsset(oldPublicId, 'raw', 'authenticated');
   }
 
   res.status(201).json({
@@ -81,6 +107,7 @@ export const uploadResumeHandler = asyncHandler(async (req: AuthRequest, res: Re
     data: {
       file: user.profile.resumeFile,
       extractedTextLength: resumeText.length,
+      // Clients should call GET /resume to obtain a fresh signed URL each time.
       downloadUrl: `/api/v1/users/resume`,
     },
   });
@@ -90,21 +117,20 @@ export const downloadResumeHandler = asyncHandler(async (req: AuthRequest, res: 
   if (!req.user) throw ApiError.unauthorized();
 
   const user = await User.findById(req.user._id);
-  if (!user || !user.profile.resumeFile) throw ApiError.notFound('No resume on file');
-
-  const filePath = path.join(RESUME_DIR, user.profile.resumeFile.filename);
-  try {
-    await fs.access(filePath);
-  } catch {
-    throw ApiError.notFound('Resume file missing on disk');
+  if (!user || !user.profile.resumeFile?.publicId) {
+    throw ApiError.notFound('No resume on file');
   }
 
-  res.setHeader('Content-Type', user.profile.resumeFile.mimeType);
-  res.setHeader(
-    'Content-Disposition',
-    `inline; filename="${user.profile.resumeFile.originalName.replace(/"/g, '')}"`,
-  );
-  res.sendFile(filePath);
+  const file = user.profile.resumeFile;
+  const signed = signedDeliveryUrl(file.publicId!, {
+    resourceType: 'raw',
+    type: 'authenticated',
+    format: formatFromMime(file.mimeType),
+    expiresInSec: SIGNED_URL_TTL_SEC,
+    attachmentFilename: file.originalName,
+  });
+
+  res.redirect(302, signed);
 });
 
 export const resumeMetaHandler = asyncHandler(async (req: AuthRequest, res: Response) => {
@@ -156,12 +182,13 @@ export const deleteResumeHandler = asyncHandler(async (req: AuthRequest, res: Re
   const user = await User.findById(req.user._id);
   if (!user || !user.profile.resumeFile) throw ApiError.notFound('No resume to delete');
 
-  const filename = user.profile.resumeFile.filename;
+  const publicId = user.profile.resumeFile.publicId;
   user.profile.resumeFile = undefined;
   user.profile.resumeText = undefined;
+  user.profile.resumeUrl = undefined;
   await user.save();
 
-  await removeFileQuiet(filename);
+  if (publicId) await destroyAsset(publicId, 'raw', 'authenticated');
 
   res.json({ success: true, message: 'Resume deleted' });
 });

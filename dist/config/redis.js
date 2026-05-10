@@ -6,6 +6,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.CACHE_KEYS = exports.disconnectRedis = exports.connectRedis = exports.redis = void 0;
 const ioredis_1 = __importDefault(require("ioredis"));
 const env_1 = require("./env");
+const constants_1 = require("./constants");
 const logger_1 = require("../utils/logger");
 const useTls = env_1.env.REDIS_TLS === 'true';
 const redisOpts = {
@@ -13,7 +14,7 @@ const redisOpts = {
     port: env_1.env.REDIS_PORT,
     username: env_1.env.REDIS_USERNAME || undefined,
     password: env_1.env.REDIS_PASSWORD || undefined,
-    db: env_1.env.REDIS_DB,
+    db: constants_1.REDIS_DB,
     maxRetriesPerRequest: 3,
     enableReadyCheck: true,
     lazyConnect: true,

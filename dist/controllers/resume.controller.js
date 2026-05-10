@@ -37,20 +37,19 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
 };
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.deleteResumeHandler = exports.parseResumeHandler = exports.resumeMetaHandler = exports.downloadResumeHandler = exports.uploadResumeHandler = void 0;
-const path_1 = __importDefault(require("path"));
-const promises_1 = __importDefault(require("fs/promises"));
+const node_crypto_1 = __importDefault(require("node:crypto"));
 const asyncHandler_1 = require("../utils/asyncHandler");
 const ApiError_1 = require("../utils/ApiError");
 const User_1 = require("../models/User");
 const logger_1 = require("../utils/logger");
-const upload_1 = require("../middleware/upload");
 const resumeParser_service_1 = require("../services/ai/resumeParser.service");
-const extractText = async (filePath, mime) => {
+const cloudinary_1 = require("../config/cloudinary");
+const SIGNED_URL_TTL_SEC = 600;
+const extractTextFromBuffer = async (buffer, mime) => {
     try {
         if (mime === 'application/pdf') {
             const { PDFParse } = await Promise.resolve().then(() => __importStar(require('pdf-parse')));
-            const buf = await promises_1.default.readFile(filePath);
-            const parser = new PDFParse({ data: new Uint8Array(buf) });
+            const parser = new PDFParse({ data: new Uint8Array(buffer) });
             try {
                 const result = await parser.getText();
                 const text = result.pages?.map((p) => p.text || '').join('\n') || result.text || '';
@@ -63,49 +62,66 @@ const extractText = async (filePath, mime) => {
         if (mime === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' ||
             mime === 'application/msword') {
             const mammoth = await Promise.resolve().then(() => __importStar(require('mammoth')));
-            const result = await mammoth.extractRawText({ path: filePath });
+            const result = await mammoth.extractRawText({ buffer });
             return (result.value || '').trim().slice(0, 20000);
         }
         return '';
     }
     catch (err) {
-        logger_1.logger.warn('Resume text extraction failed', { filePath, err });
+        logger_1.logger.warn('Resume text extraction failed', { err });
         return '';
     }
 };
-const removeFileQuiet = async (filename) => {
-    if (!filename)
-        return;
-    try {
-        await promises_1.default.unlink(path_1.default.join(upload_1.RESUME_DIR, filename));
+const formatFromMime = (mime) => {
+    if (mime === 'application/pdf')
+        return 'pdf';
+    if (mime === 'application/msword')
+        return 'doc';
+    if (mime === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document') {
+        return 'docx';
     }
-    catch {
-    }
+    return 'bin';
 };
 exports.uploadResumeHandler = (0, asyncHandler_1.asyncHandler)(async (req, res) => {
     if (!req.user)
         throw ApiError_1.ApiError.unauthorized();
-    if (!req.file)
+    if (!req.file || !req.file.buffer) {
         throw ApiError_1.ApiError.badRequest('No file uploaded — field name must be "resume"');
-    const user = await User_1.User.findById(req.user._id);
-    if (!user) {
-        await removeFileQuiet(req.file.filename);
-        throw ApiError_1.ApiError.notFound('User not found');
     }
-    const oldFilename = user.profile.resumeFile?.filename;
-    const resumeText = await extractText(req.file.path, req.file.mimetype);
+    if (!(0, cloudinary_1.isCloudinaryConfigured)()) {
+        throw ApiError_1.ApiError.internal('Cloudinary is not configured on the server');
+    }
+    const user = await User_1.User.findById(req.user._id);
+    if (!user)
+        throw ApiError_1.ApiError.notFound('User not found');
+    const oldPublicId = user.profile.resumeFile?.publicId;
+    const suffix = node_crypto_1.default.randomBytes(6).toString('hex');
+    const fmt = formatFromMime(req.file.mimetype);
+    const result = await (0, cloudinary_1.uploadBuffer)(req.file.buffer, {
+        folder: cloudinary_1.CLOUDINARY_FOLDERS.RESUME,
+        publicId: `user_${user._id.toString()}_${suffix}`,
+        resourceType: 'raw',
+        type: 'authenticated',
+        overwrite: false,
+        tags: ['resume', `user:${user._id.toString()}`],
+        format: fmt,
+    });
+    const resumeText = await extractTextFromBuffer(req.file.buffer, req.file.mimetype);
     user.profile.resumeFile = {
-        filename: req.file.filename,
+        publicId: result.publicId,
+        url: result.url,
+        filename: result.publicId.split('/').pop() ?? result.publicId,
         originalName: req.file.originalname,
         mimeType: req.file.mimetype,
-        size: req.file.size,
+        size: result.bytes || req.file.size,
         uploadedAt: new Date(),
     };
+    user.profile.resumeUrl = result.url;
     if (resumeText)
         user.profile.resumeText = resumeText;
     await user.save();
-    if (oldFilename && oldFilename !== req.file.filename) {
-        await removeFileQuiet(oldFilename);
+    if (oldPublicId && oldPublicId !== result.publicId) {
+        await (0, cloudinary_1.destroyAsset)(oldPublicId, 'raw', 'authenticated');
     }
     res.status(201).json({
         success: true,
@@ -121,18 +137,18 @@ exports.downloadResumeHandler = (0, asyncHandler_1.asyncHandler)(async (req, res
     if (!req.user)
         throw ApiError_1.ApiError.unauthorized();
     const user = await User_1.User.findById(req.user._id);
-    if (!user || !user.profile.resumeFile)
+    if (!user || !user.profile.resumeFile?.publicId) {
         throw ApiError_1.ApiError.notFound('No resume on file');
-    const filePath = path_1.default.join(upload_1.RESUME_DIR, user.profile.resumeFile.filename);
-    try {
-        await promises_1.default.access(filePath);
     }
-    catch {
-        throw ApiError_1.ApiError.notFound('Resume file missing on disk');
-    }
-    res.setHeader('Content-Type', user.profile.resumeFile.mimeType);
-    res.setHeader('Content-Disposition', `inline; filename="${user.profile.resumeFile.originalName.replace(/"/g, '')}"`);
-    res.sendFile(filePath);
+    const file = user.profile.resumeFile;
+    const signed = (0, cloudinary_1.signedDeliveryUrl)(file.publicId, {
+        resourceType: 'raw',
+        type: 'authenticated',
+        format: formatFromMime(file.mimeType),
+        expiresInSec: SIGNED_URL_TTL_SEC,
+        attachmentFilename: file.originalName,
+    });
+    res.redirect(302, signed);
 });
 exports.resumeMetaHandler = (0, asyncHandler_1.asyncHandler)(async (req, res) => {
     if (!req.user)
@@ -176,10 +192,12 @@ exports.deleteResumeHandler = (0, asyncHandler_1.asyncHandler)(async (req, res) 
     const user = await User_1.User.findById(req.user._id);
     if (!user || !user.profile.resumeFile)
         throw ApiError_1.ApiError.notFound('No resume to delete');
-    const filename = user.profile.resumeFile.filename;
+    const publicId = user.profile.resumeFile.publicId;
     user.profile.resumeFile = undefined;
     user.profile.resumeText = undefined;
+    user.profile.resumeUrl = undefined;
     await user.save();
-    await removeFileQuiet(filename);
+    if (publicId)
+        await (0, cloudinary_1.destroyAsset)(publicId, 'raw', 'authenticated');
     res.json({ success: true, message: 'Resume deleted' });
 });

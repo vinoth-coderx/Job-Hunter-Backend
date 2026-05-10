@@ -1,7 +1,7 @@
 import axios, { AxiosError } from 'axios';
 import { ScrapedJob } from '../../types';
 import { logger } from '../../utils/logger';
-import { env } from '../../config/env';
+import { JOB_FRESHNESS_DAYS } from '../../config/constants';
 import { redis } from '../../config/redis';
 
 export abstract class BaseScraper {
@@ -67,7 +67,7 @@ export abstract class BaseScraper {
   }
 
   protected isWithinFreshness(date: Date): boolean {
-    const cutoff = new Date(Date.now() - env.JOB_FRESHNESS_DAYS * 24 * 60 * 60 * 1000);
+    const cutoff = new Date(Date.now() - JOB_FRESHNESS_DAYS * 24 * 60 * 60 * 1000);
     return date >= cutoff;
   }
 

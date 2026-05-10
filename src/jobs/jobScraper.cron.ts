@@ -1,5 +1,6 @@
 import cron, { ScheduledTask } from 'node-cron';
 import { env } from '../config/env';
+import { CRON_JOB_FETCH_SCHEDULE } from '../config/constants';
 import { logger } from '../utils/logger';
 import { fetchAllJobs } from '../services/scrapers';
 import { Subscription } from '../models/Subscription';
@@ -22,13 +23,13 @@ export const startJobScraperCron = (): void => {
     return;
   }
 
-  if (!cron.validate(env.CRON_JOB_FETCH_SCHEDULE)) {
-    logger.error(`Invalid cron expression: ${env.CRON_JOB_FETCH_SCHEDULE}`);
+  if (!cron.validate(CRON_JOB_FETCH_SCHEDULE)) {
+    logger.error(`Invalid cron expression: ${CRON_JOB_FETCH_SCHEDULE}`);
     return;
   }
 
   jobScraperTask = cron.schedule(
-    env.CRON_JOB_FETCH_SCHEDULE,
+    CRON_JOB_FETCH_SCHEDULE,
     async () => {
       if (isRunning) {
         logger.warn('Previous job fetch still running — skipping this tick');
@@ -96,7 +97,7 @@ export const startJobScraperCron = (): void => {
   );
 
   logger.info(
-    `Cron scheduled — job fetch: "${env.CRON_JOB_FETCH_SCHEDULE}", sub check: daily 00:00, applied-jobs cleanup: daily 02:00 (>${APPLIED_JOB_RETENTION_DAYS}d)`,
+    `Cron scheduled — job fetch: "${CRON_JOB_FETCH_SCHEDULE}", sub check: daily 00:00, applied-jobs cleanup: daily 02:00 (>${APPLIED_JOB_RETENTION_DAYS}d)`,
   );
 };
 

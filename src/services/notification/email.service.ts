@@ -1,5 +1,6 @@
 import nodemailer, { Transporter } from 'nodemailer';
 import { env } from '../../config/env';
+import { EMAIL_FROM, SMTP_HOST, SMTP_PORT } from '../../config/constants';
 import { logger } from '../../utils/logger';
 import { IJob } from '../../models/Job';
 
@@ -7,11 +8,12 @@ let transporter: Transporter | null = null;
 
 const getTransporter = (): Transporter | null => {
   if (transporter) return transporter;
-  if (!env.SMTP_HOST || !env.SMTP_USER || !env.SMTP_PASS) return null;
+  if (!env.SMTP_USER || !env.SMTP_PASS) return null;
   transporter = nodemailer.createTransport({
-    host: env.SMTP_HOST,
-    port: env.SMTP_PORT,
-    secure: env.SMTP_PORT === 465,
+    host: SMTP_HOST,
+    port: SMTP_PORT,
+    // Implicit TLS only on port 465; STARTTLS for 587/25.
+    secure: (SMTP_PORT as number) === 465,
     auth: { user: env.SMTP_USER, pass: env.SMTP_PASS },
   });
   return transporter;
@@ -109,7 +111,7 @@ export const sendJobAlertEmail = async (params: {
 
   try {
     await t.sendMail({
-      from: env.EMAIL_FROM,
+      from: EMAIL_FROM,
       to: params.toEmail,
       subject,
       html,
@@ -178,7 +180,7 @@ export const sendTeamInviteEmail = async (params: {
   const html = renderTeamInviteHtml(params);
   try {
     await t.sendMail({
-      from: env.EMAIL_FROM,
+      from: EMAIL_FROM,
       to: params.toEmail,
       subject,
       html,

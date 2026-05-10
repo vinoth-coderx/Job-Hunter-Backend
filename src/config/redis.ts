@@ -1,5 +1,6 @@
 import Redis, { RedisOptions } from 'ioredis';
 import { env } from './env';
+import { REDIS_DB } from './constants';
 import { logger } from '../utils/logger';
 
 const useTls = env.REDIS_TLS === 'true';
@@ -9,7 +10,7 @@ const redisOpts: RedisOptions = {
   port: env.REDIS_PORT,
   username: env.REDIS_USERNAME || undefined,
   password: env.REDIS_PASSWORD || undefined,
-  db: env.REDIS_DB,
+  db: REDIS_DB,
   maxRetriesPerRequest: 3,
   enableReadyCheck: true,
   lazyConnect: true,

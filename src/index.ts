@@ -2,6 +2,7 @@ import 'dotenv/config';
 import http from 'http';
 import { createApp } from './app';
 import { env } from './config/env';
+import { API_VERSION } from './config/constants';
 import { connectDatabase, disconnectDatabase } from './config/database';
 import { connectRedis, disconnectRedis } from './config/redis';
 import { startJobScraperCron, stopJobScraperCron } from './jobs/jobScraper.cron';
@@ -25,7 +26,7 @@ const start = async (): Promise<void> => {
 
     server.listen(env.PORT, () => {
       const base = `http://localhost:${env.PORT}`;
-      const api = `${base}/api/${env.API_VERSION}`;
+      const api = `${base}/api/${API_VERSION}`;
       logger.info('================================================');
       logger.info(`  Job Hunter Backend  [${env.NODE_ENV}]`);
       logger.info('================================================');

@@ -1,6 +1,7 @@
 import Anthropic from '@anthropic-ai/sdk';
 import crypto from 'crypto';
 import { env } from '../../config/env';
+import { JOB_FRESHNESS_DAYS } from '../../config/constants';
 import { logger } from '../../utils/logger';
 import { redis } from '../../config/redis';
 import { Job, IJob } from '../../models/Job';
@@ -29,8 +30,22 @@ export interface SearchIntent {
   freeText?: string;
 }
 
+/// Normalise the query for cache lookup so trivial differences
+/// ("react dev"  vs " React  Dev! ") share the same intent
+/// extraction. Lowercase, strip non-alphanumerics (preserving spaces),
+/// then collapse runs of whitespace.
+const normaliseQueryForCache = (q: string): string =>
+  q
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+
 const cacheKeyForIntent = (q: string) =>
-  `jobsearch:intent:${crypto.createHash('sha1').update(q.toLowerCase()).digest('hex')}`;
+  `jobsearch:intent:${crypto
+    .createHash('sha1')
+    .update(normaliseQueryForCache(q))
+    .digest('hex')}`;
 
 const escapeRegex = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
@@ -200,16 +215,24 @@ Examples:
   }
 };
 
+// Search uses a more generous window than the feed — feed wants
+// "fresh" matches, but a user typing a query expects results even when
+// the cron hasn't run for a few days. Tunable so we can dial it
+// independently of JOB_FRESHNESS_DAYS without re-deploying.
+const SEARCH_FRESHNESS_DAYS = Math.max(JOB_FRESHNESS_DAYS, 60);
+
 /// (location, jobType, remoteType, salary, experience) layer on top.
 const buildMongoFilter = (
   intent: SearchIntent,
   excludeJobIds: string[],
+  opts: { dropFreshness?: boolean; dropActive?: boolean } = {},
 ): Record<string, unknown> => {
-  const cutoff = new Date(Date.now() - env.JOB_FRESHNESS_DAYS * 24 * 60 * 60 * 1000);
-  const filter: Record<string, unknown> = {
-    isActive: true,
-    postedAt: { $gte: cutoff },
-  };
+  const cutoff = new Date(
+    Date.now() - SEARCH_FRESHNESS_DAYS * 24 * 60 * 60 * 1000,
+  );
+  const filter: Record<string, unknown> = {};
+  if (!opts.dropActive) filter.isActive = true;
+  if (!opts.dropFreshness) filter.postedAt = { $gte: cutoff };
 
   if (excludeJobIds.length > 0) {
     filter._id = { $nin: excludeJobIds };
@@ -322,7 +345,32 @@ export interface AiSearchResult {
   intent: SearchIntent;
   jobs: IJob[];
   total: number;
+  /// 'primary' = matched within the freshness window
+  /// 'extended' = freshness dropped, isActive still applied
+  /// 'archived' = both freshness and isActive dropped (last-resort)
+  /// 'empty' = nothing in the DB matched any of the above
+  scope: 'primary' | 'extended' | 'archived' | 'empty';
 }
+
+const fetchAndRank = async (
+  filter: Record<string, unknown>,
+  intent: SearchIntent,
+  limit: number,
+): Promise<IJob[]> => {
+  // Cap candidate pool at 4× the requested limit so the in-memory
+  // re-rank stays cheap even when MongoDB returns thousands of matches.
+  const candidatePool = Math.max(limit * 4, 60);
+  const candidates = await Job.find(filter)
+    .sort({ postedAt: -1 })
+    .limit(candidatePool)
+    .lean<IJob[]>();
+
+  return candidates
+    .map((j) => ({ job: j, score: scoreJob(j, intent) }))
+    .sort((a, b) => b.score - a.score)
+    .slice(0, limit)
+    .map((r) => r.job);
+};
 
 /// End-to-end AI job search:
 ///   1. Parse the query with Claude (or heuristic) into structured intent
@@ -330,6 +378,13 @@ export interface AiSearchResult {
 ///      skills, description, responsibilities, department, company
 ///   3. Fetch a generous candidate pool, score them in-memory, return
 ///      the top `limit` ranked by relevance
+///
+/// When the primary filter returns zero hits we cascade through two
+/// progressively looser fallbacks before giving up:
+///   - drop the freshness window (covers stale-cron environments)
+///   - drop the `isActive` flag (covers archived listings)
+/// The chosen scope is reflected in [AiSearchResult.scope] so the
+/// client can warn the user when they're looking at stale data.
 export const aiJobSearch = async ({
   query,
   limit = 30,
@@ -340,25 +395,62 @@ export const aiJobSearch = async ({
   excludeJobIds?: string[];
 }): Promise<AiSearchResult> => {
   const intent = await extractSearchIntent(query);
-  const filter = buildMongoFilter(intent, excludeJobIds);
 
-  // Cap candidate pool at 4× the requested limit so the in-memory
-  // re-rank stays cheap even when MongoDB returns thousands of matches.
-  const candidatePool = Math.max(limit * 4, 60);
-  const candidates = await Job.find(filter)
-    .sort({ postedAt: -1 })
-    .limit(candidatePool)
-    .lean<IJob[]>();
-
-  const ranked = candidates
-    .map((j) => ({ job: j, score: scoreJob(j, intent) }))
-    .sort((a, b) => b.score - a.score)
-    .slice(0, limit)
-    .map((r) => r.job);
-
-  return {
+  const primary = await fetchAndRank(
+    buildMongoFilter(intent, excludeJobIds),
     intent,
-    jobs: ranked,
-    total: ranked.length,
-  };
+    limit,
+  );
+  if (primary.length > 0) {
+    logger.info(
+      `aiJobSearch: "${query.slice(0, 60)}" → ${primary.length} (primary)`,
+    );
+    return { intent, jobs: primary, total: primary.length, scope: 'primary' };
+  }
+
+  const extended = await fetchAndRank(
+    buildMongoFilter(intent, excludeJobIds, { dropFreshness: true }),
+    intent,
+    limit,
+  );
+  if (extended.length > 0) {
+    logger.info(
+      `aiJobSearch: "${query.slice(0, 60)}" → ${extended.length} (extended, freshness dropped)`,
+    );
+    return {
+      intent,
+      jobs: extended,
+      total: extended.length,
+      scope: 'extended',
+    };
+  }
+
+  const archived = await fetchAndRank(
+    buildMongoFilter(intent, excludeJobIds, {
+      dropFreshness: true,
+      dropActive: true,
+    }),
+    intent,
+    limit,
+  );
+  if (archived.length > 0) {
+    logger.info(
+      `aiJobSearch: "${query.slice(0, 60)}" → ${archived.length} (archived, all gates dropped)`,
+    );
+    return {
+      intent,
+      jobs: archived,
+      total: archived.length,
+      scope: 'archived',
+    };
+  }
+
+  logger.info(
+    `aiJobSearch: "${query.slice(0, 60)}" → 0 (intent=${JSON.stringify({
+      titles: intent.titleKeywords,
+      skills: intent.skills,
+      roles: intent.roleKeywords,
+    })})`,
+  );
+  return { intent, jobs: [], total: 0, scope: 'empty' };
 };

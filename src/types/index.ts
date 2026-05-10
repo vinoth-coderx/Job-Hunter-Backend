@@ -17,6 +17,8 @@ export type JobSource =
   | 'adzuna'
   | 'serpapi'
   | 'rapidapi'
+  | 'arbeitnow'
+  | 'theirstack'
   | 'puppeteer'
   | 'playwright';
 export type JobType = 'full-time' | 'part-time' | 'contract' | 'internship' | 'temporary' | 'unknown';

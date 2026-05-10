@@ -6,6 +6,7 @@ import morgan from 'morgan';
 import cookieParser from 'cookie-parser';
 import passport from 'passport';
 import { env } from './config/env';
+import { API_VERSION } from './config/constants';
 import { initPassport } from './config/passport';
 import routes from './routes';
 import { errorHandler, notFoundHandler } from './middleware/errorHandler';
@@ -98,11 +99,11 @@ export const createApp = (): Application => {
       success: true,
       service: 'Job Hunter Backend',
       version: '1.0.0',
-      docs: `/api/${env.API_VERSION}/health`,
+      docs: `/api/${API_VERSION}/health`,
     });
   });
 
-  app.use(`/api/${env.API_VERSION}`, routes);
+  app.use(`/api/${API_VERSION}`, routes);
 
   app.use(notFoundHandler);
   app.use(errorHandler);

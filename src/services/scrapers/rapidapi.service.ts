@@ -2,7 +2,7 @@ import axios from 'axios';
 import { BaseScraper } from './base';
 import { ScrapedJob } from '../../types';
 import { env } from '../../config/env';
-import { SCRAPER_TIMEOUT_MS } from '../../config/constants';
+import { RAPIDAPI_JSEARCH_HOST, SCRAPER_TIMEOUT_MS } from '../../config/constants';
 
 interface JSearchJob {
   job_id: string;
@@ -36,7 +36,7 @@ export class RapidApiScraper extends BaseScraper {
     if (await this.isCooldown()) return [];
 
     try {
-      const url = `https://${env.RAPIDAPI_JSEARCH_HOST}/search`;
+      const url = `https://${RAPIDAPI_JSEARCH_HOST}/search`;
       const { data } = await axios.get<JSearchResponse>(url, {
         params: {
           query: location ? `${query} in ${location}` : query,
@@ -46,7 +46,7 @@ export class RapidApiScraper extends BaseScraper {
         },
         headers: {
           'X-RapidAPI-Key': env.RAPIDAPI_KEY,
-          'X-RapidAPI-Host': env.RAPIDAPI_JSEARCH_HOST,
+          'X-RapidAPI-Host': RAPIDAPI_JSEARCH_HOST,
         },
         timeout: SCRAPER_TIMEOUT_MS,
       });

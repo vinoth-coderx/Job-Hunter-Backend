@@ -6,7 +6,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.BaseScraper = void 0;
 const axios_1 = __importDefault(require("axios"));
 const logger_1 = require("../../utils/logger");
-const env_1 = require("../../config/env");
+const constants_1 = require("../../config/constants");
 const redis_1 = require("../../config/redis");
 class BaseScraper {
     runFailureCount = 0;
@@ -55,7 +55,7 @@ class BaseScraper {
         logger_1.logger.warn(`[${this.source}] ${context} → ${err.message}`);
     }
     isWithinFreshness(date) {
-        const cutoff = new Date(Date.now() - env_1.env.JOB_FRESHNESS_DAYS * 24 * 60 * 60 * 1000);
+        const cutoff = new Date(Date.now() - constants_1.JOB_FRESHNESS_DAYS * 24 * 60 * 60 * 1000);
         return date >= cutoff;
     }
     log(msg, meta) {

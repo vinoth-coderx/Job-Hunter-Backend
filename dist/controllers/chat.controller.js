@@ -39,11 +39,55 @@ const otherParticipant = (conv, me) => {
 };
 const jobLitePopulate = {
     path: 'job',
-    select: 'title company companyLogoUrl',
+    select: 'title company companyLogoUrl hirerProfile postedBy',
+    populate: {
+        path: 'hirerProfile',
+        select: 'companyLogoUrl companyName',
+    },
+};
+const appliedLitePopulate = {
+    path: 'application',
+    select: 'user',
+};
+const resolveViewerRole = (job, application, viewerId) => {
+    if (job?.postedBy && job.postedBy.toString() === viewerId)
+        return 'hirer';
+    if (application &&
+        typeof application === 'object' &&
+        'user' in application &&
+        application.user?.toString() === viewerId) {
+        return 'seeker';
+    }
+    return 'seeker';
+};
+const resolveCompanyLogo = (job) => {
+    if (!job)
+        return undefined;
+    if (job.companyLogoUrl && job.companyLogoUrl.trim().length > 0) {
+        return job.companyLogoUrl;
+    }
+    const hp = job.hirerProfile;
+    if (hp && typeof hp === 'object' && 'companyLogoUrl' in hp) {
+        return hp.companyLogoUrl;
+    }
+    return undefined;
+};
+const resolveCompanyName = (job) => {
+    if (!job)
+        return undefined;
+    if (job.company && job.company.trim().length > 0)
+        return job.company;
+    const hp = job.hirerProfile;
+    if (hp && typeof hp === 'object' && 'companyName' in hp) {
+        return hp.companyName;
+    }
+    return undefined;
 };
 exports.listConversations = (0, asyncHandler_1.asyncHandler)(async (req, res) => {
     if (!req.user)
         throw ApiError_1.ApiError.unauthorized();
+    const roleParam = typeof req.query.role === 'string' ? req.query.role : '';
+    const roleFilter = roleParam === 'seeker' || roleParam === 'hirer' ? roleParam : null;
     const items = await Conversation_1.Conversation.find({
         participants: req.user._id,
         isArchived: false,
@@ -54,27 +98,35 @@ exports.listConversations = (0, asyncHandler_1.asyncHandler)(async (req, res) =>
         select: 'email profile.fullName profile.avatar',
     })
         .populate(jobLitePopulate)
+        .populate(appliedLitePopulate)
         .lean();
-    res.json({
-        success: true,
-        data: items.map((c) => {
-            const job = c.job;
-            const isPopulated = job && typeof job === 'object' && '_id' in job && 'title' in job;
-            const populated = isPopulated ? job : null;
-            return {
-                id: c._id.toString(),
-                participants: c.participants,
-                application: c.application,
-                job: populated?._id.toString() ?? job ?? null,
-                jobTitle: populated?.title,
-                companyName: populated?.company,
-                companyLogo: populated?.companyLogoUrl,
-                lastMessage: c.lastMessage,
-                unreadCount: c.unreadCount?.[req.user.id] ?? 0,
-                updatedAt: c.updatedAt,
-            };
-        }),
+    const viewerId = req.user.id;
+    const enriched = items.map((c) => {
+        const job = c.job;
+        const isPopulated = job && typeof job === 'object' && '_id' in job && 'title' in job;
+        const populated = isPopulated ? job : null;
+        const applicationRaw = c.application;
+        const viewerRole = resolveViewerRole(populated, applicationRaw, viewerId);
+        return {
+            id: c._id.toString(),
+            participants: c.participants,
+            application: applicationRaw && typeof applicationRaw === 'object' && '_id' in applicationRaw
+                ? applicationRaw._id.toString()
+                : applicationRaw ?? null,
+            job: populated?._id.toString() ?? job ?? null,
+            jobTitle: populated?.title,
+            companyName: resolveCompanyName(populated),
+            companyLogo: resolveCompanyLogo(populated),
+            lastMessage: c.lastMessage,
+            unreadCount: c.unreadCount?.[viewerId] ?? 0,
+            updatedAt: c.updatedAt,
+            viewerRole,
+        };
     });
+    const filtered = roleFilter
+        ? enriched.filter((c) => c.viewerRole === roleFilter)
+        : enriched;
+    res.json({ success: true, data: filtered });
 });
 exports.getConversation = (0, asyncHandler_1.asyncHandler)(async (req, res) => {
     if (!req.user)
@@ -125,7 +177,8 @@ exports.startConversation = (0, asyncHandler_1.asyncHandler)(async (req, res) =>
         path: 'participants',
         select: 'email profile.fullName profile.avatar',
     })
-        .populate(jobLitePopulate);
+        .populate(jobLitePopulate)
+        .populate(appliedLitePopulate);
     res.status(201).json({
         success: true,
         data: enrichConversation((conv ?? created).toObject(), req.user.id),
@@ -135,6 +188,8 @@ const enrichConversation = (raw, userId) => {
     const job = raw.job;
     const isPopulated = job && typeof job === 'object' && '_id' in job && 'title' in job;
     const populated = isPopulated ? job : null;
+    const applicationRaw = raw.application;
+    const viewerRole = resolveViewerRole(populated, applicationRaw, userId);
     const unreadMap = raw.unreadCount;
     const unread = unreadMap instanceof Map
         ? unreadMap.get(userId) ?? 0
@@ -143,9 +198,13 @@ const enrichConversation = (raw, userId) => {
         ...raw,
         job: populated?._id.toString() ?? job ?? null,
         jobTitle: populated?.title,
-        companyName: populated?.company,
-        companyLogo: populated?.companyLogoUrl,
+        companyName: resolveCompanyName(populated),
+        companyLogo: resolveCompanyLogo(populated),
+        application: applicationRaw && typeof applicationRaw === 'object' && '_id' in applicationRaw
+            ? applicationRaw._id.toString()
+            : applicationRaw ?? null,
         unreadCount: unread,
+        viewerRole,
     };
 };
 exports.listMessages = (0, asyncHandler_1.asyncHandler)(async (req, res) => {

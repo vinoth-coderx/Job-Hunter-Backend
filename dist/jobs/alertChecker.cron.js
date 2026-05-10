@@ -6,6 +6,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.stopAlertCheckerCron = exports.startAlertCheckerCron = exports.checkAlertsNow = void 0;
 const node_cron_1 = __importDefault(require("node-cron"));
 const env_1 = require("../config/env");
+const constants_1 = require("../config/constants");
 const logger_1 = require("../utils/logger");
 const Alert_1 = require("../models/Alert");
 const DeviceToken_1 = require("../models/DeviceToken");
@@ -57,7 +58,7 @@ const checkAlertsNow = async () => {
             const filter = buildJobFilter(alert, since);
             const jobs = await Job_1.Job.find(filter)
                 .sort({ postedAt: -1 })
-                .limit(env_1.env.ALERT_PUSH_MAX_PER_RUN)
+                .limit(constants_1.ALERT_PUSH_MAX_PER_RUN)
                 .select('_id title company location url postedAt')
                 .lean();
             if (jobs.length === 0)
@@ -136,11 +137,11 @@ exports.checkAlertsNow = checkAlertsNow;
 const startAlertCheckerCron = () => {
     if (!env_1.env.CRON_ENABLED)
         return;
-    if (!node_cron_1.default.validate(env_1.env.CRON_ALERT_SCHEDULE)) {
-        logger_1.logger.error(`Invalid alert cron expression: ${env_1.env.CRON_ALERT_SCHEDULE}`);
+    if (!node_cron_1.default.validate(constants_1.CRON_ALERT_SCHEDULE)) {
+        logger_1.logger.error(`Invalid alert cron expression: ${constants_1.CRON_ALERT_SCHEDULE}`);
         return;
     }
-    alertTask = node_cron_1.default.schedule(env_1.env.CRON_ALERT_SCHEDULE, async () => {
+    alertTask = node_cron_1.default.schedule(constants_1.CRON_ALERT_SCHEDULE, async () => {
         if (isRunning) {
             logger_1.logger.warn('Alerts: previous tick still running — skipping');
             return;
@@ -158,7 +159,7 @@ const startAlertCheckerCron = () => {
             isRunning = false;
         }
     }, { timezone: 'Asia/Kolkata' });
-    logger_1.logger.info(`Alerts cron scheduled: "${env_1.env.CRON_ALERT_SCHEDULE}"`);
+    logger_1.logger.info(`Alerts cron scheduled: "${constants_1.CRON_ALERT_SCHEDULE}"`);
 };
 exports.startAlertCheckerCron = startAlertCheckerCron;
 const stopAlertCheckerCron = () => {

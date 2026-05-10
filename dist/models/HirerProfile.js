@@ -49,6 +49,7 @@ const hirerProfileSchema = new mongoose_1.Schema({
     user: { type: mongoose_1.Schema.Types.ObjectId, ref: 'User', required: true, unique: true, index: true },
     companyName: { type: String, required: true, trim: true, maxlength: 200, index: true },
     companyLogoUrl: String,
+    companyLogoPublicId: String,
     industry: { type: String, trim: true, maxlength: 100, index: true },
     companySize: {
         type: String,

@@ -6,15 +6,16 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.generateGuestAccessToken = exports.generateTokenPair = exports.verifyRefreshToken = exports.verifyAccessToken = exports.generateRefreshToken = exports.generateAccessToken = void 0;
 const jsonwebtoken_1 = __importDefault(require("jsonwebtoken"));
 const env_1 = require("../config/env");
+const constants_1 = require("../config/constants");
 const generateAccessToken = (payload) => {
     return jsonwebtoken_1.default.sign(payload, env_1.env.JWT_SECRET, {
-        expiresIn: env_1.env.JWT_EXPIRES_IN,
+        expiresIn: constants_1.JWT_EXPIRES_IN,
     });
 };
 exports.generateAccessToken = generateAccessToken;
 const generateRefreshToken = (payload) => {
     return jsonwebtoken_1.default.sign(payload, env_1.env.JWT_REFRESH_SECRET, {
-        expiresIn: env_1.env.JWT_REFRESH_EXPIRES_IN,
+        expiresIn: constants_1.JWT_REFRESH_EXPIRES_IN,
     });
 };
 exports.generateRefreshToken = generateRefreshToken;

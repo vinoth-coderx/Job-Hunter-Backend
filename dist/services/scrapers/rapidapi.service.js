@@ -16,7 +16,7 @@ class RapidApiScraper extends base_1.BaseScraper {
         if (await this.isCooldown())
             return [];
         try {
-            const url = `https://${env_1.env.RAPIDAPI_JSEARCH_HOST}/search`;
+            const url = `https://${constants_1.RAPIDAPI_JSEARCH_HOST}/search`;
             const { data } = await axios_1.default.get(url, {
                 params: {
                     query: location ? `${query} in ${location}` : query,
@@ -26,7 +26,7 @@ class RapidApiScraper extends base_1.BaseScraper {
                 },
                 headers: {
                     'X-RapidAPI-Key': env_1.env.RAPIDAPI_KEY,
-                    'X-RapidAPI-Host': env_1.env.RAPIDAPI_JSEARCH_HOST,
+                    'X-RapidAPI-Host': constants_1.RAPIDAPI_JSEARCH_HOST,
                 },
                 timeout: constants_1.SCRAPER_TIMEOUT_MS,
             });

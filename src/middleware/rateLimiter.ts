@@ -45,3 +45,21 @@ export const scrapeLimiter = rateLimit({
   max: 5,
   message: { success: false, message: 'Scraping rate limit exceeded.' },
 });
+
+// AI-search uses Claude Haiku for intent extraction (cached 24h per
+// query) plus a Mongo $or fan-out — both cheap individually but
+// expensive enough at scale that a runaway client (or a bot) can drain
+// the LLM budget fast. Limit to 30 calls / minute per token, which
+// comfortably covers human typing bursts (debounce + 600ms = ~1
+// req/sec peak) but stops abuse cold.
+export const aiSearchLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 30,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: tokenAwareKey,
+  message: {
+    success: false,
+    message: 'Too many searches in a row. Take a breath and try again in a minute.',
+  },
+});

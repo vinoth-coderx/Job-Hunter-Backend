@@ -18,6 +18,8 @@ router.post('/logout', auth_1.authenticate, auth_controller_1.logout);
 router.get('/me', auth_1.authenticate, auth_controller_1.me);
 router.post('/google', rateLimiter_1.authLimiter, (0, validate_1.validate)(auth_controller_1.googleMobileSchema), auth_controller_1.googleMobileLogin);
 router.post('/google/mobile', rateLimiter_1.authLimiter, (0, validate_1.validate)(auth_controller_1.googleMobileSchema), auth_controller_1.googleMobileLogin);
+router.post('/firebase', rateLimiter_1.authLimiter, (0, validate_1.validate)(auth_controller_1.firebaseLoginSchema), auth_controller_1.firebaseLogin);
+router.post('/check-email-exists', rateLimiter_1.authLimiter, (0, validate_1.validate)(auth_controller_1.checkEmailExistsSchema), auth_controller_1.checkEmailExists);
 router.post('/guest', rateLimiter_1.authLimiter, auth_controller_1.guestLogin);
 if (env_1.env.GOOGLE_CLIENT_ID && env_1.env.GOOGLE_CLIENT_SECRET) {
     router.get('/google/web', passport_1.default.authenticate('google', { scope: ['profile', 'email'], session: false }));

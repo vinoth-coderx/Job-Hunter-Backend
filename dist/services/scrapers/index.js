@@ -1,19 +1,25 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.puppeteerScraper = exports.rapid = exports.serp = exports.adzuna = exports.fetchAllJobs = void 0;
+exports.puppeteerScraper = exports.theirstack = exports.arbeitnow = exports.rapid = exports.serp = exports.adzuna = exports.fetchAllJobs = void 0;
 const adzuna_service_1 = require("./adzuna.service");
 const serpapi_service_1 = require("./serpapi.service");
 const rapidapi_service_1 = require("./rapidapi.service");
+const arbeitnow_service_1 = require("./arbeitnow.service");
+const theirstack_service_1 = require("./theirstack.service");
 const puppeteer_service_1 = require("./puppeteer.service");
 const Job_1 = require("../../models/Job");
 const logger_1 = require("../../utils/logger");
-const env_1 = require("../../config/env");
+const constants_1 = require("../../config/constants");
 const adzuna = new adzuna_service_1.AdzunaScraper();
 exports.adzuna = adzuna;
 const serp = new serpapi_service_1.SerpApiScraper();
 exports.serp = serp;
 const rapid = new rapidapi_service_1.RapidApiScraper();
 exports.rapid = rapid;
+const arbeitnow = new arbeitnow_service_1.ArbeitnowScraper();
+exports.arbeitnow = arbeitnow;
+const theirstack = new theirstack_service_1.TheirStackScraper();
+exports.theirstack = theirstack;
 const puppeteerScraper = new puppeteer_service_1.PuppeteerScraper();
 exports.puppeteerScraper = puppeteerScraper;
 const DEFAULT_QUERIES = [
@@ -33,13 +39,16 @@ const fetchAllJobs = async (opts = {}) => {
     const locations = opts.locations?.length ? opts.locations : DEFAULT_LOCATIONS;
     const usePuppeteer = opts.usePuppeteer ?? false;
     logger_1.logger.info(`Starting job fetch: ${queries.length} queries x ${locations.length} locations`);
-    for (const s of [adzuna, serp, rapid, puppeteerScraper])
+    for (const s of [adzuna, serp, rapid, arbeitnow, theirstack, puppeteerScraper]) {
         s.resetForNewRun();
+    }
     const all = [];
     const bySource = {
         adzuna: 0,
         serpapi: 0,
         rapidapi: 0,
+        arbeitnow: 0,
+        theirstack: 0,
         puppeteer: 0,
     };
     for (const query of queries) {
@@ -48,6 +57,8 @@ const fetchAllJobs = async (opts = {}) => {
                 adzuna.fetch(query, location),
                 serp.fetch(query, location),
                 rapid.fetch(query, location),
+                arbeitnow.fetch(query, location),
+                theirstack.fetch(query, location),
             ];
             if (usePuppeteer)
                 tasks.push(puppeteerScraper.fetch(query, location));
@@ -97,7 +108,7 @@ const fetchAllJobs = async (opts = {}) => {
             logger_1.logger.warn('Failed to upsert job', { id: j.externalId, source: j.source, err });
         }
     }
-    const cutoff = new Date(Date.now() - env_1.env.JOB_FRESHNESS_DAYS * 24 * 60 * 60 * 1000);
+    const cutoff = new Date(Date.now() - constants_1.JOB_FRESHNESS_DAYS * 24 * 60 * 60 * 1000);
     await Job_1.Job.updateMany({ postedAt: { $lt: cutoff } }, { $set: { isActive: false } });
     logger_1.logger.info(`Job fetch complete — total: ${all.length}, inserted: ${inserted}, updated: ${updated}`, bySource);
     return { total: all.length, inserted, updated, bySource };

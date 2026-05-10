@@ -7,7 +7,11 @@ export interface IUser extends Document {
   email: string;
   password?: string;
   googleId?: string;
-  authProvider: 'local' | 'google';
+  // Firebase Auth UID — populated when the user signed in via the
+  // Firebase Auth hybrid flow. Same User document; multiple providers
+  // can coexist on one record (e.g. local password + later Firebase).
+  firebaseUid?: string;
+  authProvider: 'local' | 'google' | 'firebase';
   role: 'user' | 'admin';
   // Which side of the app the user is currently using.
   // Both modes share the same User document; the hirer side is gated
@@ -22,6 +26,10 @@ export interface IUser extends Document {
     fullName: string;
     avatar?: string;
     avatarFile?: {
+      // Cloudinary identifiers — used to delete the old asset when a
+      // new one is uploaded.
+      publicId?: string;
+      url?: string;
       filename: string;
       originalName: string;
       mimeType: string;
@@ -40,6 +48,8 @@ export interface IUser extends Document {
     resumeUrl?: string;
     resumeText?: string;
     resumeFile?: {
+      publicId?: string;
+      url?: string;
       filename: string;
       originalName: string;
       mimeType: string;
@@ -98,7 +108,8 @@ const userSchema = new Schema<IUser>(
       select: false,
     },
     googleId: { type: String, sparse: true, unique: true },
-    authProvider: { type: String, enum: ['local', 'google'], default: 'local' },
+    firebaseUid: { type: String, sparse: true, unique: true },
+    authProvider: { type: String, enum: ['local', 'google', 'firebase'], default: 'local' },
     role: { type: String, enum: ['user', 'admin'], default: 'user' },
     activeRole: { type: String, enum: ['seeker', 'hirer'], default: 'seeker', index: true },
     isEmailVerified: { type: Boolean, default: false },
@@ -110,6 +121,8 @@ const userSchema = new Schema<IUser>(
       fullName: { type: String, required: true, trim: true },
       avatar: String,
       avatarFile: {
+        publicId: String,
+        url: String,
         filename: String,
         originalName: String,
         mimeType: String,
@@ -136,6 +149,8 @@ const userSchema = new Schema<IUser>(
       resumeUrl: String,
       resumeText: String,
       resumeFile: {
+        publicId: String,
+        url: String,
         filename: String,
         originalName: String,
         mimeType: String,
