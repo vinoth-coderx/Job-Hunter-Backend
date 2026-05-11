@@ -115,6 +115,8 @@ export const runAutoApplyForUser = async (
   const pool = await Job.find(baseFilter).sort({ postedAt: -1 }).limit(500);
 
   // Pre-fetch jobs the user already applied to within the cooldown window.
+  // Auto-apply only sources native jobs, so the dedupe set is built from
+  // applications that still carry a job ObjectId (external applies have none).
   const recentApplications = await AppliedJob.find({
     user: user._id,
     appliedAt: { $gte: reapplyCutoff },
@@ -122,7 +124,7 @@ export const runAutoApplyForUser = async (
     .select('job hirerProfile jobSnapshot.company')
     .lean();
   const appliedJobIds = new Set(
-    recentApplications.map((a) => a.job.toString()),
+    recentApplications.filter((a) => a.job).map((a) => a.job!.toString()),
   );
   const cooldownCompanies = new Set(
     recentApplications.map((a) => (a.jobSnapshot.company || '').toLowerCase()),
@@ -318,6 +320,17 @@ const submitNativeApplication = async (
       company: job.company,
       location: job.location,
       url: job.url,
+      description: job.description,
+      salaryMin: job.salaryMin,
+      salaryMax: job.salaryMax,
+      currency: job.currency,
+      jobType: job.jobType,
+      remoteType: job.remoteType,
+      skills: job.skills,
+      companyLogo: job.companyLogoUrl,
+      postedAt: job.postedAt,
+      source: job.source,
+      externalId: job.externalId,
     },
     applyType: 'auto_apply',
     source: 'native',

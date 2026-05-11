@@ -18,7 +18,11 @@ const envSchema = z.object({
   CLIENT_URL: z.string().default('http://localhost:3000'),
 
   // ── MongoDB ─────────────────────────────────────────────
+  // MONGODB_URI is the test/dev cluster (used when NODE_ENV !== 'production').
+  // MONGODB_URI_PROD is the production cluster (used only when NODE_ENV === 'production').
+  // If MONGODB_URI_PROD is missing in production, the loader falls back to MONGODB_URI.
   MONGODB_URI: z.string(),
+  MONGODB_URI_PROD: z.string().optional(),
 
   // ── Redis ───────────────────────────────────────────────
   REDIS_HOST: z.string().default('localhost'),

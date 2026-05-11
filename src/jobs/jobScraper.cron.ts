@@ -1,13 +1,17 @@
 import cron, { ScheduledTask } from 'node-cron';
 import { env } from '../config/env';
-import { CRON_JOB_FETCH_SCHEDULE } from '../config/constants';
 import { logger } from '../utils/logger';
 import { fetchAllJobs } from '../services/scrapers';
 import { Subscription } from '../models/Subscription';
 import { User } from '../models/User';
 import { AppliedJob } from '../models/AppliedJob';
 
-let jobScraperTask: ScheduledTask | null = null;
+// Third-party jobs are fetched live per request now (see jobFeed.service),
+// so the hourly fetch-and-store cron is retired. This module still owns
+// the DB-hygiene tasks (subscription expiry, applied-jobs purge) and
+// exposes `runJobFetchNow` as an admin escape hatch for one-off
+// hydration / debug runs.
+
 let subscriptionCheckerTask: ScheduledTask | null = null;
 let appliedJobsCleanupTask: ScheduledTask | null = null;
 let isRunning = false;
@@ -28,33 +32,6 @@ export const startJobScraperCron = (): void => {
     logger.info('Cron disabled by config');
     return;
   }
-
-  if (!cron.validate(CRON_JOB_FETCH_SCHEDULE)) {
-    logger.error(`Invalid cron expression: ${CRON_JOB_FETCH_SCHEDULE}`);
-    return;
-  }
-
-  jobScraperTask = cron.schedule(
-    CRON_JOB_FETCH_SCHEDULE,
-    async () => {
-      if (isRunning) {
-        logger.warn('Previous job fetch still running — skipping this tick');
-        return;
-      }
-      isRunning = true;
-      const start = Date.now();
-      try {
-        logger.info('Cron: starting hourly job fetch');
-        const result = await fetchAllJobs();
-        logger.info(`Cron: job fetch complete in ${Date.now() - start}ms`, result);
-      } catch (err) {
-        logger.error('Cron: job fetch failed', err);
-      } finally {
-        isRunning = false;
-      }
-    },
-    { timezone: 'Asia/Kolkata' },
-  );
 
   subscriptionCheckerTask = cron.schedule(
     '0 0 * * *',
@@ -103,15 +80,11 @@ export const startJobScraperCron = (): void => {
   );
 
   logger.info(
-    `Cron scheduled — job fetch: "${CRON_JOB_FETCH_SCHEDULE}", sub check: daily 00:00, applied-jobs cleanup: daily 02:00 (>${APPLIED_JOB_RETENTION_DAYS}d)`,
+    `Cron scheduled — sub check: daily 00:00, applied-jobs cleanup: daily 02:00 (>${APPLIED_JOB_RETENTION_DAYS}d)`,
   );
 };
 
 export const stopJobScraperCron = (): void => {
-  if (jobScraperTask) {
-    jobScraperTask.stop();
-    jobScraperTask = null;
-  }
   if (subscriptionCheckerTask) {
     subscriptionCheckerTask.stop();
     subscriptionCheckerTask = null;
@@ -123,6 +96,13 @@ export const stopJobScraperCron = (): void => {
   logger.info('Cron stopped');
 };
 
+/**
+ * Admin escape hatch — runs the legacy "fetch and write to DB" pipeline
+ * for one-off hydration or debugging. Production reads no longer depend
+ * on this; live third-party data flows through jobFeed.service per
+ * request. Leaving the door open lets us seed a fresh DB or chase a
+ * regression without re-enabling the cron.
+ */
 export const runJobFetchNow = async () => {
   if (isRunning) throw new Error('A job fetch is already in progress');
   isRunning = true;

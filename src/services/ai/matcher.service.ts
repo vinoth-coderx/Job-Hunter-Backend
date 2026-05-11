@@ -2,9 +2,49 @@ import { AI_MATCH_THRESHOLD } from '../../config/constants';
 import { logger } from '../../utils/logger';
 import { IUser } from '../../models/User';
 import { IJob } from '../../models/Job';
+import { JobType, RemoteType } from '../../types';
 import { redis } from '../../config/redis';
 import { generateJson, isAiEnabled } from './providers';
 import { completenessFromUser } from '../profile/completeness.service';
+
+/**
+ * Structural type the scorer needs. Lets us match both native Mongoose
+ * IJob documents and live third-party ScrapedJob payloads through the
+ * same heuristic without coupling to Mongoose.
+ *
+ * `id` is the stable identifier used for cache keys: native jobs pass
+ * their ObjectId hex string, external jobs pass `${source}:${externalId}`.
+ */
+export interface MatchableJob {
+  id: string;
+  title: string;
+  company: string;
+  description: string;
+  location: string;
+  skills?: string[];
+  remoteType?: RemoteType;
+  jobType?: JobType;
+  experienceMinYears?: number;
+  experienceMaxYears?: number;
+  salaryMin?: number;
+  salaryMax?: number;
+}
+
+/** Adapter so existing IJob callers can stay terse. */
+export const toMatchable = (j: IJob): MatchableJob => ({
+  id: j._id.toString(),
+  title: j.title,
+  company: j.company,
+  description: j.description,
+  location: j.location,
+  skills: j.skills,
+  remoteType: j.remoteType,
+  jobType: j.jobType,
+  experienceMinYears: j.experienceMinYears,
+  experienceMaxYears: j.experienceMaxYears,
+  salaryMin: j.salaryMin,
+  salaryMax: j.salaryMax,
+});
 
 // Soft blend so empty profiles still see meaningful scores (60% floor)
 // but a fully-filled profile gets the un-discounted match. Pulls users
@@ -38,7 +78,7 @@ const cacheKey = (userId: string, jobId: string) => `match:${userId}:${jobId}`;
 /// keywords but mismatched seniority/salary to the top, which is why
 /// "matches" felt off. Pulling skills down to 50 and giving experience +
 /// salary + remote real weight tracks how a recruiter actually ranks.
-export const heuristicMatch = (user: IUser, job: IJob): MatchResult => {
+export const heuristicMatch = (user: IUser, job: MatchableJob): MatchResult => {
   const userSkills = (user.profile.skills || []).map((s) => s.toLowerCase());
   const jobSkills = (job.skills || []).map((s) => s.toLowerCase());
   const desc = job.description.toLowerCase();
@@ -81,7 +121,9 @@ export const heuristicMatch = (user: IUser, job: IJob): MatchResult => {
   const userLocs = (user.profile.preferredLocations || []).map((l) => l.toLowerCase());
   if (
     userLocs.some(
-      (l) => job.location.toLowerCase().includes(l) || (l === 'remote' && job.remoteType === 'remote'),
+      (l) =>
+        job.location.toLowerCase().includes(l) ||
+        (l === 'remote' && job.remoteType === 'remote'),
     )
   ) {
     score += 10;
@@ -103,6 +145,7 @@ export const heuristicMatch = (user: IUser, job: IJob): MatchResult => {
 
   if (
     user.profile.preferredJobTypes?.length &&
+    job.jobType &&
     user.profile.preferredJobTypes.includes(job.jobType)
   ) {
     score += 3;
@@ -110,26 +153,27 @@ export const heuristicMatch = (user: IUser, job: IJob): MatchResult => {
 
   if (
     user.profile.preferredRemote?.length &&
+    job.remoteType &&
     user.profile.preferredRemote.includes(job.remoteType)
   ) {
     score += 2;
   }
 
   return {
-    jobId: job._id.toString(),
+    jobId: job.id,
     score: blendWithCompleteness(score, user),
     matchedSkills: matched,
     missingSkills: missing.slice(0, 5),
   };
 };
 
-export const aiMatch = async (user: IUser, job: IJob): Promise<MatchResult> => {
-  const cached = await redis.get(cacheKey(user._id.toString(), job._id.toString()));
+export const aiMatch = async (user: IUser, job: MatchableJob): Promise<MatchResult> => {
+  const cached = await redis.get(cacheKey(user._id.toString(), job.id));
   if (cached) return JSON.parse(cached) as MatchResult;
 
   if (!isAiEnabled()) {
     const heuristic = heuristicMatch(user, job);
-    await redis.setex(cacheKey(user._id.toString(), job._id.toString()), 86400, JSON.stringify(heuristic));
+    await redis.setex(cacheKey(user._id.toString(), job.id), 86400, JSON.stringify(heuristic));
     return heuristic;
   }
 
@@ -181,14 +225,14 @@ Return JSON only with this exact shape:
 
     const rawScore = Math.max(0, Math.min(100, Math.round(parsed.score)));
     const result: MatchResult = {
-      jobId: job._id.toString(),
+      jobId: job.id,
       score: blendWithCompleteness(rawScore, user),
       reasoning: parsed.reasoning,
       matchedSkills: parsed.matchedSkills || [],
       missingSkills: parsed.missingSkills || [],
     };
 
-    await redis.setex(cacheKey(user._id.toString(), job._id.toString()), 86400, JSON.stringify(result));
+    await redis.setex(cacheKey(user._id.toString(), job.id), 86400, JSON.stringify(result));
     return result;
   } catch (err) {
     logger.warn('AI match failed, using heuristic fallback', err);
@@ -196,15 +240,17 @@ Return JSON only with this exact shape:
   }
 };
 
-export const matchJobsForUser = async (
+export const matchJobsForUser = async <J extends MatchableJob>(
   user: IUser,
-  jobs: IJob[],
+  jobs: J[],
   threshold = AI_MATCH_THRESHOLD,
   useAi = false,
-): Promise<Array<{ job: IJob; match: MatchResult }>> => {
-  const matcher = useAi && isAiEnabled() ? aiMatch : async (u: IUser, j: IJob) => heuristicMatch(u, j);
+): Promise<Array<{ job: J; match: MatchResult }>> => {
+  const matcher = useAi && isAiEnabled()
+    ? aiMatch
+    : async (u: IUser, j: MatchableJob) => heuristicMatch(u, j);
 
-  const matched: Array<{ job: IJob; match: MatchResult }> = [];
+  const matched: Array<{ job: J; match: MatchResult }> = [];
   const concurrency = useAi ? 5 : 50;
 
   for (let i = 0; i < jobs.length; i += concurrency) {

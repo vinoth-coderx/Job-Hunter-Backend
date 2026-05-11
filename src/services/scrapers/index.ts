@@ -138,4 +138,56 @@ export const fetchAllJobs = async (opts: FetchOptions = {}): Promise<{
   return { total: all.length, inserted, updated, bySource };
 };
 
+export interface LiveFetchOptions {
+  queries: string[];
+  locations?: string[];
+  /** Include bulk-only sources (arbeitnow, theirstack). Off by default — these
+   *  ignore query/location filters and self-throttle, so they're cron-only. */
+  includeBulkSources?: boolean;
+}
+
+/**
+ * Live (in-memory) fetch from query-specific scrapers. No DB writes, no
+ * freshness sweep — intended for request-time, profile-driven search.
+ * Deduplicates by `${source}:${externalId}`.
+ */
+export const fetchAllJobsLive = async (
+  opts: LiveFetchOptions,
+): Promise<ScrapedJob[]> => {
+  const queries = opts.queries.filter((q) => q.trim().length > 0);
+  if (queries.length === 0) return [];
+  const locations = opts.locations?.length ? opts.locations : [''];
+  const includeBulk = opts.includeBulkSources ?? false;
+
+  const seen = new Set<string>();
+  const out: ScrapedJob[] = [];
+
+  for (const query of queries) {
+    for (const location of locations) {
+      const tasks: Promise<ScrapedJob[]>[] = [
+        adzuna.fetch(query, location),
+        serp.fetch(query, location),
+        rapid.fetch(query, location),
+      ];
+      if (includeBulk) {
+        tasks.push(arbeitnow.fetch(query, location));
+        tasks.push(theirstack.fetch(query, location));
+      }
+
+      const results = await Promise.allSettled(tasks);
+      for (const r of results) {
+        if (r.status !== 'fulfilled') continue;
+        for (const j of r.value) {
+          const key = `${j.source}:${j.externalId}`;
+          if (seen.has(key)) continue;
+          seen.add(key);
+          out.push(j);
+        }
+      }
+    }
+  }
+
+  return out;
+};
+
 export { adzuna, serp, rapid, arbeitnow, theirstack, puppeteerScraper };

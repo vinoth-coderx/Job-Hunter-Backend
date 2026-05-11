@@ -4,6 +4,14 @@ import { logger } from '../../utils/logger';
 import { redis } from '../../config/redis';
 import { Job, IJob } from '../../models/Job';
 import { generateJson, isAiEnabled } from './providers';
+import {
+  AppliedExclusion,
+  FeedJob,
+  fetchExternalForProfile,
+  filterApplied,
+  toFeedJobFromNative,
+  toFeedJobFromScraped,
+} from '../jobFeed.service';
 
 // Intent extracted from a free-form search query. Every field is optional —
 // the user can be vague ("frontend jobs") or precise ("senior react roles
@@ -197,6 +205,8 @@ Examples:
 // independently of JOB_FRESHNESS_DAYS without re-deploying.
 const SEARCH_FRESHNESS_DAYS = Math.max(JOB_FRESHNESS_DAYS, 60);
 
+/// Native-only filter. Third-party jobs aren't in Mongo any more, so the
+/// only documents this should match are hirer-posted listings.
 /// (location, jobType, remoteType, salary, experience) layer on top.
 const buildMongoFilter = (
   intent: SearchIntent,
@@ -206,7 +216,7 @@ const buildMongoFilter = (
   const cutoff = new Date(
     Date.now() - SEARCH_FRESHNESS_DAYS * 24 * 60 * 60 * 1000,
   );
-  const filter: Record<string, unknown> = {};
+  const filter: Record<string, unknown> = { isNative: true };
   if (!opts.dropActive) filter.isActive = true;
   if (!opts.dropFreshness) filter.postedAt = { $gte: cutoff };
 
@@ -277,7 +287,7 @@ const buildMongoFilter = (
 /// front-end token-weight scheme that used to live in JobProvider:
 ///   title 4× · skills 3× · responsibilities/department 2× · description 1×
 /// Plus flat bonuses per matched company / location term.
-const scoreJob = (job: IJob, intent: SearchIntent): number => {
+const scoreJob = (job: FeedJob, intent: SearchIntent): number => {
   const title = job.title.toLowerCase();
   const desc = job.description.toLowerCase();
   const dept = (job.department || '').toLowerCase();
@@ -319,20 +329,22 @@ const scoreJob = (job: IJob, intent: SearchIntent): number => {
 
 export interface AiSearchResult {
   intent: SearchIntent;
-  jobs: IJob[];
+  jobs: FeedJob[];
   total: number;
-  /// 'primary' = matched within the freshness window
-  /// 'extended' = freshness dropped, isActive still applied
-  /// 'archived' = both freshness and isActive dropped (last-resort)
-  /// 'empty' = nothing in the DB matched any of the above
+  /// 'primary' = matched within the freshness window (native + external blended)
+  /// 'extended' = freshness dropped on native pool, external still queried
+  /// 'archived' = both freshness and isActive dropped on native (last-resort)
+  /// 'empty' = nothing in either pool
   scope: 'primary' | 'extended' | 'archived' | 'empty';
+  nativeCount: number;
+  externalCount: number;
 }
 
-const fetchAndRank = async (
+const fetchNativeAndRank = async (
   filter: Record<string, unknown>,
   intent: SearchIntent,
   limit: number,
-): Promise<IJob[]> => {
+): Promise<FeedJob[]> => {
   // Cap candidate pool at 4× the requested limit so the in-memory
   // re-rank stays cheap even when MongoDB returns thousands of matches.
   const candidatePool = Math.max(limit * 4, 60);
@@ -342,6 +354,62 @@ const fetchAndRank = async (
     .lean<IJob[]>();
 
   return candidates
+    .map(toFeedJobFromNative)
+    .map((j) => ({ job: j, score: scoreJob(j, intent) }))
+    .sort((a, b) => b.score - a.score)
+    .slice(0, limit)
+    .map((r) => r.job);
+};
+
+/// Derive 1-3 query strings for the live third-party fetch from the
+/// extracted intent. Prefers role/title keywords (recruiters tag those
+/// most consistently), then skills, then the raw query as a fallback.
+const queriesFromIntent = (intent: SearchIntent): string[] => {
+  const candidates = [
+    ...intent.roleKeywords,
+    ...intent.titleKeywords,
+    ...intent.skills,
+  ];
+  const out: string[] = [];
+  for (const c of candidates) {
+    const v = c.trim();
+    if (v.length === 0) continue;
+    if (out.includes(v.toLowerCase())) continue;
+    out.push(v.toLowerCase());
+    if (out.length === 3) break;
+  }
+  if (out.length === 0 && intent.freeText) out.push(intent.freeText.trim());
+  return out;
+};
+
+const fetchExternalAndRank = async (
+  intent: SearchIntent,
+  applied: AppliedExclusion,
+  limit: number,
+): Promise<FeedJob[]> => {
+  const queries = queriesFromIntent(intent);
+  if (queries.length === 0) return [];
+  const locations = intent.location ? [intent.location] : [];
+
+  const scraped = await fetchExternalForProfile(queries, locations);
+  let feed = scraped.map(toFeedJobFromScraped);
+  feed = filterApplied(feed, applied);
+
+  // Apply structured filters extracted from the query so external results
+  // honour the same gates the Mongo filter applies to native results.
+  if (intent.jobType) feed = feed.filter((j) => j.jobType === intent.jobType);
+  if (intent.remoteType) {
+    feed = feed.filter((j) => j.remoteType === intent.remoteType);
+  }
+  if (typeof intent.salaryMinLpa === 'number') {
+    const minRupees = intent.salaryMinLpa * 100000;
+    feed = feed.filter((j) => {
+      const top = j.salaryMax ?? j.salaryMin;
+      return top === undefined || top >= minRupees;
+    });
+  }
+
+  return feed
     .map((j) => ({ job: j, score: scoreJob(j, intent) }))
     .sort((a, b) => b.score - a.score)
     .slice(0, limit)
@@ -364,69 +432,95 @@ const fetchAndRank = async (
 export const aiJobSearch = async ({
   query,
   limit = 30,
-  excludeJobIds = [],
+  excludeApplied,
 }: {
   query: string;
   limit?: number;
-  excludeJobIds?: string[];
+  excludeApplied?: AppliedExclusion;
 }): Promise<AiSearchResult> => {
   const intent = await extractSearchIntent(query);
+  const applied: AppliedExclusion = excludeApplied ?? {
+    jobIds: new Set<string>(),
+    externalKeys: new Set<string>(),
+  };
+  const excludeJobIds = Array.from(applied.jobIds);
 
-  const primary = await fetchAndRank(
+  // External fetch runs in parallel with native lookups — it doesn't
+  // care about Mongo freshness scopes, and even an empty native pool
+  // can still return useful third-party hits.
+  const externalPromise = fetchExternalAndRank(intent, applied, limit);
+
+  const primary = await fetchNativeAndRank(
     buildMongoFilter(intent, excludeJobIds),
     intent,
     limit,
   );
-  if (primary.length > 0) {
-    logger.info(
-      `aiJobSearch: "${query.slice(0, 60)}" → ${primary.length} (primary)`,
+  let nativeJobs = primary;
+  let scope: AiSearchResult['scope'] = 'primary';
+
+  if (nativeJobs.length === 0) {
+    const extended = await fetchNativeAndRank(
+      buildMongoFilter(intent, excludeJobIds, { dropFreshness: true }),
+      intent,
+      limit,
     );
-    return { intent, jobs: primary, total: primary.length, scope: 'primary' };
+    if (extended.length > 0) {
+      nativeJobs = extended;
+      scope = 'extended';
+    } else {
+      const archived = await fetchNativeAndRank(
+        buildMongoFilter(intent, excludeJobIds, {
+          dropFreshness: true,
+          dropActive: true,
+        }),
+        intent,
+        limit,
+      );
+      if (archived.length > 0) {
+        nativeJobs = archived;
+        scope = 'archived';
+      }
+    }
   }
 
-  const extended = await fetchAndRank(
-    buildMongoFilter(intent, excludeJobIds, { dropFreshness: true }),
-    intent,
-    limit,
-  );
-  if (extended.length > 0) {
+  const externalJobs = await externalPromise;
+
+  // Merge + re-rank across both pools so a high-scoring third-party hit
+  // can outrank a weakly-matching native listing.
+  const mergedScored = [...nativeJobs, ...externalJobs]
+    .map((j) => ({ job: j, score: scoreJob(j, intent) }))
+    .sort((a, b) => b.score - a.score)
+    .slice(0, limit)
+    .map((r) => r.job);
+
+  if (mergedScored.length === 0) {
     logger.info(
-      `aiJobSearch: "${query.slice(0, 60)}" → ${extended.length} (extended, freshness dropped)`,
+      `aiJobSearch: "${query.slice(0, 60)}" → 0 (intent=${JSON.stringify({
+        titles: intent.titleKeywords,
+        skills: intent.skills,
+        roles: intent.roleKeywords,
+      })})`,
     );
     return {
       intent,
-      jobs: extended,
-      total: extended.length,
-      scope: 'extended',
-    };
-  }
-
-  const archived = await fetchAndRank(
-    buildMongoFilter(intent, excludeJobIds, {
-      dropFreshness: true,
-      dropActive: true,
-    }),
-    intent,
-    limit,
-  );
-  if (archived.length > 0) {
-    logger.info(
-      `aiJobSearch: "${query.slice(0, 60)}" → ${archived.length} (archived, all gates dropped)`,
-    );
-    return {
-      intent,
-      jobs: archived,
-      total: archived.length,
-      scope: 'archived',
+      jobs: [],
+      total: 0,
+      scope: 'empty',
+      nativeCount: 0,
+      externalCount: 0,
     };
   }
 
   logger.info(
-    `aiJobSearch: "${query.slice(0, 60)}" → 0 (intent=${JSON.stringify({
-      titles: intent.titleKeywords,
-      skills: intent.skills,
-      roles: intent.roleKeywords,
-    })})`,
+    `aiJobSearch: "${query.slice(0, 60)}" → ${mergedScored.length} (${scope}; native=${nativeJobs.length}, external=${externalJobs.length})`,
   );
-  return { intent, jobs: [], total: 0, scope: 'empty' };
+
+  return {
+    intent,
+    jobs: mergedScored,
+    total: mergedScored.length,
+    scope,
+    nativeCount: nativeJobs.length,
+    externalCount: externalJobs.length,
+  };
 };

@@ -1,4 +1,5 @@
 import mongoose, { Schema, Document, Model } from 'mongoose';
+import { JobSource, JobType, RemoteType } from '../types';
 
 export type ApplicationStatus =
   | 'applied'
@@ -31,7 +32,9 @@ export interface IStatusHistoryEntry {
 export interface IAppliedJob extends Document {
   _id: mongoose.Types.ObjectId;
   user: mongoose.Types.ObjectId;
-  job: mongoose.Types.ObjectId;
+  /** Set only for native (hirer-posted) jobs. External (scraped) jobs use
+   *  jobSnapshot.source + jobSnapshot.externalId as their identifier. */
+  job?: mongoose.Types.ObjectId;
   hirerProfile?: mongoose.Types.ObjectId;
 
   jobSnapshot: {
@@ -39,6 +42,17 @@ export interface IAppliedJob extends Document {
     company: string;
     location: string;
     url: string;
+    description?: string;
+    salaryMin?: number;
+    salaryMax?: number;
+    currency?: string;
+    jobType?: JobType;
+    remoteType?: RemoteType;
+    skills?: string[];
+    companyLogo?: string;
+    postedAt?: Date;
+    source: JobSource;
+    externalId?: string;
   };
 
   applyType: ApplyType;
@@ -94,7 +108,7 @@ const statusHistorySchema = new Schema<IStatusHistoryEntry>(
 const appliedJobSchema = new Schema<IAppliedJob>(
   {
     user: { type: Schema.Types.ObjectId, ref: 'User', required: true, index: true },
-    job: { type: Schema.Types.ObjectId, ref: 'Job', required: true, index: true },
+    job: { type: Schema.Types.ObjectId, ref: 'Job', index: true, sparse: true },
     hirerProfile: {
       type: Schema.Types.ObjectId,
       ref: 'HirerProfile',
@@ -106,6 +120,17 @@ const appliedJobSchema = new Schema<IAppliedJob>(
       company: { type: String, required: true },
       location: { type: String, required: true },
       url: { type: String, required: true },
+      description: String,
+      salaryMin: Number,
+      salaryMax: Number,
+      currency: String,
+      jobType: String,
+      remoteType: String,
+      skills: { type: [String], default: undefined },
+      companyLogo: String,
+      postedAt: Date,
+      source: { type: String, required: true, default: 'native' },
+      externalId: String,
     },
     applyType: {
       type: String,
@@ -148,7 +173,17 @@ const appliedJobSchema = new Schema<IAppliedJob>(
   { timestamps: true },
 );
 
-appliedJobSchema.index({ user: 1, job: 1 }, { unique: true });
+// Native jobs (job ObjectId present) — one application per (user, job).
+appliedJobSchema.index(
+  { user: 1, job: 1 },
+  { unique: true, partialFilterExpression: { job: { $exists: true } } },
+);
+// External jobs (jobSnapshot.externalId present) — one application per
+// (user, jobSnapshot.source, jobSnapshot.externalId).
+appliedJobSchema.index(
+  { user: 1, 'jobSnapshot.source': 1, 'jobSnapshot.externalId': 1 },
+  { unique: true, partialFilterExpression: { 'jobSnapshot.externalId': { $exists: true } } },
+);
 appliedJobSchema.index({ user: 1, status: 1, appliedAt: -1 });
 appliedJobSchema.index({ hirerProfile: 1, status: 1, appliedAt: -1 });
 appliedJobSchema.index({ job: 1, status: 1, appliedAt: -1 });

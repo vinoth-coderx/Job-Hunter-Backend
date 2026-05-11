@@ -100,7 +100,7 @@ const sanitiseSeeker = (u: { _id: mongoose.Types.ObjectId; email: string; profil
 
 const buildApplicantPayload = (a: IAppliedJob, seeker: ReturnType<typeof sanitiseSeeker> | null) => ({
   applicationId: a._id.toString(),
-  jobId: a.job.toString(),
+  jobId: a.job!.toString(),
   status: a.status,
   matchScore: a.matchScore,
   appliedAt: a.appliedAt,
@@ -241,7 +241,7 @@ export const getApplicantDetail = asyncHandler(async (req: AuthRequest, res: Res
   });
   if (!application) throw ApiError.notFound('Application not found');
 
-  await requireOwnedJob(application.job.toString(), profile._id);
+  await requireOwnedJob(application.job!.toString(), profile._id);
 
   // First view by hirer auto-promotes status `applied` → `viewed`.
   if (application.status === 'applied') {
@@ -295,7 +295,7 @@ export const updateApplicantStatus = asyncHandler(async (req: AuthRequest, res: 
 
   const application = await AppliedJob.findById(id);
   if (!application) throw ApiError.notFound('Application not found');
-  await requireOwnedJob(application.job.toString(), profile._id);
+  await requireOwnedJob(application.job!.toString(), profile._id);
 
   const { status, note, rejectionReason } = req.body as z.infer<typeof updateApplicantStatusSchema>['body'];
 
@@ -316,7 +316,7 @@ export const updateApplicantStatus = asyncHandler(async (req: AuthRequest, res: 
     application.rejectionReason = rejectionReason;
   }
   await application.save();
-  await recomputeShortlistedCount(application.job);
+  await recomputeShortlistedCount(application.job!);
 
   // In-app notification + live banner for the seeker.
   await notifyUser({
@@ -327,7 +327,7 @@ export const updateApplicantStatus = asyncHandler(async (req: AuthRequest, res: 
     body: `Your application for "${application.jobSnapshot.title}" is now ${status}.`,
     data: {
       applicationId: application._id.toString(),
-      jobId: application.job.toString(),
+      jobId: application.job!.toString(),
       status,
     },
   });
@@ -336,7 +336,7 @@ export const updateApplicantStatus = asyncHandler(async (req: AuthRequest, res: 
   // single row without a full refetch.
   emitToUser(application.user.toString(), 'application:status', {
     applicationId: application._id.toString(),
-    jobId: application.job.toString(),
+    jobId: application.job!.toString(),
     status,
   });
 
@@ -445,7 +445,7 @@ export const updateHirerNotes = asyncHandler(async (req: AuthRequest, res: Respo
 
   const application = await AppliedJob.findById(id);
   if (!application) throw ApiError.notFound('Application not found');
-  await requireOwnedJob(application.job.toString(), profile._id);
+  await requireOwnedJob(application.job!.toString(), profile._id);
 
   const { hirerNotes } = req.body as z.infer<typeof updateHirerNotesSchema>['body'];
   application.hirerNotes = hirerNotes;

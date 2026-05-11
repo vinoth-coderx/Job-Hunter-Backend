@@ -1,30 +1,29 @@
 import { Request, Response, NextFunction } from 'express';
 import { z } from 'zod';
-import mongoose from 'mongoose';
 import { Job } from '../models/Job';
 import { User } from '../models/User';
-import { AppliedJob } from '../models/AppliedJob';
 import { asyncHandler } from '../utils/asyncHandler';
 import { ApiError } from '../utils/ApiError';
-import { AuthRequest } from '../types';
-import { JOB_FRESHNESS_DAYS } from '../config/constants';
+import { AuthRequest, JobSource } from '../types';
 import { matchJobsForUser } from '../services/ai/matcher.service';
 import { aiJobSearch } from '../services/ai/jobSearch.service';
 import { runJobFetchNow } from '../jobs/jobScraper.cron';
 import { buildAllJobsPayload } from '../services/jobCache.service';
+import {
+  FeedJob,
+  toFeedJobFromNative,
+  toFeedJobFromScraped,
+  deriveProfileQueries,
+  deriveProfileLocations,
+  fetchExternalForProfile,
+  buildAppliedExclusion,
+  filterApplied,
+  lookupExternalJobFromCache,
+} from '../services/jobFeed.service';
 import { logger } from '../utils/logger';
 
-// Applied jobs belong in the Applied tab, not the discovery feed. We pull
-// the user's applied job IDs once per request and `$nin`-filter them out
-// of /jobs/matched and /jobs (search). Returns an empty array for guests
-// or when the user has never applied.
-const fetchAppliedJobIds = async (
-  userId: mongoose.Types.ObjectId | string | undefined,
-): Promise<mongoose.Types.ObjectId[]> => {
-  if (!userId) return [];
-  const ids = await AppliedJob.find({ user: userId }).distinct('job');
-  return ids as mongoose.Types.ObjectId[];
-};
+const OBJECT_ID_RE = /^[a-f0-9]{24}$/i;
+const EXTERNAL_ID_RE = /^([a-z]+):(.+)$/i;
 
 export const listJobsSchema = z.object({
   query: z.object({
@@ -41,14 +40,40 @@ export const listJobsSchema = z.object({
   }),
 });
 
-const buildFilter = (q: Record<string, unknown>): Record<string, unknown> => {
-  const cutoff = new Date(Date.now() - JOB_FRESHNESS_DAYS * 24 * 60 * 60 * 1000);
+const SEARCH_PARAMS = [
+  'q',
+  'location',
+  'company',
+  'jobType',
+  'remoteType',
+  'skills',
+  'minSalary',
+];
+
+const isSearchMode = (q: Record<string, unknown>): boolean =>
+  SEARCH_PARAMS.some(
+    (k) => typeof q[k] === 'string' && (q[k] as string).length > 0,
+  );
+
+const str = (v: unknown): string | undefined =>
+  typeof v === 'string' && v.length > 0 ? v : undefined;
+
+const numQ = (v: unknown, dflt: number): number => {
+  const n = typeof v === 'string' ? Number(v) : NaN;
+  return Number.isFinite(n) ? n : dflt;
+};
+
+/**
+ * Native-only Mongo filter. Third-party jobs no longer live in the DB,
+ * so we look strictly at hirer-posted listings here. Freshness is driven
+ * by `status: 'active'` (hirers control the lifecycle), not by postedAt.
+ */
+const buildNativeFilter = (q: Record<string, unknown>): Record<string, unknown> => {
   const filter: Record<string, unknown> = {
+    isNative: true,
     isActive: true,
-    postedAt: { $gte: cutoff },
+    status: 'active',
   };
-  const str = (v: unknown): string | undefined =>
-    typeof v === 'string' && v.length > 0 ? v : undefined;
 
   const qStr = str(q.q);
   if (qStr) filter.$text = { $search: qStr };
@@ -60,62 +85,135 @@ const buildFilter = (q: Record<string, unknown>): Record<string, unknown> => {
   if (str(q.remoteType)) filter.remoteType = q.remoteType;
   const skills = str(q.skills);
   if (skills) {
-    const arr = skills.split(',').map((s) => s.trim().toLowerCase()).filter(Boolean);
+    const arr = skills
+      .split(',')
+      .map((s) => s.trim().toLowerCase())
+      .filter(Boolean);
     if (arr.length) filter.skills = { $in: arr };
   }
   if (q.minSalary) filter.salaryMin = { $gte: Number(q.minSalary) };
   return filter;
 };
 
-const SEARCH_PARAMS = ['q', 'location', 'company', 'jobType', 'remoteType', 'skills', 'minSalary'];
+/**
+ * In-memory filter applied to live external jobs so the same q/location/
+ * etc. params behave consistently across both sources. Scraper queries
+ * are coarse (free-text into the provider), so we still re-check here.
+ */
+const applyExternalFilters = (
+  jobs: FeedJob[],
+  q: Record<string, unknown>,
+): FeedJob[] => {
+  const qStr = str(q.q)?.toLowerCase();
+  const loc = str(q.location)?.toLowerCase();
+  const company = str(q.company)?.toLowerCase();
+  const jobType = str(q.jobType);
+  const remoteType = str(q.remoteType);
+  const skillsCsv = str(q.skills);
+  const minSalary = q.minSalary ? Number(q.minSalary) : undefined;
+  const requiredSkills = skillsCsv
+    ? skillsCsv.split(',').map((s) => s.trim().toLowerCase()).filter(Boolean)
+    : [];
 
-const isSearchMode = (q: Record<string, unknown>): boolean =>
-  SEARCH_PARAMS.some((k) => typeof q[k] === 'string' && (q[k] as string).length > 0);
-
-export const listJobs = asyncHandler(async (req: AuthRequest, res: Response, next: NextFunction) => {
-  const q = req.query as Record<string, unknown>;
-  const numQ = (v: unknown, dflt: number): number => {
-    const n = typeof v === 'string' ? Number(v) : NaN;
-    return Number.isFinite(n) ? n : dflt;
-  };
-  const page = numQ(q.page, 1);
-  const limit = numQ(q.limit, 20);
-  const skip = (page - 1) * limit;
-
-  // Logged-in users browsing without filters get personalised matches.
-  // Guests fall through to the recency-sorted public listing below.
-  if (!isSearchMode(q) && req.user) {
-    matchedJobs(req, res, next);
-    return;
-  }
-
-  const filter = buildFilter(q);
-
-  // Hide already-applied jobs from search results — they live in the
-  // Applied tab. Skipped for guests (no user means no applications).
-  if (req.user) {
-    const appliedIds = await fetchAppliedJobIds(req.user._id);
-    if (appliedIds.length) filter._id = { $nin: appliedIds };
-  }
-
-  const sort: Record<string, 1 | -1> = { postedAt: -1 };
-  if (q.sort === 'salary') {
-    sort.salaryMax = -1;
-    sort.salaryMin = -1;
-  }
-
-  const [items, total] = await Promise.all([
-    Job.find(filter).sort(sort).skip(skip).limit(limit).lean(),
-    Job.countDocuments(filter),
-  ]);
-
-  res.json({
-    success: true,
-    mode: 'search',
-    data: items,
-    meta: { page, limit, total, totalPages: Math.ceil(total / limit) },
+  return jobs.filter((j) => {
+    if (qStr) {
+      const hay = `${j.title} ${j.description} ${j.company}`.toLowerCase();
+      if (!hay.includes(qStr)) return false;
+    }
+    if (loc && !j.location.toLowerCase().includes(loc)) return false;
+    if (company && !j.company.toLowerCase().includes(company)) return false;
+    if (jobType && j.jobType !== jobType) return false;
+    if (remoteType && j.remoteType !== remoteType) return false;
+    if (requiredSkills.length) {
+      const have = (j.skills || []).map((s) => s.toLowerCase());
+      if (!requiredSkills.some((s) => have.includes(s))) return false;
+    }
+    if (minSalary !== undefined) {
+      if (typeof j.salaryMin === 'number') {
+        if (j.salaryMin < minSalary) return false;
+      } else if (typeof j.salaryMax === 'number') {
+        if (j.salaryMax < minSalary) return false;
+      } else {
+        // No salary info — keep (search shouldn't punish missing data)
+      }
+    }
+    return true;
   });
-});
+};
+
+const sortFeedJobs = (
+  jobs: FeedJob[],
+  sort: string | undefined,
+): FeedJob[] => {
+  if (sort === 'salary') {
+    return [...jobs].sort((a, b) => {
+      const aSal = a.salaryMax ?? a.salaryMin ?? 0;
+      const bSal = b.salaryMax ?? b.salaryMin ?? 0;
+      return bSal - aSal;
+    });
+  }
+  return [...jobs].sort((a, b) => b.postedAt.getTime() - a.postedAt.getTime());
+};
+
+export const listJobs = asyncHandler(
+  async (req: AuthRequest, res: Response, next: NextFunction) => {
+    const q = req.query as Record<string, unknown>;
+    const page = numQ(q.page, 1);
+    const limit = numQ(q.limit, 20);
+    const skip = (page - 1) * limit;
+
+    // Logged-in users browsing without filters get personalised matches.
+    if (!isSearchMode(q) && req.user) {
+      matchedJobs(req, res, next);
+      return;
+    }
+
+    const user = req.user ? await User.findById(req.user._id) : null;
+
+    // Native results — query the DB with the user's filters.
+    const nativeFilter = buildNativeFilter(q);
+    const native = await Job.find(nativeFilter).limit(500).lean();
+    const nativeFeed = native.map((n) =>
+      toFeedJobFromNative(n as unknown as Parameters<typeof toFeedJobFromNative>[0]),
+    );
+
+    // External results — live fetch using either the search query or the
+    // user's profile-derived queries (so an authenticated user with a blank
+    // location still gets locale-relevant results).
+    const queries = deriveProfileQueries(user, str(q.q));
+    const locations = deriveProfileLocations(user, str(q.location));
+    const externalScraped = queries.length
+      ? await fetchExternalForProfile(queries, locations)
+      : [];
+    const externalFeed = applyExternalFilters(
+      externalScraped.map(toFeedJobFromScraped),
+      q,
+    );
+
+    // Merge, exclude applied, sort, paginate.
+    const merged = [...nativeFeed, ...externalFeed];
+    const applied = await buildAppliedExclusion(req.user?._id?.toString());
+    const filtered = filterApplied(merged, applied);
+    const sorted = sortFeedJobs(filtered, str(q.sort));
+
+    const total = sorted.length;
+    const items = sorted.slice(skip, skip + limit);
+
+    res.json({
+      success: true,
+      mode: 'search',
+      data: items,
+      meta: {
+        page,
+        limit,
+        total,
+        totalPages: Math.ceil(total / limit) || 1,
+        nativeCount: nativeFeed.length,
+        externalCount: externalFeed.length,
+      },
+    });
+  },
+);
 
 export const listAllJobs = asyncHandler(async (_req: AuthRequest, res: Response) => {
   const payload = await buildAllJobsPayload();
@@ -124,36 +222,55 @@ export const listAllJobs = asyncHandler(async (_req: AuthRequest, res: Response)
 
 export const getJob = asyncHandler(async (req: Request, res: Response) => {
   const id = String(req.params.id);
-  const job = await Job.findById(id).lean();
-  if (!job) throw ApiError.notFound('Job not found');
-  res.json({ success: true, data: job });
+
+  if (OBJECT_ID_RE.test(id)) {
+    const job = await Job.findById(id).lean();
+    if (!job) throw ApiError.notFound('Job not found');
+    res.json({
+      success: true,
+      data: toFeedJobFromNative(job as unknown as Parameters<typeof toFeedJobFromNative>[0]),
+    });
+    return;
+  }
+
+  const m = EXTERNAL_ID_RE.exec(id);
+  if (m) {
+    const source = m[1] as JobSource;
+    const externalId = m[2];
+    const cached = await lookupExternalJobFromCache(source, externalId);
+    if (!cached) {
+      throw ApiError.notFound(
+        'External job not in cache. Re-open from search results.',
+      );
+    }
+    res.json({ success: true, data: toFeedJobFromScraped(cached) });
+    return;
+  }
+
+  throw ApiError.badRequest('Invalid job id');
 });
 
-// Default match floor for the home feed: only show jobs the matcher
-// rates >= 50%. Clients can override with ?threshold= up to 100.
 const DEFAULT_MATCH_FLOOR = 50;
 
 export const matchedJobs = asyncHandler(async (req: AuthRequest, res: Response) => {
   if (!req.user) throw ApiError.unauthorized();
 
   const useAi = req.query.ai === 'true';
-  const thresholdRaw = typeof req.query.threshold === 'string' ? Number(req.query.threshold) : NaN;
+  const thresholdRaw =
+    typeof req.query.threshold === 'string' ? Number(req.query.threshold) : NaN;
   const threshold = Number.isFinite(thresholdRaw)
     ? Math.min(100, Math.max(0, thresholdRaw))
     : DEFAULT_MATCH_FLOOR;
-  const pageRaw = typeof req.query.page === 'string' ? Number(req.query.page) : NaN;
-  const page = Math.max(1, Number.isFinite(pageRaw) ? Math.floor(pageRaw) : 1);
-  const limitRaw = typeof req.query.limit === 'string' ? Number(req.query.limit) : NaN;
-  const limit = Math.min(100, Math.max(1, Number.isFinite(limitRaw) ? Math.floor(limitRaw) : 20));
+  const page = Math.max(1, numQ(req.query.page, 1));
+  const limit = Math.min(100, Math.max(1, numQ(req.query.limit, 20)));
   const skip = (page - 1) * limit;
-  const cutoff = new Date(Date.now() - JOB_FRESHNESS_DAYS * 24 * 60 * 60 * 1000);
 
-  // Guests have no profile to match against, so we serve a recency-sorted
-  // public listing wrapped in the same shape as the matched response. No
-  // skill / category filter — the result spans every domain in the DB
-  // (IT, non-IT, core, finance, sales, …) so guests see the full breadth.
+  // Guests see a public, recency-sorted slice of native jobs only. No
+  // profile to derive third-party queries from, so the live API call is
+  // skipped — search-mode is what guests should hit if they want the
+  // broader scrape pool.
   if (req.user.role === 'guest') {
-    const baseFilter = { isActive: true, postedAt: { $gte: cutoff } };
+    const baseFilter = { isNative: true, isActive: true, status: 'active' };
     const [items, total] = await Promise.all([
       Job.find(baseFilter).sort({ postedAt: -1 }).skip(skip).limit(limit).lean(),
       Job.countDocuments(baseFilter),
@@ -161,7 +278,9 @@ export const matchedJobs = asyncHandler(async (req: AuthRequest, res: Response) 
     res.json({
       success: true,
       data: items.map((j) => ({
-        job: j,
+        job: toFeedJobFromNative(
+          j as unknown as Parameters<typeof toFeedJobFromNative>[0],
+        ),
         score: null,
         matchedSkills: [],
         missingSkills: [],
@@ -185,19 +304,15 @@ export const matchedJobs = asyncHandler(async (req: AuthRequest, res: Response) 
   const user = await User.findById(req.user._id);
   if (!user) throw ApiError.notFound('User not found');
 
-  // Applied jobs belong in /applied — strip them from every code path
-  // below (profile-incomplete fallback, recency fallback, scored match).
-  const appliedIds = await fetchAppliedJobIds(req.user._id);
-  const excludeApplied = appliedIds.length
-    ? { _id: { $nin: appliedIds } }
-    : {};
-
   const profileComplete = Boolean(
     user.profile.skills?.length || user.profile.preferredRoles?.length,
   );
 
+  // No profile signal yet → show native jobs by recency so the feed isn't
+  // empty. The blocking banner from the frontend will nudge the user to
+  // fill the profile so the third-party fetch starts firing.
   if (!profileComplete) {
-    const baseFilter = { isActive: true, postedAt: { $gte: cutoff }, ...excludeApplied };
+    const baseFilter = { isNative: true, isActive: true, status: 'active' };
     const [items, total] = await Promise.all([
       Job.find(baseFilter).sort({ postedAt: -1 }).skip(skip).limit(limit).lean(),
       Job.countDocuments(baseFilter),
@@ -205,7 +320,9 @@ export const matchedJobs = asyncHandler(async (req: AuthRequest, res: Response) 
     res.json({
       success: true,
       data: items.map((j) => ({
-        job: j,
+        job: toFeedJobFromNative(
+          j as unknown as Parameters<typeof toFeedJobFromNative>[0],
+        ),
         score: null,
         matchedSkills: [],
         missingSkills: [],
@@ -220,40 +337,60 @@ export const matchedJobs = asyncHandler(async (req: AuthRequest, res: Response) 
         threshold,
         useAi,
         profileIncomplete: true,
-        nextStep: 'Add skills and preferred roles to your profile to get personalised matches.',
+        nextStep:
+          'Add skills and preferred roles to your profile to get personalised matches.',
       },
     });
     return;
   }
 
+  // Native candidates: hirer-posted jobs that overlap the user's skills or
+  // preferred roles. We keep the candidate filter so the matcher doesn't
+  // score the entire native pool — skill/role overlap is a coarse pre-filter.
   const candidateFilter: Record<string, unknown> = {
+    isNative: true,
     isActive: true,
-    postedAt: { $gte: cutoff },
-    ...excludeApplied,
+    status: 'active',
     $or: [
       ...(user.profile.skills?.length
         ? [{ skills: { $in: user.profile.skills.map((s) => s.toLowerCase()) } }]
         : []),
       ...(user.profile.preferredRoles?.length
-        ? [{ title: { $regex: user.profile.preferredRoles.join('|'), $options: 'i' } }]
+        ? [
+            {
+              title: {
+                $regex: user.profile.preferredRoles.join('|'),
+                $options: 'i',
+              },
+            },
+          ]
         : []),
     ],
   };
+  const nativeDocs = await Job.find(candidateFilter)
+    .sort({ postedAt: -1 })
+    .limit(500)
+    .lean();
+  const nativeFeed = nativeDocs.map((n) =>
+    toFeedJobFromNative(n as unknown as Parameters<typeof toFeedJobFromNative>[0]),
+  );
 
-  // Pull a wide candidate pool, score every one, then paginate over the
-  // sorted-desc result. The matcher already drops anything below
-  // `threshold`, so once we slice we have only >=50% scoring jobs ordered
-  // highest-first. Pool size of 1000 keeps the per-request work bounded.
-  const candidates = await Job.find(candidateFilter).sort({ postedAt: -1 }).limit(1000);
-  const matched = await matchJobsForUser(user, candidates, threshold, useAi);
+  // External candidates: profile-driven live fetch (cached in Redis).
+  const queries = deriveProfileQueries(user);
+  const locations = deriveProfileLocations(user);
+  const externalScraped = await fetchExternalForProfile(queries, locations);
+  const externalFeed = externalScraped.map(toFeedJobFromScraped);
 
-  // Recency fallback: a profile-complete user whose skills/roles don't
-  // overlap with any job in the freshness window would otherwise see an
-  // empty home. Serve the unfiltered recent feed (same shape, score=null)
-  // so the home is never blank — UI ranking still prefers scored matches
-  // when they exist on a later refresh.
+  const applied = await buildAppliedExclusion(req.user._id?.toString());
+  const merged = filterApplied([...nativeFeed, ...externalFeed], applied);
+
+  const matched = await matchJobsForUser(user, merged, threshold, useAi);
+
+  // Score-zero fallback: a profile-complete user whose role/skills don't
+  // overlap with either pool would otherwise see an empty home. Fall back
+  // to recency-sorted native jobs so the screen is never blank.
   if (matched.length === 0) {
-    const baseFilter = { isActive: true, postedAt: { $gte: cutoff }, ...excludeApplied };
+    const baseFilter = { isNative: true, isActive: true, status: 'active' };
     const [items, total] = await Promise.all([
       Job.find(baseFilter).sort({ postedAt: -1 }).skip(skip).limit(limit).lean(),
       Job.countDocuments(baseFilter),
@@ -261,7 +398,9 @@ export const matchedJobs = asyncHandler(async (req: AuthRequest, res: Response) 
     res.json({
       success: true,
       data: items.map((j) => ({
-        job: j,
+        job: toFeedJobFromNative(
+          j as unknown as Parameters<typeof toFeedJobFromNative>[0],
+        ),
         score: null,
         matchedSkills: [],
         missingSkills: [],
@@ -277,7 +416,7 @@ export const matchedJobs = asyncHandler(async (req: AuthRequest, res: Response) 
         useAi,
         profileIncomplete: false,
         noMatchesFallback: true,
-        candidatePoolSize: candidates.length,
+        candidatePoolSize: merged.length,
       },
     });
     return;
@@ -304,13 +443,16 @@ export const matchedJobs = asyncHandler(async (req: AuthRequest, res: Response) 
       threshold,
       useAi,
       profileIncomplete: false,
-      candidatePoolSize: candidates.length,
+      candidatePoolSize: merged.length,
+      nativeCount: nativeFeed.length,
+      externalCount: externalFeed.length,
     },
   });
 });
 
 export const triggerFetch = asyncHandler(async (req: AuthRequest, res: Response) => {
-  if (!req.user || req.user.role !== 'admin') throw ApiError.forbidden('Admin only');
+  if (!req.user || req.user.role !== 'admin')
+    throw ApiError.forbidden('Admin only');
   try {
     const result = await runJobFetchNow();
     res.json({ success: true, message: 'Job fetch triggered', data: result });
@@ -329,24 +471,24 @@ export const aiSearchSchema = z.object({
 });
 
 /// AI-powered semantic job search. Accepts a natural-language query
-/// ("senior react dev in bangalore, 15 LPA"), extracts intent via Claude,
-/// and matches across title, skills, description, responsibilities,
-/// department and company. Already-applied jobs are filtered out by
-/// default so they don't pollute the discovery surface.
+/// ("senior react dev in bangalore, 15 LPA"), extracts intent via the AI
+/// provider, and matches across title, skills, description, etc.
+/// Already-applied jobs are filtered out by default so they don't pollute
+/// the discovery surface.
 export const aiSearchJobs = asyncHandler(
   async (req: AuthRequest, res: Response) => {
     const { query, limit, excludeAppliedJobs } = req.body as z.infer<
       typeof aiSearchSchema
     >['body'];
 
-    const excludeIds = excludeAppliedJobs
-      ? (await fetchAppliedJobIds(req.user?._id)).map((id) => id.toString())
-      : [];
+    const applied = excludeAppliedJobs
+      ? await buildAppliedExclusion(req.user?._id?.toString())
+      : undefined;
 
     const result = await aiJobSearch({
       query,
       limit: limit ?? 30,
-      excludeJobIds: excludeIds,
+      excludeApplied: applied,
     });
 
     res.json({
@@ -356,6 +498,8 @@ export const aiSearchJobs = asyncHandler(
         intent: result.intent,
         total: result.total,
         scope: result.scope,
+        nativeCount: result.nativeCount,
+        externalCount: result.externalCount,
       },
     });
   },

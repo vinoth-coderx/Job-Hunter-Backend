@@ -8,7 +8,7 @@ import { emitToUser } from '../services/chat/socket';
 import { asyncHandler } from '../utils/asyncHandler';
 import { ApiError } from '../utils/ApiError';
 import { AuthRequest } from '../types';
-import { heuristicMatch } from '../services/ai/matcher.service';
+import { heuristicMatch, toMatchable } from '../services/ai/matcher.service';
 import { User } from '../models/User';
 import { APPLIED_JOB_VIEW_DAYS } from '../jobs/jobScraper.cron';
 import { grantCoins } from '../services/coins/coin.service';
@@ -63,7 +63,7 @@ export const applyToJob = asyncHandler(async (req: AuthRequest, res: Response) =
   if (exists) throw ApiError.conflict('You have already applied to this job');
 
   const user = await User.findById(req.user._id);
-  const score = user ? heuristicMatch(user, job).score : undefined;
+  const score = user ? heuristicMatch(user, toMatchable(job)).score : undefined;
 
   const applied = await AppliedJob.create({
     user: req.user._id,
@@ -74,6 +74,17 @@ export const applyToJob = asyncHandler(async (req: AuthRequest, res: Response) =
       company: job.company,
       location: job.location,
       url: job.applyUrl || job.url,
+      description: job.description,
+      salaryMin: job.salaryMin,
+      salaryMax: job.salaryMax,
+      currency: job.currency,
+      jobType: job.jobType,
+      remoteType: job.remoteType,
+      skills: job.skills,
+      companyLogo: job.companyLogoUrl,
+      postedAt: job.postedAt,
+      source: job.source,
+      externalId: job.externalId,
     },
     applyType: job.isNative ? 'one_click' : 'external_manual',
     source: job.isNative ? 'native' : (job.source || 'other'),
@@ -187,7 +198,7 @@ export const quickApply = asyncHandler(async (req: AuthRequest, res: Response) =
     }
   }
 
-  const score = heuristicMatch(user, job).score;
+  const score = heuristicMatch(user, toMatchable(job)).score;
 
   const applied = await AppliedJob.create({
     user: req.user._id,
@@ -198,6 +209,17 @@ export const quickApply = asyncHandler(async (req: AuthRequest, res: Response) =
       company: job.company,
       location: job.location,
       url: job.applyUrl || job.url,
+      description: job.description,
+      salaryMin: job.salaryMin,
+      salaryMax: job.salaryMax,
+      currency: job.currency,
+      jobType: job.jobType,
+      remoteType: job.remoteType,
+      skills: job.skills,
+      companyLogo: job.companyLogoUrl,
+      postedAt: job.postedAt,
+      source: job.source,
+      externalId: job.externalId,
     },
     applyType: 'one_click',
     source: 'native',

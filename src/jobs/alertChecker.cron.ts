@@ -15,7 +15,13 @@ let alertTask: ScheduledTask | null = null;
 let isRunning = false;
 
 const buildJobFilter = (alert: IAlert, since: Date): Record<string, unknown> => {
+  // Native-only — third-party listings live behind the live-fetch cache
+  // now, not the Job collection. Running a per-alert live fetch every
+  // 15 min would burn through free-tier quotas, and the user surfaces
+  // third-party hits naturally via search + the highMatchAlerts notifier
+  // when they open the app.
   const filter: Record<string, unknown> = {
+    isNative: true,
     isActive: true,
     postedAt: { $gt: since },
   };

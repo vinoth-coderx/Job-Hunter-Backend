@@ -8,16 +8,21 @@ import { logger } from '../utils/logger';
 /// Idempotent — only touches rows that are missing the link.
 export const backfillApplicantHirerLinks = async (): Promise<void> => {
   try {
-    const orphans = await AppliedJob.find({
-      $or: [{ hirerProfile: { $exists: false } }, { hirerProfile: null }],
-    })
-      .select('_id job')
-      .limit(2000)
-      .lean();
+    // Backfill is native-only — external (scraped) applications have no
+    // hirerProfile to link to. Filter to records that still carry a job ref.
+    const orphans = (
+      await AppliedJob.find({
+        $or: [{ hirerProfile: { $exists: false } }, { hirerProfile: null }],
+        job: { $exists: true },
+      })
+        .select('_id job')
+        .limit(2000)
+        .lean()
+    ).filter((a) => a.job);
 
     if (orphans.length === 0) return;
 
-    const jobIds = [...new Set(orphans.map((a) => a.job.toString()))];
+    const jobIds = [...new Set(orphans.map((a) => a.job!.toString()))];
     const jobs = await Job.find({ _id: { $in: jobIds } })
       .select('_id hirerProfile')
       .lean();
@@ -29,7 +34,7 @@ export const backfillApplicantHirerLinks = async (): Promise<void> => {
 
     let updated = 0;
     for (const a of orphans) {
-      const hp = map.get(a.job.toString());
+      const hp = map.get(a.job!.toString());
       if (!hp) continue;
       await AppliedJob.updateOne(
         { _id: a._id },
