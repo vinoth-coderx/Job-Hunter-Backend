@@ -1,9 +1,12 @@
 import cron, { ScheduledTask } from 'node-cron';
-import { env } from '../config/env';
+import { getAppConfig } from '../services/config/config.service';
 import { logger } from '../utils/logger';
+
+const cronsEnabled = (): boolean => getAppConfig('CRON_ENABLED') !== 'false';
 import { AutoApplySettings } from '../models/AutoApplySettings';
 import { User } from '../models/User';
 import { runAutoApplyForUser } from '../services/autoApply/runner';
+import { trackedCron, getCronSchedule } from '../utils/cronTracker';
 
 let task: ScheduledTask | null = null;
 let isRunning = false;
@@ -98,18 +101,18 @@ export const runAutoApplyTickNow = async (): Promise<void> => {
 };
 
 export const startAutoApplyCron = (): void => {
-  if (!env.CRON_ENABLED) return;
-  // Every 15 minutes — combined with a ±7-minute window in the runner this
-  // hits every user exactly once per day, even if a tick fires a minute
-  // late.
-  const expr = '*/15 * * * *';
+  if (!cronsEnabled()) return;
+  // Effective schedule = AppConfig override (`CRON_SCHEDULE_autoApply`) or
+  // the code-side default ('*/15 * * * *'). Default combined with the
+  // runner's ±7-minute window hits every user exactly once per day.
+  const expr = getCronSchedule('autoApply');
   if (!cron.validate(expr)) {
     logger.error(`Invalid auto-apply cron: ${expr}`);
     return;
   }
   task = cron.schedule(
     expr,
-    async () => {
+    trackedCron('autoApply', async () => {
       if (isRunning) {
         logger.warn('[autoApply] previous tick still running — skipping');
         return;
@@ -119,12 +122,10 @@ export const startAutoApplyCron = (): void => {
       try {
         await runAutoApplyTickNow();
         logger.info(`[autoApply] tick complete in ${Date.now() - start}ms`);
-      } catch (err) {
-        logger.error('[autoApply] tick failed', err);
       } finally {
         isRunning = false;
       }
-    },
+    }),
     { timezone: 'Asia/Kolkata' },
   );
   logger.info(`Auto-Apply cron scheduled: "${expr}" (Asia/Kolkata)`);

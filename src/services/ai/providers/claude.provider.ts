@@ -1,6 +1,6 @@
 import Anthropic from '@anthropic-ai/sdk';
-import { env } from '../../../config/env';
 import { CLAUDE_MODEL_LITE, CLAUDE_MODEL_SMART } from '../../../config/constants';
+import { getAppConfig } from '../../config/config.service';
 import { logger } from '../../../utils/logger';
 import {
   AiGenerateOptions,
@@ -9,7 +9,14 @@ import {
   AiProviderQuotaError,
 } from './types';
 
-const client = env.ANTHROPIC_API_KEY ? new Anthropic({ apiKey: env.ANTHROPIC_API_KEY }) : null;
+let cached: { key: string; client: Anthropic } | null = null;
+const getClient = (): Anthropic | null => {
+  const key = getAppConfig('ANTHROPIC_API_KEY');
+  if (!key) return null;
+  if (cached && cached.key === key) return cached.client;
+  cached = { key, client: new Anthropic({ apiKey: key }) };
+  return cached.client;
+};
 
 const modelFor = (tier: 'lite' | 'smart'): string =>
   tier === 'smart' ? CLAUDE_MODEL_SMART : CLAUDE_MODEL_LITE;
@@ -22,9 +29,12 @@ const isQuotaError = (err: unknown): boolean => {
 
 export const claudeProvider: AiProvider = {
   name: 'claude',
-  enabled: client !== null,
+  get enabled(): boolean {
+    return getClient() !== null;
+  },
 
   async generate(opts: AiGenerateOptions): Promise<AiGenerateResult> {
+    const client = getClient();
     if (!client) {
       throw new Error('Claude provider disabled: ANTHROPIC_API_KEY not set');
     }

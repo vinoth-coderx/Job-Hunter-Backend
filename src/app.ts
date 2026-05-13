@@ -50,14 +50,25 @@ export const createApp = (): Application => {
   app.use(securityHeaders);
 
   const allowedOrigins = env.CLIENT_URL.split(',').map((s) => s.trim());
+  // In non-production we additionally allow any `http://localhost:<port>` /
+  // `http://127.0.0.1:<port>` so Flutter web dev builds (which pick a random
+  // port on each `flutter run -d chrome` launch) don't need every port baked
+  // into CLIENT_URL. Production stays strict — only the explicit list in
+  // CLIENT_URL is accepted.
+  const isLocalhostOrigin = (origin: string): boolean =>
+    /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin);
   app.use(
     cors({
       origin: (origin, cb) => {
-        if (!origin || allowedOrigins.includes(origin)) return cb(null, true);
+        if (!origin) return cb(null, true);
+        if (allowedOrigins.includes(origin)) return cb(null, true);
+        if (env.NODE_ENV !== 'production' && isLocalhostOrigin(origin)) {
+          return cb(null, true);
+        }
         return cb(new Error('CORS: origin not allowed'));
       },
       credentials: true,
-      methods: ['GET', 'POST', 'PATCH', 'PUT', 'DELETE'],
+      methods: ['GET', 'POST', 'PATCH', 'PUT', 'DELETE', 'OPTIONS'],
       allowedHeaders: [
         'Content-Type',
         'Authorization',

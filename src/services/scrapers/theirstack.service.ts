@@ -1,12 +1,29 @@
 import axios from 'axios';
 import { BaseScraper } from './base';
 import { ScrapedJob } from '../../types';
-import { env } from '../../config/env';
+import { getAppConfig } from '../config/config.service';
 import {
-  JOB_FRESHNESS_DAYS,
   SCRAPER_TIMEOUT_MS,
   THEIRSTACK_API_URL,
 } from '../../config/constants';
+
+/// Convert a free-text location ("Bangalore, India", "London", "Remote")
+/// to an ISO 3166-1 alpha-2 country code TheirStack accepts. We only
+/// map the regions Job Hunter actively targets — anything else falls
+/// back to "IN" since the platform is India-first by default.
+const guessCountryCode = (location: string): string => {
+  const lc = location.toLowerCase();
+  if (lc.includes('india') || lc.includes('bengaluru') || lc.includes('bangalore') ||
+      lc.includes('mumbai') || lc.includes('delhi') || lc.includes('hyderabad') ||
+      lc.includes('chennai') || lc.includes('pune') || lc.includes('kolkata')) return 'IN';
+  if (lc.includes('united states') || lc.includes('usa') || lc.includes('us')) return 'US';
+  if (lc.includes('united kingdom') || lc.includes('uk') || lc.includes('london')) return 'GB';
+  if (lc.includes('canada')) return 'CA';
+  if (lc.includes('australia')) return 'AU';
+  if (lc.includes('singapore')) return 'SG';
+  if (lc.includes('germany')) return 'DE';
+  return 'IN';
+};
 
 interface TheirStackJob {
   id: number | string;
@@ -46,11 +63,16 @@ export class TheirStackScraper extends BaseScraper {
     this.fetchedThisRun = false;
   }
 
-  async fetch(query: string, _location = ''): Promise<ScrapedJob[]> {
-    if (!env.THEIRSTACK_API_KEY) return [];
+  async fetch(query: string, location = ''): Promise<ScrapedJob[]> {
+    const apiKey = getAppConfig('THEIRSTACK_API_KEY');
+    if (!apiKey) return [];
     if (this.fetchedThisRun) return [];
     if (await this.isCooldown()) return [];
+    if (!query || query.trim().length === 0) return [];
     this.fetchedThisRun = true;
+
+    const country = guessCountryCode(location);
+    const days = this.freshnessDays();
 
     try {
       const { data } = await axios.post<TheirStackResponse>(
@@ -58,31 +80,26 @@ export class TheirStackScraper extends BaseScraper {
         {
           page: 0,
           limit: 50,
-          posted_at_max_age_days: JOB_FRESHNESS_DAYS,
-          job_country_code_or: ['IN'],
-          job_title_pattern_or: [
-            'software engineer',
-            'frontend developer',
-            'backend developer',
-            'full stack developer',
-            'flutter developer',
-            'react developer',
-            'node.js developer',
-            'data engineer',
-            'devops engineer',
-          ],
+          posted_at_max_age_days: days,
+          job_country_code_or: [country],
+          // The user's actual query drives the title filter now; the
+          // previous hardcoded 9-pattern list ignored what the cron
+          // (or downstream search) actually asked for, so TheirStack
+          // returned 0 for everything outside that bucket.
+          job_title_pattern_or: [query.trim()],
           include_total_results: false,
           order_by: [{ desc: true, field: 'date_posted' }],
         },
         {
           headers: {
-            Authorization: `Bearer ${env.THEIRSTACK_API_KEY}`,
+            Authorization: `Bearer ${apiKey}`,
             'Content-Type': 'application/json',
           },
           timeout: SCRAPER_TIMEOUT_MS,
         },
       );
 
+      const rawCount = (data.data || []).length;
       const jobs = (data.data || [])
         .map((j): ScrapedJob => {
           const postedAt = j.date_posted ? new Date(j.date_posted) : new Date();
@@ -118,10 +135,12 @@ export class TheirStackScraper extends BaseScraper {
         })
         .filter((j) => j.url && this.isWithinFreshness(j.postedAt));
 
-      this.log(`Fetched ${jobs.length} fresh jobs`);
+      this.log(
+        `Fetched ${jobs.length} fresh jobs for "${query}" in ${country} (${days}d window; raw=${rawCount})`,
+      );
       return jobs;
     } catch (err) {
-      await this.handleAxiosError(err, 'fetch theirstack');
+      await this.handleAxiosError(err, `fetch "${query}" theirstack`);
       return [];
     }
   }

@@ -27,6 +27,12 @@ export interface FeedJob {
   source: JobSource;
   externalId?: string;
 
+  /// Set by search/feed endpoints when this job belongs to a "best
+  /// match" tier (0-100). Frontend renders the match pill only when
+  /// this is present and >= 75 — so a populated screen with 30 jobs
+  /// reads as "the first N are matches, rest are related".
+  matchScore?: number;
+
   title: string;
   company: string;
   companyLogoUrl?: string;

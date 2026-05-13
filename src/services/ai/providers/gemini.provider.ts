@@ -1,6 +1,6 @@
 import { GoogleGenAI } from '@google/genai';
-import { env } from '../../../config/env';
 import { GEMINI_MODEL_LITE, GEMINI_MODEL_SMART } from '../../../config/constants';
+import { getAppConfig } from '../../config/config.service';
 import { logger } from '../../../utils/logger';
 import {
   AiGenerateOptions,
@@ -9,7 +9,14 @@ import {
   AiProviderQuotaError,
 } from './types';
 
-const client = env.GEMINI_API_KEY ? new GoogleGenAI({ apiKey: env.GEMINI_API_KEY }) : null;
+let cached: { key: string; client: GoogleGenAI } | null = null;
+const getClient = (): GoogleGenAI | null => {
+  const key = getAppConfig('GEMINI_API_KEY');
+  if (!key) return null;
+  if (cached && cached.key === key) return cached.client;
+  cached = { key, client: new GoogleGenAI({ apiKey: key }) };
+  return cached.client;
+};
 
 const modelFor = (tier: 'lite' | 'smart'): string =>
   tier === 'smart' ? GEMINI_MODEL_SMART : GEMINI_MODEL_LITE;
@@ -26,9 +33,14 @@ const isQuotaError = (err: unknown): boolean => {
 
 export const geminiProvider: AiProvider = {
   name: 'gemini',
-  enabled: client !== null,
+  // Re-evaluated each access so admin-rotated keys flip the flag without
+  // a process restart. Cheap call: just a Map.get inside getAppConfig.
+  get enabled(): boolean {
+    return getClient() !== null;
+  },
 
   async generate(opts: AiGenerateOptions): Promise<AiGenerateResult> {
+    const client = getClient();
     if (!client) {
       throw new Error('Gemini provider disabled: GEMINI_API_KEY not set');
     }

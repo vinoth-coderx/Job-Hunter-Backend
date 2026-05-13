@@ -100,7 +100,10 @@ const jobSchema = new Schema<IJob>(
     isNative: { type: Boolean, default: false, index: true },
     source: {
       type: String,
-      enum: ['native', 'adzuna', 'serpapi', 'rapidapi', 'arbeitnow', 'theirstack', 'puppeteer', 'playwright'],
+      // Admin can register new generic sources at runtime
+      // (models/JobSourceConfig), so we don't pin this to a fixed enum.
+      // Slugs are still validated against the JobSourceConfig catalog
+      // before any write reaches this collection.
       required: true,
       index: true,
     },

@@ -4,7 +4,6 @@ import {
   listAllJobs,
   getJob,
   matchedJobs,
-  triggerFetch,
   listJobsSchema,
   aiSearchJobs,
   aiSearchSchema,
@@ -46,8 +45,6 @@ router.post(
   validate(aiSearchSchema),
   aiSearchJobs,
 );
-
-router.post('/admin/fetch', authenticate, triggerFetch);
 
 router.post('/:id/save', authenticate, saveJob);
 router.delete('/:id/save', authenticate, unsaveJob);

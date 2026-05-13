@@ -1,7 +1,7 @@
 import axios from 'axios';
 import { BaseScraper } from './base';
 import { ScrapedJob } from '../../types';
-import { env } from '../../config/env';
+import { getAppConfig } from '../config/config.service';
 import { RAPIDAPI_JSEARCH_HOST, SCRAPER_TIMEOUT_MS } from '../../config/constants';
 
 interface JSearchJob {
@@ -31,9 +31,26 @@ interface JSearchResponse {
 export class RapidApiScraper extends BaseScraper {
   source = 'rapidapi' as const;
 
+  /// Map the configured freshness window to JSearch's discrete
+  /// `date_posted` enum. JSearch supports: today (1d), 3days, week
+  /// (7d), month (~30d), all. Picking the smallest bucket that still
+  /// covers the configured days gives us the freshest result set the
+  /// API can express.
+  private mapDatePosted(days: number): 'today' | '3days' | 'week' | 'month' | 'all' {
+    if (days <= 1) return 'today';
+    if (days <= 3) return '3days';
+    if (days <= 7) return 'week';
+    if (days <= 31) return 'month';
+    return 'all';
+  }
+
   async fetch(query: string, location = ''): Promise<ScrapedJob[]> {
-    if (!env.RAPIDAPI_KEY) return [];
+    const apiKey = getAppConfig('RAPIDAPI_KEY');
+    if (!apiKey) return [];
     if (await this.isCooldown()) return [];
+
+    const days = this.freshnessDays();
+    const datePosted = this.mapDatePosted(days);
 
     try {
       const url = `https://${RAPIDAPI_JSEARCH_HOST}/search`;
@@ -42,15 +59,16 @@ export class RapidApiScraper extends BaseScraper {
           query: location ? `${query} in ${location}` : query,
           page: 1,
           num_pages: 1,
-          date_posted: 'week',
+          date_posted: datePosted,
         },
         headers: {
-          'X-RapidAPI-Key': env.RAPIDAPI_KEY,
+          'X-RapidAPI-Key': apiKey,
           'X-RapidAPI-Host': RAPIDAPI_JSEARCH_HOST,
         },
         timeout: SCRAPER_TIMEOUT_MS,
       });
 
+      const rawCount = (data.data || []).length;
       const jobs = (data.data || [])
         .map((j): ScrapedJob => {
           const postedAt = j.job_posted_at_datetime_utc
@@ -77,7 +95,9 @@ export class RapidApiScraper extends BaseScraper {
         })
         .filter((j) => this.isWithinFreshness(j.postedAt));
 
-      this.log(`Fetched ${jobs.length} fresh jobs for "${query}"`);
+      this.log(
+        `Fetched ${jobs.length} fresh jobs for "${query}" (${datePosted}/${days}d; raw=${rawCount})`,
+      );
       return jobs;
     } catch (err) {
       await this.handleAxiosError(err, `fetch "${query}"`);

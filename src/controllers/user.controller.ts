@@ -28,6 +28,145 @@ export const updateProfileSchema = z.object({
   }),
 });
 
+const employmentEntrySchema = z.object({
+  designation: z.string().max(120).default(''),
+  company: z.string().max(120).default(''),
+  period: z.string().max(80).default(''),
+  current: z.boolean().default(false),
+});
+
+const educationEntrySchema = z.object({
+  degree: z.string().max(160).default(''),
+  institute: z.string().max(220).default(''),
+  period: z.string().max(80).default(''),
+  type: z.string().max(40).default('Full Time'),
+  projects: z.array(z.string().max(160)).max(20).default([]),
+});
+
+const itSkillEntrySchema = z.object({
+  skill: z.string().max(80).default(''),
+  version: z.string().max(20).default('-'),
+  lastUsed: z.string().max(20).default(''),
+  experience: z.string().max(40).default(''),
+});
+
+const projectEntrySchema = z.object({
+  title: z.string().max(160).default(''),
+  company: z.string().max(120).default(''),
+  type: z.string().max(40).default('Full Time'),
+  period: z.string().max(80).default(''),
+  description: z.string().max(2000).default(''),
+});
+
+const languageEntrySchema = z.object({
+  language: z.string().max(40).default(''),
+  proficiency: z.string().max(40).default('Intermediate'),
+  read: z.boolean().default(true),
+  write: z.boolean().default(true),
+  speak: z.boolean().default(true),
+});
+
+const accomplishmentEntrySchema = z.object({
+  type: z.string().max(120).default(''),
+  label: z.string().max(200).default(''),
+  value: z.string().max(500).default(''),
+});
+
+const careerProfileSchema = z.object({
+  currentIndustry: z.string().max(120).default(''),
+  department: z.string().max(120).default(''),
+  roleCategory: z.string().max(120).default(''),
+  jobRole: z.string().max(120).default(''),
+  desiredJobType: z.string().max(60).default(''),
+  desiredEmploymentType: z.string().max(60).default(''),
+  preferredShift: z.string().max(60).default(''),
+  preferredLocation: z.string().max(220).default(''),
+  expectedSalary: z.string().max(80).default(''),
+});
+
+const personalDetailsSchema = z.object({
+  gender: z.string().max(20).default(''),
+  maritalStatus: z.string().max(30).default(''),
+  dob: z.string().max(30).default(''),
+  category: z.string().max(60).default(''),
+  workPermit: z.string().max(140).default(''),
+  address: z.string().max(400).default(''),
+});
+
+export const updateResumeProfileSchema = z.object({
+  body: z.object({
+    // Top-level profile mirrors — let the client push everything from the
+    // resume profile in one round-trip instead of needing two PATCHes.
+    headline: z.string().max(200).optional(),
+    skills: z.array(z.string()).max(50).optional(),
+    experienceYears: z.number().min(0).max(60).optional(),
+    preferredLocations: z.array(z.string()).max(20).optional(),
+    expectedSalaryMin: z.number().min(0).optional(),
+    // Nested resumeProfile subdoc — the rich Naukri-style sections.
+    profileSummary: z.string().max(2000).optional(),
+    employments: z.array(employmentEntrySchema).max(15).optional(),
+    educations: z.array(educationEntrySchema).max(10).optional(),
+    itSkills: z.array(itSkillEntrySchema).max(25).optional(),
+    projects: z.array(projectEntrySchema).max(10).optional(),
+    languages: z.array(languageEntrySchema).max(10).optional(),
+    accomplishments: z.array(accomplishmentEntrySchema).max(20).optional(),
+    careerProfile: careerProfileSchema.optional(),
+    personalDetails: personalDetailsSchema.optional(),
+    diversityNote: z.string().max(1000).optional(),
+  }),
+});
+
+// Keys that live at the top of `profile` rather than inside resumeProfile.
+const TOP_LEVEL_PROFILE_KEYS = new Set([
+  'headline',
+  'skills',
+  'experienceYears',
+  'preferredLocations',
+  'expectedSalaryMin',
+]);
+
+export const updateResumeProfile = asyncHandler(
+  async (req: AuthRequest, res: Response) => {
+    if (!req.user) throw ApiError.unauthorized();
+
+    const updates: Record<string, unknown> = {};
+    let touchedResumeProfile = false;
+    for (const [key, value] of Object.entries(req.body)) {
+      if (value === undefined) continue;
+      if (TOP_LEVEL_PROFILE_KEYS.has(key)) {
+        updates[`profile.${key}`] = value;
+      } else {
+        updates[`profile.resumeProfile.${key}`] = value;
+        touchedResumeProfile = true;
+      }
+    }
+    if (touchedResumeProfile) {
+      updates['profile.resumeProfile.updatedAt'] = new Date();
+    }
+
+    const user = await User.findByIdAndUpdate(
+      req.user._id,
+      { $set: updates },
+      { new: true, runValidators: true },
+    );
+    if (!user) throw ApiError.notFound('User not found');
+
+    // Resume profile additions can push the user over the completion
+    // threshold (longer summary, employments, etc.), so reuse the same
+    // milestone hook the regular profile update uses.
+    const completenessGrant = await maybeGrantProfileCompleteBonus(user);
+    await invalidateProfileOptimizerCache(String(user._id));
+
+    res.json({
+      success: true,
+      data: user.profile.resumeProfile ?? {},
+      coinsAwarded: completenessGrant?.amount ?? 0,
+      coinsBalance:
+        completenessGrant?.balance ?? user.gamification?.coins ?? 0,
+    });
+  },
+);
+
 export const changePasswordSchema = z.object({
   body: z.object({
     currentPassword: z.string().min(1),

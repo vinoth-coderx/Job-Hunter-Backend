@@ -1,8 +1,8 @@
 import axios from 'axios';
 import { BaseScraper } from './base';
 import { ScrapedJob } from '../../types';
-import { env } from '../../config/env';
-import { ADZUNA_COUNTRY, JOB_FRESHNESS_DAYS, SCRAPER_TIMEOUT_MS } from '../../config/constants';
+import { getAppConfig } from '../config/config.service';
+import { ADZUNA_COUNTRY, SCRAPER_TIMEOUT_MS } from '../../config/constants';
 
 interface AdzunaJob {
   id: string;
@@ -28,25 +28,30 @@ export class AdzunaScraper extends BaseScraper {
   private baseUrl = 'https://api.adzuna.com/v1/api/jobs';
 
   async fetch(query: string, location = ''): Promise<ScrapedJob[]> {
-    if (!env.ADZUNA_APP_ID || !env.ADZUNA_APP_KEY) return [];
+    const appId = getAppConfig('ADZUNA_APP_ID');
+    const appKey = getAppConfig('ADZUNA_APP_KEY');
+    if (!appId || !appKey) return [];
     if (await this.isCooldown()) return [];
+
+    const days = this.freshnessDays();
 
     try {
       const url = `${this.baseUrl}/${ADZUNA_COUNTRY}/search/1`;
       const { data } = await axios.get<AdzunaResponse>(url, {
         params: {
-          app_id: env.ADZUNA_APP_ID,
-          app_key: env.ADZUNA_APP_KEY,
+          app_id: appId,
+          app_key: appKey,
           results_per_page: 50,
           what: query,
           where: location,
-          max_days_old: JOB_FRESHNESS_DAYS,
+          max_days_old: days,
           sort_by: 'date',
           'content-type': 'application/json',
         },
         timeout: SCRAPER_TIMEOUT_MS,
       });
 
+      const rawCount = (data.results || []).length;
       const jobs = (data.results || [])
         .map((j): ScrapedJob => {
           const postedAt = new Date(j.created);
@@ -70,7 +75,9 @@ export class AdzunaScraper extends BaseScraper {
         })
         .filter((j) => this.isWithinFreshness(j.postedAt));
 
-      this.log(`Fetched ${jobs.length} fresh jobs for "${query}"`);
+      this.log(
+        `Fetched ${jobs.length} fresh jobs for "${query}" (${days}d window; raw=${rawCount})`,
+      );
       return jobs;
     } catch (err) {
       await this.handleAxiosError(err, `fetch "${query}"`);

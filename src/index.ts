@@ -5,6 +5,8 @@ import { env } from './config/env';
 import { API_VERSION } from './config/constants';
 import { connectDatabase, disconnectDatabase } from './config/database';
 import { connectRedis, disconnectRedis } from './config/redis';
+import { preloadAppConfig } from './services/config/config.service';
+import { seedJobSourceConfigs } from './services/jobSourceConfig.service';
 import { startJobScraperCron, stopJobScraperCron } from './jobs/jobScraper.cron';
 import { startAlertCheckerCron, stopAlertCheckerCron } from './jobs/alertChecker.cron';
 import { startAutoApplyCron, stopAutoApplyCron } from './jobs/autoApply.cron';
@@ -19,13 +21,25 @@ const start = async (): Promise<void> => {
   try {
     await connectDatabase();
     await connectRedis();
+    // Pull DB-backed runtime config (Cloudinary creds, Razorpay keys, …)
+    // into the in-memory cache so feature services don't pay a Mongo
+    // hop per request. Failure here is non-fatal — services fall back to
+    // env vars on a cache miss.
+    await preloadAppConfig().catch((err) =>
+      logger.warn('AppConfig preload failed — continuing with env fallback', err),
+    );
+    // Seed the admin-managed job source catalog on first boot and
+    // back-fill any new builtin scrapers added in code since.
+    await seedJobSourceConfigs().catch((err) =>
+      logger.warn('JobSourceConfig seed failed — pipeline still usable', err),
+    );
 
     const app = createApp();
     server = http.createServer(app);
     initSocket(server);
 
     server.listen(env.PORT, () => {
-      const base = `http://localhost:${env.PORT}`;
+      const base = `http://localhost:${env.PORT ?? 5000}`;
       const api = `${base}/api/${API_VERSION}`;
       logger.info('================================================');
       logger.info(`  Job Hunter Backend  [${env.NODE_ENV}]`);

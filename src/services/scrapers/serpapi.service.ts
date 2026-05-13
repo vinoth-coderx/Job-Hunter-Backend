@@ -1,7 +1,7 @@
 import axios from 'axios';
 import { BaseScraper } from './base';
 import { ScrapedJob } from '../../types';
-import { env } from '../../config/env';
+import { getAppConfig } from '../config/config.service';
 import { SCRAPER_TIMEOUT_MS } from '../../config/constants';
 
 interface SerpJobResult {
@@ -29,23 +29,38 @@ export class SerpApiScraper extends BaseScraper {
   source = 'serpapi' as const;
   private baseUrl = 'https://serpapi.com/search.json';
 
+  /// Google Jobs (via SerpAPI) accepts `chips: 'date_posted:<value>'`
+  /// where value is one of today/3days/week/month. Pick the smallest
+  /// bucket that still covers the configured freshness window.
+  private mapDatePosted(days: number): 'today' | '3days' | 'week' | 'month' {
+    if (days <= 1) return 'today';
+    if (days <= 3) return '3days';
+    if (days <= 7) return 'week';
+    return 'month';
+  }
+
   async fetch(query: string, location = ''): Promise<ScrapedJob[]> {
-    if (!env.SERPAPI_KEY) return [];
+    const apiKey = getAppConfig('SERPAPI_KEY');
+    if (!apiKey) return [];
     if (await this.isCooldown()) return [];
+
+    const days = this.freshnessDays();
+    const datePosted = this.mapDatePosted(days);
 
     try {
       const { data } = await axios.get<SerpResponse>(this.baseUrl, {
         params: {
           engine: 'google_jobs',
           q: location ? `${query} ${location}` : query,
-          api_key: env.SERPAPI_KEY,
-          chips: 'date_posted:week',
+          api_key: apiKey,
+          chips: `date_posted:${datePosted}`,
           hl: 'en',
         },
         timeout: SCRAPER_TIMEOUT_MS,
       });
 
       const results = data.jobs_results || [];
+      const rawCount = results.length;
 
       const jobs = results
         .map((j, idx): ScrapedJob => {
@@ -72,7 +87,9 @@ export class SerpApiScraper extends BaseScraper {
         })
         .filter((j) => this.isWithinFreshness(j.postedAt));
 
-      this.log(`Fetched ${jobs.length} fresh jobs for "${query}"`);
+      this.log(
+        `Fetched ${jobs.length} fresh jobs for "${query}" (${datePosted}/${days}d; raw=${rawCount})`,
+      );
       return jobs;
     } catch (err) {
       await this.handleAxiosError(err, `fetch "${query}"`);

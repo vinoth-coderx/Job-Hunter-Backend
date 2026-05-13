@@ -1,5 +1,5 @@
 import axios from 'axios';
-import { env } from '../../config/env';
+import { getAppConfig } from '../config/config.service';
 import { logger } from '../../utils/logger';
 import { IJob } from '../../models/Job';
 
@@ -21,9 +21,9 @@ import { IJob } from '../../models/Job';
 const TEMPLATE_PARAMS = 3 as const;
 
 const isConfigured = (): boolean =>
-  !!process.env.MSG91_AUTH_KEY &&
-  !!process.env.MSG91_WHATSAPP_NUMBER &&
-  !!process.env.MSG91_WHATSAPP_TEMPLATE;
+  !!getAppConfig('MSG91_AUTH_KEY') &&
+  !!getAppConfig('MSG91_WHATSAPP_NUMBER') &&
+  !!getAppConfig('MSG91_WHATSAPP_TEMPLATE');
 
 /**
  * Send one WhatsApp message per job (most providers cap template body
@@ -48,15 +48,15 @@ export const sendJobAlertWhatsApp = async (params: {
 
   const top = params.jobs[0];
   const body: Record<string, unknown> = {
-    integrated_number: process.env.MSG91_WHATSAPP_NUMBER,
+    integrated_number: getAppConfig('MSG91_WHATSAPP_NUMBER'),
     content_type: 'template',
     payload: {
       messaging_product: 'whatsapp',
       type: 'template',
       template: {
-        name: process.env.MSG91_WHATSAPP_TEMPLATE,
+        name: getAppConfig('MSG91_WHATSAPP_TEMPLATE'),
         language: { code: 'en_US', policy: 'deterministic' },
-        namespace: process.env.MSG91_WHATSAPP_NAMESPACE,
+        namespace: getAppConfig('MSG91_WHATSAPP_NAMESPACE') ?? undefined,
         to_and_components: [
           {
             to: [phone],
@@ -96,7 +96,7 @@ export const sendJobAlertWhatsApp = async (params: {
       {
         timeout: 12_000,
         headers: {
-          authkey: process.env.MSG91_AUTH_KEY!,
+          authkey: getAppConfig('MSG91_AUTH_KEY') ?? '',
           'Content-Type': 'application/json',
         },
       },

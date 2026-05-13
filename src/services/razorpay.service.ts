@@ -1,6 +1,7 @@
 import axios from 'axios';
 import crypto from 'crypto';
 import { env } from '../config/env';
+import { getAppConfig } from './config/config.service';
 import { ApiError } from '../utils/ApiError';
 import { logger } from '../utils/logger';
 
@@ -29,18 +30,24 @@ export type RazorpayMode = 'test' | 'live';
  */
 export const resolveRazorpayMode = (requested: RazorpayMode | undefined): RazorpayMode => {
   if (env.NODE_ENV === 'production') return 'live';
-  if (requested === 'test' && env.RAZORPAY_TEST_KEY_ID && env.RAZORPAY_TEST_KEY_SECRET) {
+  if (
+    requested === 'test' &&
+    getAppConfig('RAZORPAY_TEST_KEY_ID') &&
+    getAppConfig('RAZORPAY_TEST_KEY_SECRET')
+  ) {
     return 'test';
   }
   return 'live';
 };
 
 const requireKeys = (mode: RazorpayMode): { keyId: string; keySecret: string } => {
-  const keyId = mode === 'test' ? env.RAZORPAY_TEST_KEY_ID : env.RAZORPAY_KEY_ID;
-  const keySecret = mode === 'test' ? env.RAZORPAY_TEST_KEY_SECRET : env.RAZORPAY_KEY_SECRET;
+  const keyId = getAppConfig(mode === 'test' ? 'RAZORPAY_TEST_KEY_ID' : 'RAZORPAY_KEY_ID');
+  const keySecret = getAppConfig(
+    mode === 'test' ? 'RAZORPAY_TEST_KEY_SECRET' : 'RAZORPAY_KEY_SECRET',
+  );
   if (!keyId || !keySecret) {
     throw ApiError.internal(
-      `Razorpay ${mode} keys not configured (set RAZORPAY_${mode === 'test' ? 'TEST_' : ''}KEY_ID, RAZORPAY_${mode === 'test' ? 'TEST_' : ''}KEY_SECRET)`,
+      `Razorpay ${mode} keys not configured (set RAZORPAY_${mode === 'test' ? 'TEST_' : ''}KEY_ID, RAZORPAY_${mode === 'test' ? 'TEST_' : ''}KEY_SECRET in admin panel or .env)`,
     );
   }
   return { keyId, keySecret };

@@ -1,21 +1,26 @@
 import nodemailer, { Transporter } from 'nodemailer';
-import { env } from '../../config/env';
 import { EMAIL_FROM, SMTP_HOST, SMTP_PORT } from '../../config/constants';
+import { getAppConfig } from '../config/config.service';
 import { logger } from '../../utils/logger';
 import { IJob } from '../../models/Job';
 
 let transporter: Transporter | null = null;
+let configuredFor: string | null = null;
 
 const getTransporter = (): Transporter | null => {
-  if (transporter) return transporter;
-  if (!env.SMTP_USER || !env.SMTP_PASS) return null;
+  const user = getAppConfig('SMTP_USER');
+  const pass = getAppConfig('SMTP_PASS');
+  if (!user || !pass) return null;
+  // Rebuild the transporter if the admin rotated credentials at runtime.
+  if (transporter && configuredFor === user) return transporter;
   transporter = nodemailer.createTransport({
     host: SMTP_HOST,
     port: SMTP_PORT,
     // Implicit TLS only on port 465; STARTTLS for 587/25.
     secure: (SMTP_PORT as number) === 465,
-    auth: { user: env.SMTP_USER, pass: env.SMTP_PASS },
+    auth: { user, pass },
   });
+  configuredFor = user;
   return transporter;
 };
 

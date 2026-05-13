@@ -3,6 +3,22 @@ import { ScrapedJob } from '../../types';
 import { logger } from '../../utils/logger';
 import { JOB_FRESHNESS_DAYS } from '../../config/constants';
 import { redis } from '../../config/redis';
+import { getAppConfig } from '../config/config.service';
+
+/// Per-source freshness — admins set `JOB_FRESHNESS_DAYS_<SOURCE>`
+/// (e.g. JOB_FRESHNESS_DAYS_ADZUNA = "30") in the App Config panel
+/// to dial each scraper independently. Falls back to the global
+/// JOB_FRESHNESS_DAYS constant when the per-source key is unset or
+/// malformed. Bounded to [1, 365] so a typo can't fetch the entire
+/// archive or zero everything out.
+export const getFreshnessDaysForSource = (source: string): number => {
+  const raw = getAppConfig(`JOB_FRESHNESS_DAYS_${source.toUpperCase()}`);
+  const n = raw ? Number(raw) : NaN;
+  if (Number.isFinite(n) && n > 0) {
+    return Math.min(365, Math.max(1, Math.round(n)));
+  }
+  return JOB_FRESHNESS_DAYS;
+};
 
 export abstract class BaseScraper {
   abstract source: string;
@@ -66,8 +82,17 @@ export abstract class BaseScraper {
     logger.warn(`[${this.source}] ${context} → ${(err as Error).message}`);
   }
 
+  /// Days back this scraper accepts. Reads the per-source App Config
+  /// key on every call so admin tweaks take effect on the next cron
+  /// without a restart.
+  protected freshnessDays(): number {
+    return getFreshnessDaysForSource(this.source);
+  }
+
   protected isWithinFreshness(date: Date): boolean {
-    const cutoff = new Date(Date.now() - JOB_FRESHNESS_DAYS * 24 * 60 * 60 * 1000);
+    const cutoff = new Date(
+      Date.now() - this.freshnessDays() * 24 * 60 * 60 * 1000,
+    );
     return date >= cutoff;
   }
 

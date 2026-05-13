@@ -7,7 +7,6 @@ import { ApiError } from '../utils/ApiError';
 import { AuthRequest, JobSource } from '../types';
 import { matchJobsForUser } from '../services/ai/matcher.service';
 import { aiJobSearch } from '../services/ai/jobSearch.service';
-import { runJobFetchNow } from '../jobs/jobScraper.cron';
 import { buildAllJobsPayload } from '../services/jobCache.service';
 import {
   FeedJob,
@@ -141,6 +140,104 @@ const applyExternalFilters = (
   });
 };
 
+// Relevance score (0-100) for ranking search/filter results. Used to
+// re-sort results that already pass the exact-match filters
+// (jobType/remoteType/company/skills/etc.) so the strongest free-text
+// + skill overlap rises to the top. Not used as a hard gate — the
+// filters themselves already enforce "what the user picked".
+const filterRelevance = (
+  job: FeedJob,
+  q: Record<string, unknown>,
+): number => {
+  let total = 0;
+  let hit = 0;
+
+  const qStr = str(q.q)?.toLowerCase();
+  if (qStr) {
+    total += 1;
+    const titleLc = job.title.toLowerCase();
+    const skillBag = (job.skills || []).join(' ').toLowerCase();
+    if (titleLc.includes(qStr) || skillBag.includes(qStr)) {
+      hit += 1;
+    } else if (job.description.toLowerCase().includes(qStr)) {
+      // Description-only match is a weaker signal — half weight so a
+      // job that only mentions the keyword in passing won't clear 90%.
+      hit += 0.5;
+    }
+  }
+
+  const loc = str(q.location)?.toLowerCase();
+  if (loc) {
+    total += 1;
+    if (job.location.toLowerCase().includes(loc)) hit += 1;
+  }
+
+  const skillsCsv = str(q.skills);
+  if (skillsCsv) {
+    const req = skillsCsv
+      .split(',')
+      .map((s) => s.trim().toLowerCase())
+      .filter(Boolean);
+    if (req.length > 0) {
+      const have = (job.skills || []).map((s) => s.toLowerCase());
+      const titleLc = job.title.toLowerCase();
+      const descLc = job.description.toLowerCase();
+      const matchedCount = req.filter(
+        (s) =>
+          have.some((h) => h.includes(s)) ||
+          titleLc.includes(s) ||
+          descLc.includes(s),
+      ).length;
+      total += req.length;
+      hit += matchedCount;
+    }
+  }
+
+  // jobType / remoteType / company / minSalary are exact-match filters
+  // already gated by buildNativeFilter / applyExternalFilters; double-
+  // counting them in relevance would distort the score.
+
+  if (total === 0) return 100;
+  return Math.round((hit / total) * 100);
+};
+
+// Words that show up in queries but carry no search signal. Stripped
+// before the must-match check so "developer in india" doesn't require
+// "in" to appear in the job text.
+const STOPWORDS = new Set([
+  'a', 'an', 'and', 'at', 'by', 'for', 'from', 'in', 'of', 'on', 'or',
+  'the', 'to', 'with', 'job', 'jobs', 'role', 'roles', 'work',
+]);
+
+/// Strict "did the user's typed query actually appear in this job?"
+/// check. Tokenises q, drops stopwords + sub-3-char tokens, requires
+/// every remaining token to appear across title/skills/responsibilities/
+/// department/description. Without this, Mongo's `$text` query (which
+/// is OR by default) lets a "react native" search return Shopify-tech
+/// jobs that only mention "react" and marketing roles that only
+/// mention "native ads".
+const matchesRawQ = (job: FeedJob, rawQ: string | undefined): boolean => {
+  if (!rawQ) return true;
+  const tokens = rawQ
+    .toLowerCase()
+    .split(/[\s,/+&|()\-]+/)
+    .map((t) => t.trim())
+    .filter((t) => t.length >= 3 && !STOPWORDS.has(t));
+  if (tokens.length === 0) return true;
+
+  const haystack = [
+    job.title,
+    (job.skills || []).join(' '),
+    (job.responsibilities || []).join(' '),
+    job.department || '',
+    job.description,
+  ]
+    .join(' ')
+    .toLowerCase();
+
+  return tokens.every((t) => haystack.includes(t));
+};
+
 const sortFeedJobs = (
   jobs: FeedJob[],
   sort: string | undefined,
@@ -190,11 +287,22 @@ export const listJobs = asyncHandler(
       q,
     );
 
-    // Merge, exclude applied, sort, paginate.
+    // Merge, exclude applied, enforce phrase-level q match, sort,
+    // paginate. matchesRawQ rejects results where Mongo's `$text`
+    // matched only one token of a multi-word query (the "react native"
+    // → Shopify-tech-lead bleed). filterRelevance is kept for ranking
+    // — it lets stronger free-text + skill overlap rise to the top
+    // without dropping legitimate hits.
+    const rawQ = str(q.q);
     const merged = [...nativeFeed, ...externalFeed];
     const applied = await buildAppliedExclusion(req.user?._id?.toString());
-    const filtered = filterApplied(merged, applied);
-    const sorted = sortFeedJobs(filtered, str(q.sort));
+    const dedupedByApply = filterApplied(merged, applied);
+    const phraseMatched = dedupedByApply.filter((j) => matchesRawQ(j, rawQ));
+    const ranked = phraseMatched
+      .map((j) => ({ job: j, score: filterRelevance(j, q) }))
+      .sort((a, b) => b.score - a.score)
+      .map((r) => r.job);
+    const sorted = sortFeedJobs(ranked, str(q.sort));
 
     const total = sorted.length;
     const items = sorted.slice(skip, skip + limit);
@@ -210,6 +318,14 @@ export const listJobs = asyncHandler(
         totalPages: Math.ceil(total / limit) || 1,
         nativeCount: nativeFeed.length,
         externalCount: externalFeed.length,
+        candidatePoolSize: dedupedByApply.length,
+        ...(total === 0
+          ? {
+              noMatches: true,
+              nextStep:
+                'No results match all your filters. Try broadening the search or removing one filter.',
+            }
+          : {}),
       },
     });
   },
@@ -250,7 +366,11 @@ export const getJob = asyncHandler(async (req: Request, res: Response) => {
   throw ApiError.badRequest('Invalid job id');
 });
 
-const DEFAULT_MATCH_FLOOR = 50;
+// "Shows weak signal of profile overlap" floor. Lower than the original
+// 70% strict gate — we learned that strict thresholds produce empty
+// feeds for sparse profiles. The ranking still puts the strongest
+// matches on top; this floor only excludes outright-irrelevant jobs.
+const DEFAULT_MATCH_FLOOR = 30;
 
 export const matchedJobs = asyncHandler(async (req: AuthRequest, res: Response) => {
   if (!req.user) throw ApiError.unauthorized();
@@ -386,37 +506,28 @@ export const matchedJobs = asyncHandler(async (req: AuthRequest, res: Response) 
 
   const matched = await matchJobsForUser(user, merged, threshold, useAi);
 
-  // Score-zero fallback: a profile-complete user whose role/skills don't
-  // overlap with either pool would otherwise see an empty home. Fall back
-  // to recency-sorted native jobs so the screen is never blank.
+  // No "show everything" fallback here on purpose. The screen requires
+  // jobs to match the seeker's profile (skills + roles) at >= threshold;
+  // otherwise it returns empty + a flag so the client can render an
+  // honest empty state ("No matches yet — add more skills / broaden
+  // location") instead of dumping unrelated postings into the feed.
   if (matched.length === 0) {
-    const baseFilter = { isNative: true, isActive: true, status: 'active' };
-    const [items, total] = await Promise.all([
-      Job.find(baseFilter).sort({ postedAt: -1 }).skip(skip).limit(limit).lean(),
-      Job.countDocuments(baseFilter),
-    ]);
     res.json({
       success: true,
-      data: items.map((j) => ({
-        job: toFeedJobFromNative(
-          j as unknown as Parameters<typeof toFeedJobFromNative>[0],
-        ),
-        score: null,
-        matchedSkills: [],
-        missingSkills: [],
-        reasoning: null,
-      })),
+      data: [],
       meta: {
         page,
         limit,
-        total,
-        totalPages: Math.ceil(total / limit),
-        hasMore: skip + items.length < total,
+        total: 0,
+        totalPages: 0,
+        hasMore: false,
         threshold,
         useAi,
         profileIncomplete: false,
-        noMatchesFallback: true,
+        noMatches: true,
         candidatePoolSize: merged.length,
+        nextStep:
+          'No jobs cleared the match threshold. Add more skills / preferred roles to your profile, or broaden your preferred locations.',
       },
     });
     return;
@@ -448,18 +559,6 @@ export const matchedJobs = asyncHandler(async (req: AuthRequest, res: Response) 
       externalCount: externalFeed.length,
     },
   });
-});
-
-export const triggerFetch = asyncHandler(async (req: AuthRequest, res: Response) => {
-  if (!req.user || req.user.role !== 'admin')
-    throw ApiError.forbidden('Admin only');
-  try {
-    const result = await runJobFetchNow();
-    res.json({ success: true, message: 'Job fetch triggered', data: result });
-  } catch (err) {
-    logger.error('Manual fetch failed', err);
-    throw ApiError.internal('Failed to trigger fetch');
-  }
 });
 
 export const aiSearchSchema = z.object({

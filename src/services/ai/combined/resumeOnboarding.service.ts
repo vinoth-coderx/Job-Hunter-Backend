@@ -1,7 +1,7 @@
 import { logger } from '../../../utils/logger';
 import { IJob } from '../../../models/Job';
 import { generateJson } from '../providers';
-import { ParsedResume } from '../resumeParser.service';
+import { ParsedResume, sanitizeParsedResume } from '../resumeParser.service';
 
 /**
  * One-shot resume onboarding pipeline.
@@ -75,7 +75,9 @@ Schema (return EXACTLY this shape):
     "itSkills": [{"skill":"","lastUsed":"YYYY","experience":"X Years Y Months"}],
     "projects": [{"title":"","company":"","type":"","period":"","description":""}],
     "languages": [{"language":"","proficiency":"Beginner|Intermediate|Proficient|Expert"}],
-    "personalDetails": {"dob":"","address":"","gender":"","maritalStatus":""}
+    "personalDetails": {"dob":"","address":"","gender":"","maritalStatus":"","category":"","workPermit":""},
+    "careerProfile": {"currentIndustry":"","department":"","roleCategory":"","jobRole":"","desiredJobType":"","desiredEmploymentType":"","preferredShift":"","preferredLocation":"","expectedSalary":""},
+    "accomplishments": [{"type":"Online profile|Work sample|White paper / Research publication / Journal entry|Presentation|Patent|Certification","label":"","value":""}]
   },
   "topMatches": [
     {
@@ -103,6 +105,9 @@ Rules:
 - jobId in topMatches MUST be one of the ids passed in. Do NOT invent.
 - Return 3-5 improvements, focused on changes that would unlock more/better matches in the given job pool.
 - itSkills only programming languages, frameworks, libraries, databases, dev tools.
+- careerProfile fields MAY be sensibly inferred from latest employment + skills (industry from latest company, role category from latest title, etc.). This is the ONLY inference allowed — everything else must be evidence-based.
+- accomplishments.type MUST be one of: 'Online profile' (LinkedIn/Twitter/portfolio URLs), 'Work sample' (GitHub/Behance/Dribbble), 'Presentation' (talks/slide decks), 'White paper / Research publication / Journal entry' (papers), 'Patent' (granted/filed), 'Certification' (AWS, Coursera, etc.). Anything that doesn't fit — skip.
+- personalDetails.category only if explicit ('General | OBC | SC | ST | EWS | Other'); personalDetails.workPermit only if explicit (e.g. 'Authorized to work in US', 'H1B', 'EU citizen').
 - Empty fields when info missing — never invent.`;
 
 export const runResumeOnboarding = async (
@@ -186,7 +191,7 @@ const sanitize = (raw: ResumeOnboardingResult, jobs: IJob[]): ResumeOnboardingRe
     .slice(0, 5);
 
   return {
-    parsedResume: raw.parsedResume,
+    parsedResume: sanitizeParsedResume(raw.parsedResume),
     topMatches,
     improvements,
     careerInsight: asString(raw.careerInsight, 400),

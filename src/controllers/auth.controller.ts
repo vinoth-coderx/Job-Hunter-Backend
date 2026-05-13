@@ -66,7 +66,7 @@ export const register = asyncHandler(async (req: Request, res: Response) => {
   const tokens = generateTokenPair({
     userId: user._id.toString(),
     email: user.email,
-    role: user.role,
+    role: 'user',
   });
 
   user.refreshTokens = [tokens.refreshToken];
@@ -82,7 +82,7 @@ export const register = asyncHandler(async (req: Request, res: Response) => {
         id: user._id,
         email: user.email,
         fullName: user.profile.fullName,
-        role: user.role,
+        role: 'user',
         subscription: user.subscription,
       },
       ...tokens,
@@ -121,7 +121,7 @@ export const login = asyncHandler(async (req: Request, res: Response) => {
   const tokens = generateTokenPair({
     userId: user._id.toString(),
     email: user.email,
-    role: user.role,
+    role: 'user',
   });
 
   user.refreshTokens = [...(user.refreshTokens || []).slice(-4), tokens.refreshToken];
@@ -136,7 +136,7 @@ export const login = asyncHandler(async (req: Request, res: Response) => {
         id: user._id,
         email: user.email,
         fullName: user.profile.fullName,
-        role: user.role,
+        role: 'user',
         subscription: user.subscription,
       },
       ...tokens,
@@ -159,7 +159,7 @@ export const refreshToken = asyncHandler(async (req: Request, res: Response) => 
   const tokens = generateTokenPair({
     userId: user._id.toString(),
     email: user.email,
-    role: user.role,
+    role: 'user',
   });
 
   user.refreshTokens = [
@@ -191,7 +191,7 @@ export const me = asyncHandler(async (req: AuthRequest, res: Response) => {
     data: {
       id: user._id,
       email: user.email,
-      role: user.role,
+      role: 'user',
       activeRole: user.activeRole,
       profile: user.profile,
       subscription: user.subscription,
@@ -361,7 +361,7 @@ export const firebaseLogin = asyncHandler(async (req: Request, res: Response) =>
   const tokens = generateTokenPair({
     userId: user._id.toString(),
     email: user.email,
-    role: user.role,
+    role: 'user',
   });
 
   user.refreshTokens = [...(user.refreshTokens || []).slice(-4), tokens.refreshToken];
@@ -377,7 +377,7 @@ export const firebaseLogin = asyncHandler(async (req: Request, res: Response) =>
         email: user.email,
         fullName: user.profile.fullName,
         avatar: user.profile.avatar,
-        role: user.role,
+        role: 'user',
         subscription: user.subscription,
       },
       ...tokens,

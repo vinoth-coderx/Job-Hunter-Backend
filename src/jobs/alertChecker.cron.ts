@@ -1,7 +1,9 @@
 import cron, { ScheduledTask } from 'node-cron';
 import { Types } from 'mongoose';
-import { env } from '../config/env';
-import { ALERT_PUSH_MAX_PER_RUN, CRON_ALERT_SCHEDULE } from '../config/constants';
+import { getAppConfig } from '../services/config/config.service';
+import { ALERT_PUSH_MAX_PER_RUN } from '../config/constants';
+
+const cronsEnabled = (): boolean => getAppConfig('CRON_ENABLED') !== 'false';
 import { logger } from '../utils/logger';
 import { Alert, IAlert } from '../models/Alert';
 import { DeviceToken } from '../models/DeviceToken';
@@ -10,6 +12,7 @@ import { User } from '../models/User';
 import { sendToTokens } from '../services/notification/fcm.service';
 import { sendJobAlertEmail } from '../services/notification/email.service';
 import { sendJobAlertWhatsApp } from '../services/notification/whatsapp.service';
+import { trackedCron, getCronSchedule } from '../utils/cronTracker';
 
 let alertTask: ScheduledTask | null = null;
 let isRunning = false;
@@ -167,14 +170,15 @@ export const checkAlertsNow = async (): Promise<void> => {
 };
 
 export const startAlertCheckerCron = (): void => {
-  if (!env.CRON_ENABLED) return;
-  if (!cron.validate(CRON_ALERT_SCHEDULE)) {
-    logger.error(`Invalid alert cron expression: ${CRON_ALERT_SCHEDULE}`);
+  if (!cronsEnabled()) return;
+  const schedule = getCronSchedule('alertChecker');
+  if (!cron.validate(schedule)) {
+    logger.error(`Invalid alert cron expression: ${schedule}`);
     return;
   }
   alertTask = cron.schedule(
-    CRON_ALERT_SCHEDULE,
-    async () => {
+    schedule,
+    trackedCron('alertChecker', async () => {
       if (isRunning) {
         logger.warn('Alerts: previous tick still running — skipping');
         return;
@@ -184,15 +188,13 @@ export const startAlertCheckerCron = (): void => {
       try {
         await checkAlertsNow();
         logger.info(`Alerts: tick complete in ${Date.now() - start}ms`);
-      } catch (err) {
-        logger.error('Alerts: cron tick failed', err);
       } finally {
         isRunning = false;
       }
-    },
+    }),
     { timezone: 'Asia/Kolkata' },
   );
-  logger.info(`Alerts cron scheduled: "${CRON_ALERT_SCHEDULE}"`);
+  logger.info(`Alerts cron scheduled: "${schedule}"`);
 };
 
 export const stopAlertCheckerCron = (): void => {

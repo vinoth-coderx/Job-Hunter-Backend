@@ -4,12 +4,23 @@ import { z } from 'zod';
 dotenv.config();
 
 /**
- * Environment schema — secrets and per-deployment overrides only.
+ * Bootstrap-essential environment variables.
  *
- * Project-wide constants (cron schedules, JWT lifetimes, freshness
- * windows, SMTP host, third-party API hosts, etc.) live in
- * `src/config/constants.ts` and are imported directly. Don't add
- * non-sensitive defaults here.
+ * Only values needed BEFORE the AppConfig DB cache is hydrated live
+ * here: what the process must know to connect to Mongo, decrypt
+ * AppConfig secrets, accept incoming requests, and sign JWTs.
+ *
+ * Everything else (Cloudinary, Razorpay, Stripe, SMTP, Firebase,
+ * job-board APIs, AI provider keys, cron toggle, …) lives in the
+ * admin-managed `app_configs` collection and is read via
+ * `getAppConfig(KEY)`. Those keys are still respected as `process.env`
+ * fallbacks at runtime — `getAppConfig` checks `process.env[KEY]` on
+ * cache miss — so a fresh install can boot from a `.env` file before
+ * the admin populates the DB.
+ *
+ * Project-wide non-secret constants (cron schedules, JWT lifetimes,
+ * freshness windows, SMTP host/port, third-party API hosts, etc.) live
+ * in `src/config/constants.ts` and are imported directly.
  */
 const envSchema = z.object({
   // ── Runtime ─────────────────────────────────────────────
@@ -17,65 +28,30 @@ const envSchema = z.object({
   PORT: z.string().default('5000').transform(Number),
   CLIENT_URL: z.string().default('http://localhost:3000'),
 
-  // ── MongoDB ─────────────────────────────────────────────
+  // ── MongoDB (must connect before we can read AppConfig) ─
   // MONGODB_URI is the test/dev cluster (used when NODE_ENV !== 'production').
   // MONGODB_URI_PROD is the production cluster (used only when NODE_ENV === 'production').
   // If MONGODB_URI_PROD is missing in production, the loader falls back to MONGODB_URI.
   MONGODB_URI: z.string(),
   MONGODB_URI_PROD: z.string().optional(),
 
-  // ── Redis ───────────────────────────────────────────────
+  // ── Redis (queues + caches; needed before any request) ──
   REDIS_HOST: z.string().default('localhost'),
   REDIS_PORT: z.string().default('6379').transform(Number),
   REDIS_USERNAME: z.string().optional(),
   REDIS_PASSWORD: z.string().optional(),
   REDIS_TLS: z.string().default('auto'),
 
-  // ── JWT (secrets only — lifetimes are in constants.ts) ──
+  // ── JWT signing secrets (must exist to mint a token) ────
   JWT_SECRET: z.string().min(32),
   JWT_REFRESH_SECRET: z.string().min(32),
 
-  // ── Job-board APIs (keys only) ──────────────────────────
-  ADZUNA_APP_ID: z.string().optional(),
-  ADZUNA_APP_KEY: z.string().optional(),
-  SERPAPI_KEY: z.string().optional(),
-  RAPIDAPI_KEY: z.string().optional(),
-  THEIRSTACK_API_KEY: z.string().optional(),
-
-  // ── AI ──────────────────────────────────────────────────
-  // Provider switch: 'gemini' (free tier, default) → swap to 'claude' once
-  // user volume justifies the spend. Each AI service routes through
-  // services/ai/providers/index.ts so swapping requires no service changes.
-  AI_PROVIDER: z.enum(['gemini', 'claude']).default('gemini'),
-  ANTHROPIC_API_KEY: z.string().optional(),
-  GEMINI_API_KEY: z.string().optional(),
-
-  // ── Cron toggle (per-env: prod=true, tests=false) ───────
-  CRON_ENABLED: z.string().default('true').transform((v) => v === 'true'),
-
-  // ── Email (credentials only) ────────────────────────────
-  SMTP_USER: z.string().optional(),
-  SMTP_PASS: z.string().optional(),
-
-  // ── Subscriptions (Razorpay primary, Stripe optional) ───
-  RAZORPAY_KEY_ID: z.string().optional(),
-  RAZORPAY_KEY_SECRET: z.string().optional(),
-  RAZORPAY_WEBHOOK_SECRET: z.string().optional(),
-  // Test keys — only honoured for debug-build clients in non-prod envs.
-  RAZORPAY_TEST_KEY_ID: z.string().optional(),
-  RAZORPAY_TEST_KEY_SECRET: z.string().optional(),
-  RAZORPAY_TEST_WEBHOOK_SECRET: z.string().optional(),
-  STRIPE_SECRET_KEY: z.string().optional(),
-  STRIPE_WEBHOOK_SECRET: z.string().optional(),
-
-  // ── Firebase (FCM push + Auth ID-token verification) ───
-  FIREBASE_SERVICE_ACCOUNT_PATH: z.string().optional(),
-  FIREBASE_PROJECT_ID: z.string().optional(),
-
-  // ── Cloudinary (file storage) ───────────────────────────
-  CLOUDINARY_CLOUD_NAME: z.string().optional(),
-  CLOUDINARY_API_KEY: z.string().optional(),
-  CLOUDINARY_API_SECRET: z.string().optional(),
+  // ── At-rest encryption master key ───────────────────────
+  // Required to decrypt admin-managed AppConfig secrets (Cloudinary
+  // creds, Razorpay keys, …). Optional in dev so the backend still
+  // boots without it; getAppConfig falls back to process.env for any
+  // key that hasn't been migrated. Generate with: `openssl rand -hex 32`.
+  CRYPTO_MASTER_KEY: z.string().length(64).optional(),
 });
 
 const parsed = envSchema.safeParse(process.env);

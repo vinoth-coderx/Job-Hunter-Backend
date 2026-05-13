@@ -1,10 +1,16 @@
 import cron, { ScheduledTask } from 'node-cron';
-import { env } from '../config/env';
+import { getAppConfig } from '../services/config/config.service';
 import { logger } from '../utils/logger';
+
+// A cron toggle stored as a string ('true'/'false') in AppConfig or as
+// the legacy boolean env var. Default = enabled; only the explicit
+// "false" string flips it off.
+const cronsEnabled = (): boolean => getAppConfig('CRON_ENABLED') !== 'false';
 import { fetchAllJobs } from '../services/scrapers';
 import { Subscription } from '../models/Subscription';
 import { User } from '../models/User';
 import { AppliedJob } from '../models/AppliedJob';
+import { trackedCron, getCronSchedule } from '../utils/cronTracker';
 
 // Third-party jobs are fetched live per request now (see jobFeed.service),
 // so the hourly fetch-and-store cron is retired. This module still owns
@@ -27,60 +33,70 @@ export const APPLIED_JOB_RETENTION_DAYS = 90;
 // "show all history" toggle can still surface the buffered records.
 export const APPLIED_JOB_VIEW_DAYS = 30;
 
+/**
+ * Extracted cron bodies — named exports so the admin "Run Now" endpoint
+ * can invoke the same code path the scheduler uses, without duplicating
+ * the logic inline inside `cron.schedule()` callbacks.
+ */
+export const runSubscriptionCheckNow = async (): Promise<void> => {
+  logger.info('Cron: expiring stale subscriptions');
+  const expired = await Subscription.updateMany(
+    { status: 'active', endDate: { $lt: new Date() } },
+    { $set: { status: 'expired' } },
+  );
+  if (expired.modifiedCount > 0) {
+    const expiredSubs = await Subscription.find({ status: 'expired' }).distinct('user');
+    await User.updateMany(
+      { _id: { $in: expiredSubs } },
+      { $set: { 'subscription.tier': 'free', 'subscription.status': 'expired' } },
+    );
+    logger.info(`Expired ${expired.modifiedCount} subscriptions`);
+  }
+};
+
+export const runAppliedJobsCleanupNow = async (): Promise<void> => {
+  const cutoff = new Date(
+    Date.now() - APPLIED_JOB_RETENTION_DAYS * 24 * 60 * 60 * 1000,
+  );
+  const result = await AppliedJob.deleteMany({ appliedAt: { $lt: cutoff } });
+  if (result.deletedCount > 0) {
+    logger.info(
+      `Cron: purged ${result.deletedCount} applied-job records older than ${APPLIED_JOB_RETENTION_DAYS} days`,
+    );
+  }
+};
+
 export const startJobScraperCron = (): void => {
-  if (!env.CRON_ENABLED) {
+  if (!cronsEnabled()) {
     logger.info('Cron disabled by config');
     return;
   }
 
-  subscriptionCheckerTask = cron.schedule(
-    '0 0 * * *',
-    async () => {
-      try {
-        logger.info('Cron: expiring stale subscriptions');
-        const expired = await Subscription.updateMany(
-          { status: 'active', endDate: { $lt: new Date() } },
-          { $set: { status: 'expired' } },
-        );
-        if (expired.modifiedCount > 0) {
-          const expiredSubs = await Subscription.find({ status: 'expired' }).distinct('user');
-          await User.updateMany(
-            { _id: { $in: expiredSubs } },
-            { $set: { 'subscription.tier': 'free', 'subscription.status': 'expired' } },
-          );
-          logger.info(`Expired ${expired.modifiedCount} subscriptions`);
-        }
-      } catch (err) {
-        logger.error('Cron: subscription expiry check failed', err);
-      }
-    },
-    { timezone: 'Asia/Kolkata' },
-  );
+  const subSchedule = getCronSchedule('subscriptionChecker');
+  const cleanupSchedule = getCronSchedule('appliedJobsCleanup');
 
-  // Nightly cleanup of applied-job records older than the retention window.
-  // Runs at 02:00 IST so it doesn't overlap the daily subscription check.
-  appliedJobsCleanupTask = cron.schedule(
-    '0 2 * * *',
-    async () => {
-      try {
-        const cutoff = new Date(
-          Date.now() - APPLIED_JOB_RETENTION_DAYS * 24 * 60 * 60 * 1000,
-        );
-        const result = await AppliedJob.deleteMany({ appliedAt: { $lt: cutoff } });
-        if (result.deletedCount > 0) {
-          logger.info(
-            `Cron: purged ${result.deletedCount} applied-job records older than ${APPLIED_JOB_RETENTION_DAYS} days`,
-          );
-        }
-      } catch (err) {
-        logger.error('Cron: applied-jobs cleanup failed', err);
-      }
-    },
-    { timezone: 'Asia/Kolkata' },
-  );
+  if (!cron.validate(subSchedule)) {
+    logger.error(`Invalid subscriptionChecker cron: ${subSchedule}`);
+  } else {
+    subscriptionCheckerTask = cron.schedule(
+      subSchedule,
+      trackedCron('subscriptionChecker', runSubscriptionCheckNow),
+      { timezone: 'Asia/Kolkata' },
+    );
+  }
+
+  if (!cron.validate(cleanupSchedule)) {
+    logger.error(`Invalid appliedJobsCleanup cron: ${cleanupSchedule}`);
+  } else {
+    appliedJobsCleanupTask = cron.schedule(
+      cleanupSchedule,
+      trackedCron('appliedJobsCleanup', runAppliedJobsCleanupNow),
+      { timezone: 'Asia/Kolkata' },
+    );
+  }
 
   logger.info(
-    `Cron scheduled — sub check: daily 00:00, applied-jobs cleanup: daily 02:00 (>${APPLIED_JOB_RETENTION_DAYS}d)`,
+    `Cron scheduled — sub check: "${subSchedule}", applied-jobs cleanup: "${cleanupSchedule}" (>${APPLIED_JOB_RETENTION_DAYS}d)`,
   );
 };
 

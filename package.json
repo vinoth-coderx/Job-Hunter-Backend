@@ -6,6 +6,8 @@
   "scripts": {
     "dev": "nodemon",
     "fetch:jobs": "tsx scripts/fetch-jobs.ts",
+    "seed:admin": "tsx scripts/seed-admin.ts",
+    "seed:config": "tsx scripts/seed-config-from-env.ts",
     "build": "tsc",
     "start": "node dist/index.js",
     "lint": "eslint src --ext .ts",

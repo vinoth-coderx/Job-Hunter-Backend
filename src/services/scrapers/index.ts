@@ -4,10 +4,14 @@ import { RapidApiScraper } from './rapidapi.service';
 import { ArbeitnowScraper } from './arbeitnow.service';
 import { TheirStackScraper } from './theirstack.service';
 import { PuppeteerScraper } from './puppeteer.service';
+import { GenericApiScraper } from './generic.service';
 import { Job } from '../../models/Job';
 import { ScrapedJob } from '../../types';
 import { logger } from '../../utils/logger';
 import { JOB_FRESHNESS_DAYS } from '../../config/constants';
+import { recordScraperRun } from '../../utils/scraperTracker';
+import { getJobSourceConfigs } from '../jobSourceConfig.service';
+import { IJobSourceConfig } from '../../models/JobSourceConfig';
 
 const adzuna = new AdzunaScraper();
 const serp = new SerpApiScraper();
@@ -48,7 +52,23 @@ export const fetchAllJobs = async (opts: FetchOptions = {}): Promise<{
 
   logger.info(`Starting job fetch: ${queries.length} queries x ${locations.length} locations`);
 
-  for (const s of [adzuna, serp, rapid, arbeitnow, theirstack, puppeteerScraper]) {
+  // Admin-managed enablement: each source must have an enabled row in
+  // JobSourceConfig. A missing row is treated as enabled (graceful
+  // fallback if the seed hasn't run yet, e.g. during tests).
+  const sourceCfgs = await getJobSourceConfigs().catch(() => [] as IJobSourceConfig[]);
+  const disabled = new Set(
+    sourceCfgs.filter((c) => !c.enabled).map((c) => c.source),
+  );
+  const isOn = (source: string): boolean => !disabled.has(source);
+
+  // Build a fresh GenericApiScraper per enabled generic source. These
+  // aren't long-lived singletons because the admin can change config
+  // (endpoint, headers, mapping) between runs.
+  const genericScrapers: GenericApiScraper[] = sourceCfgs
+    .filter((c) => c.type === 'generic' && c.enabled && c.generic)
+    .map((c) => new GenericApiScraper(c));
+
+  for (const s of [adzuna, serp, rapid, arbeitnow, theirstack, puppeteerScraper, ...genericScrapers]) {
     s.resetForNewRun();
   }
 
@@ -61,28 +81,59 @@ export const fetchAllJobs = async (opts: FetchOptions = {}): Promise<{
     theirstack: 0,
     puppeteer: 0,
   };
+  // Seed bySource counters for generic sources so the tracker rollup
+  // includes them even when zero jobs come back.
+  for (const g of genericScrapers) {
+    bySource[g.source] = 0;
+  }
+  // Per-source instrumentation for the admin Job Sources dashboard.
+  // Duration is the sum of every fetch() call's wall time for that
+  // source across the query×location matrix; errors counts how many of
+  // those calls rejected (Promise.allSettled buckets them as 'rejected').
+  const sourceDurationMs: Record<string, number> = {};
+  const sourceErrors: Record<string, number> = {};
+
+  // Stable index → source map so we can label settled results without
+  // repeating the source name in every push below.
+  const buildTasks = (
+    query: string,
+    location: string,
+  ): Array<{ source: string; promise: Promise<ScrapedJob[]>; started: number }> => {
+    const taskList: Array<{ source: string; promise: Promise<ScrapedJob[]>; started: number }> = [];
+    const time = (source: string, p: Promise<ScrapedJob[]>) => {
+      const started = Date.now();
+      taskList.push({ source, promise: p, started });
+    };
+    if (isOn('adzuna')) time('adzuna', adzuna.fetch(query, location));
+    if (isOn('serpapi')) time('serpapi', serp.fetch(query, location));
+    if (isOn('rapidapi')) time('rapidapi', rapid.fetch(query, location));
+    if (isOn('arbeitnow')) time('arbeitnow', arbeitnow.fetch(query, location));
+    if (isOn('theirstack')) time('theirstack', theirstack.fetch(query, location));
+    if (usePuppeteer && isOn('puppeteer'))
+      time('puppeteer', puppeteerScraper.fetch(query, location));
+    for (const g of genericScrapers) {
+      time(g.source, g.fetch(query, location));
+    }
+    return taskList;
+  };
 
   for (const query of queries) {
     for (const location of locations) {
-      // arbeitnow + theirstack self-throttle to one fetch per run; safe
-      // to invoke inside the loop — subsequent calls return [].
-      const tasks = [
-        adzuna.fetch(query, location),
-        serp.fetch(query, location),
-        rapid.fetch(query, location),
-        arbeitnow.fetch(query, location),
-        theirstack.fetch(query, location),
-      ];
-      if (usePuppeteer) tasks.push(puppeteerScraper.fetch(query, location));
+      const tasks = buildTasks(query, location);
+      const results = await Promise.allSettled(tasks.map((t) => t.promise));
 
-      const results = await Promise.allSettled(tasks);
-
-      for (const r of results) {
+      for (let i = 0; i < results.length; i++) {
+        const t = tasks[i];
+        const r = results[i];
+        sourceDurationMs[t.source] =
+          (sourceDurationMs[t.source] || 0) + (Date.now() - t.started);
         if (r.status === 'fulfilled') {
           for (const j of r.value) {
             all.push(j);
             bySource[j.source] = (bySource[j.source] || 0) + 1;
           }
+        } else {
+          sourceErrors[t.source] = (sourceErrors[t.source] || 0) + 1;
         }
       }
     }
@@ -94,6 +145,8 @@ export const fetchAllJobs = async (opts: FetchOptions = {}): Promise<{
 
   let inserted = 0;
   let updated = 0;
+  const insertedBySource: Record<string, number> = {};
+  const updatedBySource: Record<string, number> = {};
 
   for (const j of all) {
     try {
@@ -120,8 +173,13 @@ export const fetchAllJobs = async (opts: FetchOptions = {}): Promise<{
         },
         { upsert: true },
       );
-      if (result.upsertedCount > 0) inserted++;
-      else if (result.modifiedCount > 0) updated++;
+      if (result.upsertedCount > 0) {
+        inserted++;
+        insertedBySource[j.source] = (insertedBySource[j.source] || 0) + 1;
+      } else if (result.modifiedCount > 0) {
+        updated++;
+        updatedBySource[j.source] = (updatedBySource[j.source] || 0) + 1;
+      }
     } catch (err) {
       logger.warn('Failed to upsert job', { id: j.externalId, source: j.source, err });
     }
@@ -133,6 +191,22 @@ export const fetchAllJobs = async (opts: FetchOptions = {}): Promise<{
   logger.info(
     `Job fetch complete — total: ${all.length}, inserted: ${inserted}, updated: ${updated}`,
     bySource,
+  );
+
+  // Persist per-source rollup so the admin dashboard can render
+  // last-run / 24h aggregates. Best-effort: tracker errors are swallowed
+  // inside [recordScraperRun] so they can't bubble up and fail the run.
+  const sources = Object.keys(bySource);
+  await Promise.all(
+    sources.map((source) =>
+      recordScraperRun(source, {
+        total: bySource[source] || 0,
+        inserted: insertedBySource[source] || 0,
+        updated: updatedBySource[source] || 0,
+        errors: sourceErrors[source] || 0,
+        durationMs: sourceDurationMs[source] || 0,
+      }),
+    ),
   );
 
   return { total: all.length, inserted, updated, bySource };
@@ -162,16 +236,27 @@ export const fetchAllJobsLive = async (
   const seen = new Set<string>();
   const out: ScrapedJob[] = [];
 
+  const sourceCfgs = await getJobSourceConfigs().catch(() => [] as IJobSourceConfig[]);
+  const disabled = new Set(
+    sourceCfgs.filter((c) => !c.enabled).map((c) => c.source),
+  );
+  const isOn = (source: string): boolean => !disabled.has(source);
+  const genericScrapers: GenericApiScraper[] = sourceCfgs
+    .filter((c) => c.type === 'generic' && c.enabled && c.generic)
+    .map((c) => new GenericApiScraper(c));
+
   for (const query of queries) {
     for (const location of locations) {
-      const tasks: Promise<ScrapedJob[]>[] = [
-        adzuna.fetch(query, location),
-        serp.fetch(query, location),
-        rapid.fetch(query, location),
-      ];
+      const tasks: Promise<ScrapedJob[]>[] = [];
+      if (isOn('adzuna')) tasks.push(adzuna.fetch(query, location));
+      if (isOn('serpapi')) tasks.push(serp.fetch(query, location));
+      if (isOn('rapidapi')) tasks.push(rapid.fetch(query, location));
       if (includeBulk) {
-        tasks.push(arbeitnow.fetch(query, location));
-        tasks.push(theirstack.fetch(query, location));
+        if (isOn('arbeitnow')) tasks.push(arbeitnow.fetch(query, location));
+        if (isOn('theirstack')) tasks.push(theirstack.fetch(query, location));
+      }
+      for (const g of genericScrapers) {
+        tasks.push(g.fetch(query, location));
       }
 
       const results = await Promise.allSettled(tasks);

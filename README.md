@@ -65,7 +65,6 @@ Base: `http://localhost:5000/api/v1`
 - `GET /jobs` — Public list with search/filter: `?q=&location=&skills=react,node&jobType=full-time&remoteType=remote&minSalary=500000&page=1&limit=20`
 - `GET /jobs/:id` — Job detail
 - `GET /jobs/matched` (auth) — AI-matched jobs for the user (>= 80% match by default). Add `?ai=true` for Claude-powered matching, `?threshold=70` to lower bar
-- `POST /jobs/admin/fetch` (admin) — Manually trigger scraper
 
 ### Applied
 - `GET /applied` (auth) — List user's applied jobs
@@ -154,7 +153,7 @@ API endpoints are protected against the most common attack vectors:
 - **Brute-force lockout** — 6 failed login attempts per `email+IP` within 15 min → account locked for 30 min (Redis-backed)
 - **Adaptive slow-down** — Repeat offenders get progressive delays (up to 2s) before request handling
 - **JWT short-lived access + rotating refresh** — Refresh tokens stored hashed in user doc, max 5 active per user, single-use rotation
-- **Optional HMAC request signing** — `requireSignedRequest` middleware validates `X-Signature`, `X-Timestamp`, `X-Nonce` (HMAC-SHA256 over method + URL + ts + nonce + body), with 5-min freshness window and Redis nonce-replay protection. Apply to high-value routes (payments, admin):
+- **Optional HMAC request signing** — `requireSignedRequest` middleware validates `X-Signature`, `X-Timestamp`, `X-Nonce` (HMAC-SHA256 over method + URL + ts + nonce + body), with 5-min freshness window and Redis nonce-replay protection. Apply to high-value routes (e.g. payments):
   ```ts
   router.post('/payment', requireSignedRequest, controller.handle);
   ```

@@ -6,10 +6,12 @@ import {
   deleteAccount,
   switchRole,
   updateNotificationPrefs,
+  updateResumeProfile,
   updateProfileSchema,
   changePasswordSchema,
   switchRoleSchema,
   notificationPrefsSchema,
+  updateResumeProfileSchema,
 } from '../controllers/user.controller';
 import {
   uploadResumeHandler,
@@ -39,6 +41,11 @@ const router = Router();
 router.use(authenticate);
 
 router.patch('/profile', validate(updateProfileSchema), updateProfile);
+router.patch(
+  '/resume-profile',
+  validate(updateResumeProfileSchema),
+  updateResumeProfile,
+);
 router.post('/change-password', validate(changePasswordSchema), changePassword);
 router.post('/switch-role', validate(switchRoleSchema), switchRole);
 router.put(

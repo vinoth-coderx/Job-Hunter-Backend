@@ -12,11 +12,18 @@ export interface IUser extends Document {
   // can coexist on one record (e.g. local password + later Firebase).
   firebaseUid?: string;
   authProvider: 'local' | 'google' | 'firebase';
-  role: 'user' | 'admin';
   // Which side of the app the user is currently using.
   // Both modes share the same User document; the hirer side is gated
   // additionally on the existence of a HirerProfile.
   activeRole: 'seeker' | 'hirer';
+  // Orthogonal to activeRole — a hirer or seeker can also be an admin.
+  // Grants access to /api/v1/admin/*; does not replace activeRole.
+  isAdmin: boolean;
+  // Ban flag toggled from /admin/users/:id/ban. Banned users keep
+  // their document for history; the auth middleware rejects them.
+  isBanned: boolean;
+  bannedAt?: Date;
+  banReason?: string;
   isEmailVerified: boolean;
   emailVerificationToken?: string;
   passwordResetToken?: string;
@@ -59,6 +66,74 @@ export interface IUser extends Document {
       mimeType: string;
       size: number;
       uploadedAt: Date;
+    };
+    // Structured resume profile — kept separate from `skills`,
+    // `experienceYears`, `preferredLocations` etc. above (those remain
+    // the canonical fields used by the matching engine and onboarding
+    // answers). This subdoc holds the long-form Naukri-style sections
+    // shown on the "My Profile" screen, persisted so a reinstall or
+    // device switch doesn't blank them out.
+    resumeProfile?: {
+      profileSummary?: string;
+      employments?: {
+        designation: string;
+        company: string;
+        period: string;
+        current: boolean;
+      }[];
+      educations?: {
+        degree: string;
+        institute: string;
+        period: string;
+        type: string;
+        projects: string[];
+      }[];
+      itSkills?: {
+        skill: string;
+        version: string;
+        lastUsed: string;
+        experience: string;
+      }[];
+      projects?: {
+        title: string;
+        company: string;
+        type: string;
+        period: string;
+        description: string;
+      }[];
+      languages?: {
+        language: string;
+        proficiency: string;
+        read: boolean;
+        write: boolean;
+        speak: boolean;
+      }[];
+      accomplishments?: {
+        type: string;
+        label: string;
+        value: string;
+      }[];
+      careerProfile?: {
+        currentIndustry: string;
+        department: string;
+        roleCategory: string;
+        jobRole: string;
+        desiredJobType: string;
+        desiredEmploymentType: string;
+        preferredShift: string;
+        preferredLocation: string;
+        expectedSalary: string;
+      };
+      personalDetails?: {
+        gender: string;
+        maritalStatus: string;
+        dob: string;
+        category: string;
+        workPermit: string;
+        address: string;
+      };
+      diversityNote?: string;
+      updatedAt?: Date;
     };
   };
   subscription: {
@@ -119,8 +194,11 @@ const userSchema = new Schema<IUser>(
     googleId: { type: String, sparse: true, unique: true },
     firebaseUid: { type: String, sparse: true, unique: true },
     authProvider: { type: String, enum: ['local', 'google', 'firebase'], default: 'local' },
-    role: { type: String, enum: ['user', 'admin'], default: 'user' },
     activeRole: { type: String, enum: ['seeker', 'hirer'], default: 'seeker', index: true },
+    isAdmin: { type: Boolean, default: false, index: true },
+    isBanned: { type: Boolean, default: false, index: true },
+    bannedAt: Date,
+    banReason: String,
     isEmailVerified: { type: Boolean, default: false },
     emailVerificationToken: String,
     passwordResetToken: String,
@@ -173,6 +251,104 @@ const userSchema = new Schema<IUser>(
         mimeType: String,
         size: Number,
         uploadedAt: Date,
+      },
+      resumeProfile: {
+        profileSummary: String,
+        employments: {
+          type: [
+            {
+              _id: false,
+              designation: { type: String, default: '' },
+              company: { type: String, default: '' },
+              period: { type: String, default: '' },
+              current: { type: Boolean, default: false },
+            },
+          ],
+          default: [],
+        },
+        educations: {
+          type: [
+            {
+              _id: false,
+              degree: { type: String, default: '' },
+              institute: { type: String, default: '' },
+              period: { type: String, default: '' },
+              type: { type: String, default: 'Full Time' },
+              projects: { type: [String], default: [] },
+            },
+          ],
+          default: [],
+        },
+        itSkills: {
+          type: [
+            {
+              _id: false,
+              skill: { type: String, default: '' },
+              version: { type: String, default: '-' },
+              lastUsed: { type: String, default: '' },
+              experience: { type: String, default: '' },
+            },
+          ],
+          default: [],
+        },
+        projects: {
+          type: [
+            {
+              _id: false,
+              title: { type: String, default: '' },
+              company: { type: String, default: '' },
+              type: { type: String, default: 'Full Time' },
+              period: { type: String, default: '' },
+              description: { type: String, default: '' },
+            },
+          ],
+          default: [],
+        },
+        languages: {
+          type: [
+            {
+              _id: false,
+              language: { type: String, default: '' },
+              proficiency: { type: String, default: 'Intermediate' },
+              read: { type: Boolean, default: true },
+              write: { type: Boolean, default: true },
+              speak: { type: Boolean, default: true },
+            },
+          ],
+          default: [],
+        },
+        accomplishments: {
+          type: [
+            {
+              _id: false,
+              type: { type: String, default: '' },
+              label: { type: String, default: '' },
+              value: { type: String, default: '' },
+            },
+          ],
+          default: [],
+        },
+        careerProfile: {
+          currentIndustry: { type: String, default: '' },
+          department: { type: String, default: '' },
+          roleCategory: { type: String, default: '' },
+          jobRole: { type: String, default: '' },
+          desiredJobType: { type: String, default: '' },
+          desiredEmploymentType: { type: String, default: '' },
+          preferredShift: { type: String, default: '' },
+          preferredLocation: { type: String, default: '' },
+          expectedSalary: { type: String, default: '' },
+        },
+        personalDetails: {
+          gender: { type: String, default: '' },
+          maritalStatus: { type: String, default: '' },
+          dob: { type: String, default: '' },
+          category: { type: String, default: '' },
+          workPermit: { type: String, default: '' },
+          address: { type: String, default: '' },
+        },
+        diversityNote: { type: String, default: '' },
+        updatedAt: Date,
       },
     },
     subscription: {

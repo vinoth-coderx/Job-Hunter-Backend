@@ -2,7 +2,7 @@ import { Response, NextFunction } from 'express';
 import { verifyAccessToken } from '../utils/jwt';
 import { ApiError } from '../utils/ApiError';
 import { User } from '../models/User';
-import { AuthRequest, UserRole } from '../types';
+import { AuthRequest } from '../types';
 
 export const authenticate = async (
   req: AuthRequest,
@@ -32,14 +32,23 @@ export const authenticate = async (
       throw ApiError.forbidden('Sign in with a full account to use this feature');
     }
 
-    const user = await User.findById(payload.userId).select('email role subscription');
+    const user = await User.findById(payload.userId).select(
+      'email subscription isBanned banReason',
+    );
     if (!user) throw ApiError.unauthorized('User not found');
+    if (user.isBanned) {
+      throw ApiError.forbidden(
+        user.banReason
+          ? `Account suspended: ${user.banReason}`
+          : 'Account suspended',
+      );
+    }
 
     req.user = {
       _id: user._id,
       id: user._id.toString(),
       email: user.email,
-      role: user.role,
+      role: 'user',
       subscription: user.subscription.tier,
     };
 
@@ -85,14 +94,23 @@ export const authenticateOrGuest = async (
       return next();
     }
 
-    const user = await User.findById(payload.userId).select('email role subscription');
+    const user = await User.findById(payload.userId).select(
+      'email subscription isBanned banReason',
+    );
     if (!user) throw ApiError.unauthorized('User not found');
+    if (user.isBanned) {
+      throw ApiError.forbidden(
+        user.banReason
+          ? `Account suspended: ${user.banReason}`
+          : 'Account suspended',
+      );
+    }
 
     req.user = {
       _id: user._id,
       id: user._id.toString(),
       email: user.email,
-      role: user.role,
+      role: 'user',
       subscription: user.subscription.tier,
     };
     next();
@@ -123,13 +141,13 @@ export const optionalAuth = async (
       return next();
     }
 
-    const user = await User.findById(payload.userId).select('email role subscription');
+    const user = await User.findById(payload.userId).select('email subscription');
     if (user) {
       req.user = {
         _id: user._id,
         id: user._id.toString(),
         email: user.email,
-        role: user.role,
+        role: 'user',
         subscription: user.subscription.tier,
       };
     }
@@ -138,11 +156,3 @@ export const optionalAuth = async (
     next();
   }
 };
-
-export const authorize =
-  (...roles: Array<UserRole>) =>
-  (req: AuthRequest, _res: Response, next: NextFunction): void => {
-    if (!req.user) return next(ApiError.unauthorized());
-    if (!roles.includes(req.user.role)) return next(ApiError.forbidden('Insufficient permissions'));
-    next();
-  };

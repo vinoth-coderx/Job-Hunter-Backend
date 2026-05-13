@@ -18,30 +18,48 @@
 
 import { v2 as cloudinary, type UploadApiOptions } from 'cloudinary';
 import { Readable } from 'node:stream';
-import { env } from './env';
+import { getAppConfig } from '../services/config/config.service';
 import { logger } from '../utils/logger';
 
-let configured = false;
+// Credentials key names — kept identical to the legacy env var names
+// so admin operators can mentally map old `.env` rows to new admin
+// panel entries 1:1.
+const KEY_CLOUD_NAME = 'CLOUDINARY_CLOUD_NAME';
+const KEY_API_KEY = 'CLOUDINARY_API_KEY';
+const KEY_API_SECRET = 'CLOUDINARY_API_SECRET';
+
+let configuredFor: string | null = null;
+
+const readCreds = (): {
+  cloudName: string | null;
+  apiKey: string | null;
+  apiSecret: string | null;
+} => ({
+  cloudName: getAppConfig(KEY_CLOUD_NAME),
+  apiKey: getAppConfig(KEY_API_KEY),
+  apiSecret: getAppConfig(KEY_API_SECRET),
+});
 
 const ensureConfigured = (): boolean => {
-  if (configured) return true;
-  const { CLOUDINARY_CLOUD_NAME, CLOUDINARY_API_KEY, CLOUDINARY_API_SECRET } = env;
-  if (!CLOUDINARY_CLOUD_NAME || !CLOUDINARY_API_KEY || !CLOUDINARY_API_SECRET) {
-    return false;
-  }
+  const { cloudName, apiKey, apiSecret } = readCreds();
+  if (!cloudName || !apiKey || !apiSecret) return false;
+  // Re-apply config if the cloud_name changed (admin rotated creds).
+  if (configuredFor === cloudName) return true;
   cloudinary.config({
-    cloud_name: CLOUDINARY_CLOUD_NAME,
-    api_key: CLOUDINARY_API_KEY,
-    api_secret: CLOUDINARY_API_SECRET,
+    cloud_name: cloudName,
+    api_key: apiKey,
+    api_secret: apiSecret,
     secure: true,
   });
-  configured = true;
-  logger.info(`Cloudinary configured (cloud_name=${CLOUDINARY_CLOUD_NAME})`);
+  configuredFor = cloudName;
+  logger.info(`Cloudinary configured (cloud_name=${cloudName})`);
   return true;
 };
 
-export const isCloudinaryConfigured = (): boolean =>
-  Boolean(env.CLOUDINARY_CLOUD_NAME && env.CLOUDINARY_API_KEY && env.CLOUDINARY_API_SECRET);
+export const isCloudinaryConfigured = (): boolean => {
+  const { cloudName, apiKey, apiSecret } = readCreds();
+  return Boolean(cloudName && apiKey && apiSecret);
+};
 
 // Folder layout — hardcoded; only credentials are sensitive.
 export const CLOUDINARY_FOLDERS = {

@@ -8,6 +8,7 @@ import { ApiError } from '../utils/ApiError';
 import { AuthRequest, SubscriptionTier } from '../types';
 import { logger } from '../utils/logger';
 import { env } from '../config/env';
+import { getAppConfig } from '../services/config/config.service';
 import {
   createRazorpayOrder,
   verifyPaymentSignature,
@@ -530,8 +531,8 @@ export const razorpayWebhook = asyncHandler(async (req: Request, res: Response) 
   // (test or live) sent this delivery — and that's the mode we must use
   // when fetching the order/payment back. A single backend can serve both
   // modes when test webhook is also configured in Razorpay dashboard.
-  const liveSecret = env.RAZORPAY_WEBHOOK_SECRET;
-  const testSecret = env.RAZORPAY_TEST_WEBHOOK_SECRET;
+  const liveSecret = getAppConfig('RAZORPAY_WEBHOOK_SECRET');
+  const testSecret = getAppConfig('RAZORPAY_TEST_WEBHOOK_SECRET');
   if (!liveSecret && !testSecret) {
     logger.error('No Razorpay webhook secrets configured (live or test); rejecting');
     throw ApiError.internal('Webhook not configured');

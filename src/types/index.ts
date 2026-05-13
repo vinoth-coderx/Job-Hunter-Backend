@@ -1,6 +1,6 @@
 import { Request } from 'express';
 
-export type UserRole = 'user' | 'admin' | 'guest';
+export type UserRole = 'user' | 'guest';
 
 export interface JwtPayload {
   userId: string;
@@ -12,7 +12,11 @@ export type AuthRequest = Request;
 
 export type SubscriptionTier = 'free' | 'weekly' | 'monthly' | 'yearly';
 export type SubscriptionStatus = 'active' | 'expired' | 'cancelled' | 'refunded';
-export type JobSource =
+// `source` is now an admin-managed string (see models/JobSourceConfig).
+// The known builtins below stay as literals so existing literal checks
+// in code don't break, but any other slug an admin registers is also
+// valid at runtime. Use `string` shape to mean "any registered source".
+export type KnownJobSource =
   | 'native'
   | 'adzuna'
   | 'serpapi'
@@ -21,6 +25,7 @@ export type JobSource =
   | 'theirstack'
   | 'puppeteer'
   | 'playwright';
+export type JobSource = KnownJobSource | (string & {});
 export type JobType = 'full-time' | 'part-time' | 'contract' | 'internship' | 'temporary' | 'unknown';
 export type RemoteType = 'remote' | 'hybrid' | 'onsite' | 'unknown';
 export type JobStatus = 'draft' | 'active' | 'paused' | 'closed' | 'expired';

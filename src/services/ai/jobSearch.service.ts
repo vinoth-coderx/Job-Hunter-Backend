@@ -3,7 +3,7 @@ import { JOB_FRESHNESS_DAYS } from '../../config/constants';
 import { logger } from '../../utils/logger';
 import { redis } from '../../config/redis';
 import { Job, IJob } from '../../models/Job';
-import { generateJson, isAiEnabled } from './providers';
+import { generateJson, isAiEnabled, AiProviderQuotaError } from './providers';
 import {
   AppliedExclusion,
   FeedJob,
@@ -192,6 +192,20 @@ Examples:
     await redis.setex(cacheKeyForIntent(trimmed), 86400, JSON.stringify(intent));
     return intent;
   } catch (err) {
+    // Distinguish quota-exceeded from generic LLM failures so the admin
+    // log clearly shows when Gemini's daily/rate cap is the cause. The
+    // user-facing behaviour is identical either way — we fall back to
+    // the heuristic intent so search keeps working as a filter-style
+    // experience. The cache TTL is shortened to 1h on quota errors so
+    // the next request retries the LLM once tokens reset.
+    if (err instanceof AiProviderQuotaError) {
+      logger.warn(
+        `jobSearch LLM intent QUOTA EXCEEDED — falling back to heuristic for "${trimmed.slice(0, 80)}"`,
+      );
+      const intent = heuristicIntent(trimmed);
+      await redis.setex(cacheKeyForIntent(trimmed), 3600, JSON.stringify(intent));
+      return intent;
+    }
     logger.warn(`jobSearch LLM intent failed: ${(err as Error).message}`);
     const intent = heuristicIntent(trimmed);
     await redis.setex(cacheKeyForIntent(trimmed), 86400, JSON.stringify(intent));
@@ -325,6 +339,60 @@ const scoreJob = (job: FeedJob, intent: SearchIntent): number => {
   s += Math.max(0, (7 - Math.min(ageDays, 7)) / 7);
 
   return s;
+};
+
+// Common English stop words that show up in queries but carry no
+// signal. Stripped from the must-match check so "developer in india"
+// doesn't require "in" to appear in the job text.
+const STOPWORDS = new Set([
+  'a',
+  'an',
+  'and',
+  'at',
+  'by',
+  'for',
+  'from',
+  'in',
+  'of',
+  'on',
+  'or',
+  'the',
+  'to',
+  'with',
+  'job',
+  'jobs',
+  'role',
+  'roles',
+  'work',
+]);
+
+/// Strict "did the raw query actually appear in this job?" check.
+/// We tokenise the user's typed query, drop stop words and tokens
+/// shorter than 3 chars, and require EVERY remaining token to be
+/// present somewhere across the job's title, skills, responsibilities,
+/// department or description. This stops a "react native" search from
+/// surfacing a Shopify job (matched on "react") or a marketing job
+/// (matched on "native") — the intent extractor over-splits multi-word
+/// phrases and ranking alone can't recover.
+const matchesRawQuery = (job: FeedJob, rawQuery: string): boolean => {
+  const tokens = rawQuery
+    .toLowerCase()
+    .split(/[\s,/+&|()\-]+/)
+    .map((t) => t.trim())
+    .filter((t) => t.length >= 3 && !STOPWORDS.has(t));
+  if (tokens.length === 0) return true;
+
+  const haystack = [
+    job.title,
+    (job.skills || []).join(' '),
+    (job.responsibilities || []).join(' '),
+    job.department || '',
+    job.description,
+  ]
+    .join(' ')
+    .toLowerCase();
+
+  return tokens.every((t) => haystack.includes(t));
 };
 
 export interface AiSearchResult {
@@ -485,11 +553,48 @@ export const aiJobSearch = async ({
 
   const externalJobs = await externalPromise;
 
-  // Merge + re-rank across both pools so a high-scoring third-party hit
-  // can outrank a weakly-matching native listing.
-  const mergedScored = [...nativeJobs, ...externalJobs]
-    .map((j) => ({ job: j, score: scoreJob(j, intent) }))
-    .sort((a, b) => b.score - a.score)
+  // Two-tier result assembly:
+  //   - Tier 1 (strict): jobs where every significant query token shows
+  //     up. For "react native" → only true React-Native postings.
+  //     Quality is high; quantity is bounded by what actually exists.
+  //   - Tier 2 (related): the rest of the candidate pool, sorted by
+  //     scoreJob. Used to fill up to `limit` so a search that only had
+  //     9 strict matches still returns a populated screen with the
+  //     adjacent roles (React-only, Mobile-only) underneath.
+  // Both tiers stay internally ranked by raw relevance score so the
+  // top of each band reflects best fit. The combined list still leads
+  // with the strict matches so user perception is "what I searched
+  // for", not "irrelevant slop".
+  const candidates = [...nativeJobs, ...externalJobs].map((j) => ({
+    job: j,
+    score: scoreJob(j, intent),
+    strict: matchesRawQuery(j, query),
+  }));
+  const strictTier = candidates
+    .filter((r) => r.strict)
+    .sort((a, b) => b.score - a.score);
+  const relatedTier = candidates
+    .filter((r) => !r.strict)
+    .sort((a, b) => b.score - a.score);
+
+  // Stamp a matchScore on the strict tier only — spread linearly from
+  // 95 (top of tier) down to 80 (bottom). Frontend renders the match
+  // pill at >= 75, so every strict job carries a visible badge and
+  // related jobs underneath stay un-badged. Without this the search
+  // screen looked uniform; users couldn't tell which results were
+  // exact matches vs adjacent ones.
+  if (strictTier.length === 1) {
+    strictTier[0].job = { ...strictTier[0].job, matchScore: 92 };
+  } else if (strictTier.length > 1) {
+    const last = strictTier.length - 1;
+    strictTier.forEach((r, i) => {
+      const pct = (last - i) / last;
+      const score = Math.round(80 + pct * 15);
+      r.job = { ...r.job, matchScore: score };
+    });
+  }
+
+  const mergedScored = [...strictTier, ...relatedTier]
     .slice(0, limit)
     .map((r) => r.job);
 

@@ -29,7 +29,7 @@ export const REDIS_JOB_CACHE_TTL_SEC = 3600;
 // home feed and for the AI search's primary scope. Fresh listings are
 // preferred; the search service additionally cascades to wider scopes
 // when the primary set is empty.
-export const JOB_FRESHNESS_DAYS = 10;
+export const JOB_FRESHNESS_DAYS = 20;
 
 // AI matcher threshold (0–100) below which a job is filtered out from
 // matched feed. Set conservatively so weakly-overlapping profiles still
