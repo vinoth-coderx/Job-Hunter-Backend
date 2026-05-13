@@ -186,7 +186,16 @@ export const uploadHirerLogo = asyncHandler(async (req: AuthRequest, res: Respon
 
 export const uploadOfficePhotos = asyncHandler(async (req: AuthRequest, res: Response) => {
   const { id } = requireUser(req);
-  const files = (req.files as Express.Multer.File[] | undefined) ?? [];
+  // Local shape to avoid relying on `@types/multer`'s Express namespace
+  // augmentation — which Render's prod install sometimes drops.
+  type UploadedFile = {
+    fieldname: string;
+    originalname: string;
+    mimetype: string;
+    size: number;
+    buffer: Buffer;
+  };
+  const files = (req.files as UploadedFile[] | undefined) ?? [];
   if (files.length === 0) {
     throw ApiError.badRequest('No files uploaded — field name must be "photos"');
   }

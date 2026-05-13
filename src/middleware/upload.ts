@@ -7,7 +7,15 @@
  * payloads before any controller logic runs.
  */
 
-import multer, { FileFilterCallback } from 'multer';
+import multer from 'multer';
+
+/// Mirrors multer's FileFilterCallback signature without depending on
+/// the named export — keeps the build green when @types/multer's full
+/// namespace isn't loaded.
+type FileFilterCallback = {
+  (error: Error): void;
+  (error: null, acceptFile: boolean): void;
+};
 import path from 'path';
 import { Request } from 'express';
 import { ApiError } from '../utils/ApiError';
@@ -49,9 +57,22 @@ const CHAT_EXT = new Set([
   '.pdf', '.doc', '.docx', '.xls', '.xlsx', '.txt',
 ]);
 
+/// Minimal subset of multer's File interface — defined locally so the
+/// build doesn't depend on @types/multer's `Express.Multer.File`
+/// augmentation resolving in every deploy environment (Render's prod
+/// install sometimes skips devDependencies and the augmentation goes
+/// missing).
+interface UploadedFile {
+  fieldname: string;
+  originalname: string;
+  mimetype: string;
+  size: number;
+  buffer: Buffer;
+}
+
 const buildFilter =
   (allowedMime: Set<string>, allowedExt: Set<string>, label: string) =>
-  (_req: Request, file: Express.Multer.File, cb: FileFilterCallback): void => {
+  (_req: Request, file: UploadedFile, cb: FileFilterCallback): void => {
     const ext = path.extname(file.originalname).toLowerCase();
     if (!allowedMime.has(file.mimetype) || !allowedExt.has(ext)) {
       cb(ApiError.badRequest(`Only ${label} files are allowed`));

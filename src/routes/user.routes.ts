@@ -1,5 +1,4 @@
 import { Router, Request, Response, NextFunction, RequestHandler } from 'express';
-import multer from 'multer';
 import {
   updateProfile,
   changePassword,
@@ -54,12 +53,27 @@ router.put(
   updateNotificationPrefs,
 );
 
+/// Multer's `MulterError` class is the conventional shape; we
+/// duck-type the catch instead of `instanceof multer.MulterError`
+/// because that pulls @types/multer's runtime augmentation into the
+/// build, which Render's prod install sometimes drops.
+const isMulterError = (
+  err: unknown,
+): err is { name: string; code: string; message: string } => {
+  return (
+    typeof err === 'object' &&
+    err !== null &&
+    (err as { name?: unknown }).name === 'MulterError' &&
+    typeof (err as { code?: unknown }).code === 'string'
+  );
+};
+
 const wrapMulter =
   (mw: RequestHandler, maxBytes: number) =>
   (req: Request, res: Response, next: NextFunction): void => {
     mw(req, res, (err: unknown) => {
       if (!err) return next();
-      if (err instanceof multer.MulterError) {
+      if (isMulterError(err)) {
         if (err.code === 'LIMIT_FILE_SIZE') {
           return next(
             ApiError.badRequest(`File too large — max ${Math.round(maxBytes / 1024 / 1024)}MB`),
