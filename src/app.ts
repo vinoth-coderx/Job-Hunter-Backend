@@ -49,23 +49,36 @@ export const createApp = (): Application => {
   );
   app.use(securityHeaders);
 
-  const allowedOrigins = env.CLIENT_URL.split(',').map((s) => s.trim());
-  // In non-production we additionally allow any `http://localhost:<port>` /
-  // `http://127.0.0.1:<port>` so Flutter web dev builds (which pick a random
-  // port on each `flutter run -d chrome` launch) don't need every port baked
-  // into CLIENT_URL. Production stays strict — only the explicit list in
-  // CLIENT_URL is accepted.
-  const isLocalhostOrigin = (origin: string): boolean =>
-    /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin);
+  const allowedOrigins = env.CLIENT_URL.split(',')
+    .map((s) => s.trim().replace(/\/$/, ''))
+    .filter((s) => s.length > 0);
+  // Localhost / LAN origins are always allowed — this backend is
+  // primarily consumed by trusted internal clients (the admin
+  // console, locally-run Flutter web builds, Android emulator on
+  // 10.0.2.2) and the cost of "developer can't reach the deployed
+  // backend from a localhost dashboard" is far higher than the
+  // marginal risk of accepting Origin: http://localhost:3000 in
+  // production (DNS rebinding is mitigated by JWT auth + the
+  // explicit allowedHeaders below). Non-localhost cross-origin
+  // requests still go through the strict CLIENT_URL allow-list.
+  const isDevOrigin = (origin: string): boolean =>
+    /^https?:\/\/(localhost|127\.0\.0\.1|0\.0\.0\.0|10\.0\.2\.2|192\.168\.\d+\.\d+|172\.\d+\.\d+\.\d+)(:\d+)?$/.test(
+      origin,
+    );
   app.use(
     cors({
       origin: (origin, cb) => {
         if (!origin) return cb(null, true);
-        if (allowedOrigins.includes(origin)) return cb(null, true);
-        if (env.NODE_ENV !== 'production' && isLocalhostOrigin(origin)) {
-          return cb(null, true);
-        }
-        return cb(new Error('CORS: origin not allowed'));
+        const normalized = origin.replace(/\/$/, '');
+        if (allowedOrigins.includes(normalized)) return cb(null, true);
+        if (isDevOrigin(normalized)) return cb(null, true);
+        // Log the actual blocked origin so the admin can diff against
+        // their CLIENT_URL config when staring at a "Failed to fetch"
+        // in the browser console.
+        logger.warn(
+          `CORS blocked: "${origin}" not in allowed list [${allowedOrigins.join(', ')}] (NODE_ENV=${env.NODE_ENV})`,
+        );
+        return cb(new Error(`CORS: origin "${origin}" not allowed`));
       },
       credentials: true,
       methods: ['GET', 'POST', 'PATCH', 'PUT', 'DELETE', 'OPTIONS'],
