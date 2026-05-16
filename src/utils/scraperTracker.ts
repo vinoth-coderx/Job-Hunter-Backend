@@ -28,6 +28,13 @@ export interface ScraperRunStats {
   updated: number;
   errors: number;
   durationMs: number;
+  /// Coarse-grained reason describing the run's outcome — surfaced to
+  /// the admin dashboard so an all-zero row is debuggable. See
+  /// `ScraperRunStatus` in services/scrapers/base.ts for the vocabulary.
+  status?: string;
+  /// Short human-readable detail accompanying [status] (e.g. the missing
+  /// AppConfig key name, the HTTP status code text).
+  statusDetail?: string;
 }
 
 export interface ScraperRunRecord extends ScraperRunStats {
@@ -43,14 +50,24 @@ export const recordScraperRun = async (
     ts: new Date().toISOString(),
   };
   try {
-    await redis.hset(latestKey(source), {
+    const hashPayload: Record<string, string> = {
       lastRunAt: record.ts,
       lastJobsFetched: stats.total.toString(),
       lastInserted: stats.inserted.toString(),
       lastUpdated: stats.updated.toString(),
       lastErrors: stats.errors.toString(),
       lastDurationMs: stats.durationMs.toString(),
-    });
+    };
+    if (stats.status) hashPayload.lastStatus = stats.status;
+    if (stats.statusDetail) hashPayload.lastStatusDetail = stats.statusDetail;
+    await redis.hset(latestKey(source), hashPayload);
+    if (!stats.status) {
+      // Explicit delete so a run that didn't report a status doesn't
+      // keep showing the last one — stale notes are worse than none.
+      await redis.hdel(latestKey(source), 'lastStatus', 'lastStatusDetail');
+    } else if (!stats.statusDetail) {
+      await redis.hdel(latestKey(source), 'lastStatusDetail');
+    }
     await redis.hincrby(latestKey(source), 'runCount', 1);
     if (stats.errors > 0) {
       await redis.hincrby(latestKey(source), 'totalErrors', stats.errors);
@@ -71,6 +88,8 @@ export interface ScraperStatsSnapshot {
   lastUpdated: number;
   lastErrors: number;
   lastDurationMs: number;
+  lastStatus: string | null;
+  lastStatusDetail: string | null;
   runCount: number;
   totalErrors: number;
   /** Aggregates over runs in the trailing window (default 24h). */
@@ -130,6 +149,8 @@ export const readScraperStats = async (
     lastUpdated: parseInt(raw.lastUpdated ?? '0', 10) || 0,
     lastErrors: parseInt(raw.lastErrors ?? '0', 10) || 0,
     lastDurationMs: parseInt(raw.lastDurationMs ?? '0', 10) || 0,
+    lastStatus: raw.lastStatus || null,
+    lastStatusDetail: raw.lastStatusDetail || null,
     runCount: parseInt(raw.runCount ?? '0', 10) || 0,
     totalErrors: parseInt(raw.totalErrors ?? '0', 10) || 0,
     window: {
@@ -182,19 +203,21 @@ export const KNOWN_SCRAPERS: ScraperDefinition[] = [
   },
   {
     source: 'rapidapi',
-    label: 'RapidAPI',
-    category: 'JSearch + LinkedIn',
-    pricing: 'Paid',
-    keyConfigKeys: ['RAPIDAPI_KEY'],
+    label: 'JSearch (OpenWebNinja)',
+    category: 'Job Board API',
+    pricing: 'Freemium',
+    keyConfigKeys: ['OPENWEBNINJA_API_KEY'],
     isKeyless: false,
+    notes: 'Hosted on api.openwebninja.com/jsearch/search-v2 (auth: X-API-Key).',
   },
   {
-    source: 'theirstack',
-    label: 'TheirStack',
-    category: 'Engineering Jobs',
-    pricing: 'Paid',
-    keyConfigKeys: ['THEIRSTACK_API_KEY'],
+    source: 'realtime_web_search',
+    label: 'Real-Time Web Search',
+    category: 'Web Search',
+    pricing: 'Freemium',
+    keyConfigKeys: ['OPENWEBNINJA_API_KEY'],
     isKeyless: false,
+    notes: 'OpenWebNinja Real-Time Web Search — surfaces direct careers pages and niche boards JSearch misses.',
   },
   {
     source: 'arbeitnow',

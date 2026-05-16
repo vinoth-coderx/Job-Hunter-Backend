@@ -19,6 +19,7 @@ import {
   deleteResumeHandler,
   parseResumeHandler,
   resumeOnboardHandler,
+  downloadBrandedResumePdfHandler,
 } from '../controllers/resume.controller';
 import {
   uploadAvatarHandler,
@@ -90,6 +91,7 @@ router.post('/resume/parse', parseResumeHandler);
 router.post('/resume/onboard', resumeOnboardHandler);
 router.get('/resume', downloadResumeHandler);
 router.get('/resume/meta', resumeMetaHandler);
+router.get('/resume/branded-pdf', downloadBrandedResumePdfHandler);
 router.delete('/resume', deleteResumeHandler);
 
 router.post('/avatar', wrapMulter(uploadAvatar, AVATAR_MAX_SIZE_BYTES), uploadAvatarHandler);

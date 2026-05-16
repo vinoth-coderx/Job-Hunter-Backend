@@ -4,6 +4,9 @@ import { AuthRequest } from '../types';
 import { asyncHandler } from '../utils/asyncHandler';
 import { ApiError } from '../utils/ApiError';
 import { User, IUser } from '../models/User';
+import { UserSession } from '../models/UserSession';
+import { SecurityEvent } from '../models/SecurityEvent';
+import { listActiveSessions } from '../services/security/session.service';
 
 type UserDoc = Pick<
   IUser,
@@ -15,8 +18,12 @@ type UserDoc = Pick<
   | 'bannedAt'
   | 'banReason'
   | 'isEmailVerified'
+  | 'isPhoneVerified'
   | 'profile'
   | 'subscription'
+  | 'twoFactor'
+  | 'security'
+  | 'privacy'
   | 'lastLogin'
   | 'createdAt'
 >;
@@ -30,6 +37,7 @@ const toAdminUser = (u: UserDoc) => ({
   email: u.email,
   activeRole: u.isAdmin ? 'admin' : u.activeRole,
   isEmailVerified: u.isEmailVerified,
+  isPhoneVerified: u.isPhoneVerified ?? false,
   isBanned: u.isBanned,
   banReason: u.banReason,
   profile: {
@@ -42,12 +50,33 @@ const toAdminUser = (u: UserDoc) => ({
     status: u.subscription?.status ?? 'active',
     endDate: u.subscription?.endDate?.toISOString(),
   },
+  twoFactor: u.twoFactor
+    ? {
+        enabled: u.twoFactor.enabled ?? false,
+        method: u.twoFactor.method,
+        enrolledAt: u.twoFactor.enrolledAt?.toISOString(),
+      }
+    : { enabled: false },
+  security: u.security
+    ? {
+        trustScore: u.security.trustScore,
+        failedLoginCount: u.security.failedLoginCount,
+        lockedUntil: u.security.lockedUntil?.toISOString(),
+        lastSeenIp: u.security.lastSeenIp,
+      }
+    : undefined,
+  privacy: u.privacy
+    ? {
+        openToWork: u.privacy.openToWork,
+        resumeVisibility: u.privacy.resumeVisibility,
+      }
+    : undefined,
   createdAt: u.createdAt.toISOString(),
   lastSeenAt: u.lastLogin?.toISOString(),
 });
 
 const SELECT_FIELDS =
-  'email activeRole isAdmin isBanned bannedAt banReason isEmailVerified profile.fullName profile.avatar profile.phone subscription lastLogin createdAt';
+  'email activeRole isAdmin isBanned bannedAt banReason isEmailVerified isPhoneVerified profile.fullName profile.avatar profile.phone subscription twoFactor.enabled twoFactor.method twoFactor.enrolledAt security.trustScore security.failedLoginCount security.lockedUntil security.lastSeenIp privacy.openToWork privacy.resumeVisibility lastLogin createdAt';
 
 export const listUsers = asyncHandler(
   async (req: AuthRequest, res: Response) => {
@@ -243,5 +272,27 @@ export const unbanUser = asyncHandler(
       .lean<UserDoc>();
     if (!updated) throw ApiError.notFound('User not found');
     res.json(toAdminUser(updated));
+  },
+);
+
+/// Trust panel sidecar — sessions + recent security events for a single
+/// user. Surfaced on the admin user-detail page so a reviewer can see
+/// the full session/IP/device picture before banning or unbanning.
+export const getUserTrust = asyncHandler(
+  async (req: AuthRequest, res: Response) => {
+    const id = requireObjectId(req.params.id);
+    const [sessions, recentEvents, sessionCount] = await Promise.all([
+      listActiveSessions(id),
+      SecurityEvent.find({ user: id })
+        .sort({ createdAt: -1 })
+        .limit(20)
+        .lean(),
+      UserSession.countDocuments({ user: id }),
+    ]);
+    res.json({
+      sessions,
+      sessionCount,
+      recentEvents,
+    });
   },
 );

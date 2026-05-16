@@ -8,7 +8,7 @@ import { env } from './config/env';
 import { API_VERSION } from './config/constants';
 import routes from './routes';
 import { errorHandler, notFoundHandler } from './middleware/errorHandler';
-import { generalLimiter } from './middleware/rateLimiter';
+import { createGeneralLimiter } from './middleware/rateLimiter';
 import { sanitizeRequest } from './middleware/sanitize';
 import {
   securityHeaders,
@@ -94,8 +94,12 @@ export const createApp = (): Application => {
   );
 
   app.use(compression());
-  app.use(express.json({ limit: '100kb', strict: true }));
-  app.use(express.urlencoded({ extended: false, limit: '100kb', parameterLimit: 50 }));
+  // Resume template HTML uploads can run to ~200KB once styles are inline;
+  // 300kb leaves headroom while staying small enough that a payload flood
+  // is still cheap to reject. Other endpoints keep their existing zod
+  // schemas (each enforces its own tighter per-field caps).
+  app.use(express.json({ limit: '300kb', strict: true }));
+  app.use(express.urlencoded({ extended: false, limit: '300kb', parameterLimit: 50 }));
   app.use(cookieParser(env.JWT_SECRET));
 
   app.use(sanitizeRequest);
@@ -111,7 +115,7 @@ export const createApp = (): Application => {
     );
   }
 
-  app.use(generalLimiter);
+  app.use(createGeneralLimiter());
 
   app.get('/', (_req, res) => {
     res.json({

@@ -1,0 +1,14 @@
+[
+  {
+    "relation": [
+      "delegate_permission/common.handle_all_urls"
+    ],
+    "target": {
+      "namespace": "android_app",
+      "package_name": "com.example.job_hunter",
+      "sha256_cert_fingerprints": [
+        "REPLACE_ME_WITH_ACTUAL_SHA256_FINGERPRINT_FROM_RELEASE_KEYSTORE"
+      ]
+    }
+  }
+]

@@ -65,6 +65,20 @@ export interface IAppliedJob extends Document {
   statusHistory: IStatusHistoryEntry[];
 
   matchScore?: number;
+  /**
+   * Latest AI ranking captured by the hirer's "Rank with AI" action.
+   * Persisted alongside the application so the applicant detail screen
+   * can show the strengths/concerns even after the Redis ranking cache
+   * expires. Refreshed every time the hirer reruns ranking.
+   */
+  aiRanking?: {
+    score: number;
+    rank: number;
+    summary: string;
+    strengths: string[];
+    concerns: string[];
+    rankedAt: Date;
+  };
   appliedAt: Date;
   notes?: string;
   hirerNotes?: string;
@@ -164,6 +178,20 @@ const appliedJobSchema = new Schema<IAppliedJob>(
     statusHistory: { type: [statusHistorySchema], default: [] },
 
     matchScore: { type: Number, min: 0, max: 100 },
+    aiRanking: {
+      type: new Schema(
+        {
+          score: { type: Number, min: 0, max: 100, required: true },
+          rank: { type: Number, min: 0, required: true },
+          summary: { type: String, default: '', maxlength: 500 },
+          strengths: { type: [String], default: [] },
+          concerns: { type: [String], default: [] },
+          rankedAt: { type: Date, default: Date.now },
+        },
+        { _id: false },
+      ),
+      required: false,
+    },
     appliedAt: { type: Date, default: Date.now, index: true },
     notes: { type: String, maxlength: 2000 },
     hirerNotes: { type: String, maxlength: 4000 },

@@ -12,6 +12,7 @@ import {
   toFeedJobFromNative,
   toFeedJobFromScraped,
 } from '../jobFeed.service';
+import { expandQuery } from './queryExpander.service';
 
 // Intent extracted from a free-form search query. Every field is optional —
 // the user can be vague ("frontend jobs") or precise ("senior react roles
@@ -506,7 +507,41 @@ export const aiJobSearch = async ({
   limit?: number;
   excludeApplied?: AppliedExclusion;
 }): Promise<AiSearchResult> => {
-  const intent = await extractSearchIntent(query);
+  // Run intent extraction + semantic synonym expansion in parallel —
+  // they're independent calls (different models, different caches) so
+  // there's no reason to serialise them. The expansion is best-effort:
+  // failures return [] so the search still works without it.
+  const [intent, synonyms] = await Promise.all([
+    extractSearchIntent(query),
+    expandQuery(query),
+  ]);
+
+  // Fold synonyms into the title + skill keyword pools so Mongo's
+  // regex-OR picks them up on the FIRST cascade pass — this is what
+  // turns "react dev" → "reactjs", "react.js", "frontend developer"
+  // into recall before we resort to dropping freshness/active filters.
+  // We dedupe + cap so we don't blow up the regex with 50 alternatives.
+  if (synonyms.length > 0) {
+    const seen = new Set(intent.titleKeywords.map((s) => s.toLowerCase()));
+    const seenSkills = new Set(intent.skills.map((s) => s.toLowerCase()));
+    const titleAdds: string[] = [];
+    const skillAdds: string[] = [];
+    for (const s of synonyms) {
+      const lc = s.toLowerCase();
+      // A synonym that names a tech (no spaces, short) lands in skills;
+      // multi-word phrases land in title keywords. Crude but matches
+      // how the existing scorer + filter consume the two pools.
+      if (!lc.includes(' ') && lc.length <= 30 && !seenSkills.has(lc)) {
+        skillAdds.push(s);
+        seenSkills.add(lc);
+      } else if (!seen.has(lc)) {
+        titleAdds.push(s);
+        seen.add(lc);
+      }
+    }
+    intent.titleKeywords = [...intent.titleKeywords, ...titleAdds].slice(0, 12);
+    intent.skills = [...intent.skills, ...skillAdds].slice(0, 12);
+  }
   const applied: AppliedExclusion = excludeApplied ?? {
     jobIds: new Set<string>(),
     externalKeys: new Set<string>(),

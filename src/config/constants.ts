@@ -78,10 +78,25 @@ export const EMAIL_FROM = 'Job Hunter <noreply@jobhunter.com>';
 
 // ─── Third-party API hosts ──────────────────────────────────────────
 // The keys themselves are in env; these are just well-known endpoints.
-export const RAPIDAPI_JSEARCH_HOST = 'jsearch.p.rapidapi.com';
+// OpenWebNinja hosts both JSearch (v2) and Real-Time Web Search under a
+// single account + API key (X-API-Key header). Migrated off the RapidAPI
+// marketplace because the v2 endpoint there was inconsistent and the
+// X-RapidAPI-Key plan we had got rate-limited harder.
+export const OPENWEBNINJA_BASE_URL = 'https://api.openwebninja.com';
+// JSearch: `/search` is on all plans; `/search-v2` is a higher tier and
+// returns 404 if your account doesn't subscribe to it. Defaulting to the
+// universally-available `/search` — both endpoints return the same
+// response shape (incl. `apply_options[]`) so the scraper code doesn't
+// have to branch. Admin can override via OPENWEBNINJA_JSEARCH_PATH.
+export const OPENWEBNINJA_JSEARCH_URL = `${OPENWEBNINJA_BASE_URL}/jsearch/search`;
+// Real-Time Web Search slug observed on OpenWebNinja: `realtime-web-search`
+// (no hyphen between "real" and "time"). Was previously
+// `real-time-web-search`, which 403'd because that path doesn't exist on
+// the gateway and the WAF treats unknown product paths as forbidden.
+export const OPENWEBNINJA_WEBSEARCH_URL = `${OPENWEBNINJA_BASE_URL}/realtime-web-search/search`;
+// Legacy — kept for the LinkedIn-Data scraper if/when it gets revived.
 export const RAPIDAPI_LINKEDIN_HOST = 'linkedin-data-api.p.rapidapi.com';
 export const ARBEITNOW_API_URL = 'https://www.arbeitnow.com/api/job-board-api';
-export const THEIRSTACK_API_URL = 'https://api.theirstack.com/v1/jobs/search';
 
 // Adzuna country code (used both in URL path and currency selection).
 export const ADZUNA_COUNTRY = 'in';
@@ -90,16 +105,6 @@ export const ADZUNA_COUNTRY = 'in';
 export const PUPPETEER_HEADLESS = true;
 export const SCRAPER_TIMEOUT_MS = 30_000;
 
-// ─── Rate limiting ──────────────────────────────────────────────────
-// Generous default for a multi-screen app: a fresh launch easily fires
-// 20-30 requests (feed, applied, saved, notifications, profile, alerts)
-// and the user comfortably racks up another 50+ in a few minutes of
-// browsing. 600/15min ~= 40/min steady state — still tight enough to
-// block scraping but doesn't surface "Too many requests" mid-session.
-// Override at runtime via RATE_LIMIT_MAX_REQUESTS / RATE_LIMIT_WINDOW_MS.
-export const RATE_LIMIT_WINDOW_MS = Number(process.env.RATE_LIMIT_WINDOW_MS) > 0
-  ? Number(process.env.RATE_LIMIT_WINDOW_MS)
-  : 15 * 60 * 1000;
-export const RATE_LIMIT_MAX_REQUESTS = Number(process.env.RATE_LIMIT_MAX_REQUESTS) > 0
-  ? Number(process.env.RATE_LIMIT_MAX_REQUESTS)
-  : 600;
+// Rate limiting moved to middleware/rateLimiter.ts — limits are now
+// admin-managed via AppConfig (RATE_LIMIT_WINDOW_MS, RATE_LIMIT_MAX_REQUESTS)
+// with the same defaults (15min / 600 req) used when no override is set.

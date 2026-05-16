@@ -6,6 +6,7 @@ import {
   AiGenerateOptions,
   AiGenerateResult,
   AiProvider,
+  AiProviderAuthError,
   AiProviderQuotaError,
 } from './types';
 
@@ -28,6 +29,18 @@ const isQuotaError = (err: unknown): boolean => {
     msg.includes('rate limit') ||
     msg.includes('resource_exhausted') ||
     msg.includes('429')
+  );
+};
+
+const isAuthError = (err: unknown): boolean => {
+  const msg = (err as Error)?.message?.toLowerCase() ?? '';
+  return (
+    msg.includes('api key not valid') ||
+    msg.includes('api_key_invalid') ||
+    msg.includes('permission_denied') ||
+    msg.includes('unauthenticated') ||
+    msg.includes(' 401') ||
+    msg.includes(' 403')
   );
 };
 
@@ -68,6 +81,14 @@ export const geminiProvider: AiProvider = {
         outputTokens: usage?.candidatesTokenCount,
       };
     } catch (err) {
+      if (isAuthError(err)) {
+        logger.warn(
+          `Gemini auth error (key rejected): ${(err as Error).message}`,
+        );
+        throw new AiProviderAuthError(
+          'Gemini API key is invalid or revoked — rotate it in the admin /ai page',
+        );
+      }
       if (isQuotaError(err)) {
         logger.warn(`Gemini quota error: ${(err as Error).message}`);
         throw new AiProviderQuotaError('Gemini API quota or rate limit reached');

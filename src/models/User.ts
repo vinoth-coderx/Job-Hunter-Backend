@@ -25,10 +25,52 @@ export interface IUser extends Document {
   bannedAt?: Date;
   banReason?: string;
   isEmailVerified: boolean;
+  isPhoneVerified: boolean;
   emailVerificationToken?: string;
   passwordResetToken?: string;
   passwordResetExpires?: Date;
   refreshTokens: string[];
+  // 2FA — when `twoFactor.enabled` is true the login flow requires a
+  // TOTP code (or backup code) after password/Firebase auth succeeds.
+  // The secret is encrypted at rest via the AES key in
+  // `services/security/crypto.service.ts`.
+  twoFactor: {
+    enabled: boolean;
+    method: 'totp' | 'email_otp' | 'phone_otp';
+    secretEnc?: string;
+    backupCodes: string[];
+    enrolledAt?: Date;
+    lastVerifiedAt?: Date;
+  };
+  // Privacy + visibility controls surfaced under
+  // "Settings → Privacy" on the Flutter app. `openToWork` is the
+  // green-ring badge other recruiters see; `searchableInResumeDatabase`
+  // gates whether cold-discovery searches return this profile at all.
+  privacy: {
+    openToWork: boolean;
+    hideFromCurrentEmployer: boolean;
+    hidePersonalDetails: boolean;
+    hideContactUntilShortlisted: boolean;
+    resumeVisibility: 'public' | 'applied_only' | 'private';
+    searchableInResumeDatabase: boolean;
+    allowResumeDownload: boolean;
+  };
+  // Anti-abuse / forensics. None of these are surfaced in the UI; they
+  // exist so the admin "security monitoring" panel and the suspicious-
+  // login middleware can correlate behaviour across signups.
+  security: {
+    registrationIp?: string;
+    registrationUserAgent?: string;
+    knownDeviceFingerprints: string[];
+    knownIps: string[];
+    lastSeenIp?: string;
+    failedLoginCount: number;
+    lockedUntil?: Date;
+    passwordChangedAt?: Date;
+    requirePasswordReset: boolean;
+    trustScore: number;
+  };
+  lastActivityAt?: Date;
   // Human-friendly share code (e.g. "RA8F2Q") generated lazily on first
   // /seeker/referrals/code call. Indexed unique-sparse so existing rows
   // without a code are valid and only generated codes have to be unique.
@@ -148,6 +190,13 @@ export interface IUser extends Document {
     /// Latches true on first activation so the trial can't be re-claimed.
     trialUsed: boolean;
   };
+  /// Monthly resume-template download counter. `periodStart` is the
+  /// IST month boundary the counter is open against; the quota service
+  /// resets both fields when the request lands in a new month.
+  templateDownloads?: {
+    count: number;
+    periodStart: Date;
+  };
   notificationPreferences: {
     push: boolean;
     email: boolean;
@@ -155,6 +204,11 @@ export interface IUser extends Document {
     jobAlerts: boolean;
     applicationUpdates: boolean;
     autoApplySummary: boolean;
+    /// Per-user opt-in for the AI polish on push titles/bodies. The
+    /// global `NOTIFICATION_AI_REWRITE` admin flag must also be on for
+    /// the rewrite to actually run — this lets users opt out even when
+    /// the platform default is on.
+    aiPolish?: boolean;
     quietHoursStart?: string;
     quietHoursEnd?: string;
   };
@@ -169,7 +223,17 @@ export interface IUser extends Document {
     // all mutations go through server-side ledger entries.
     coins: number;
   };
+  // Paid AI-credit top-up balance. Persists across days and is
+  // consumed BEFORE the daily free-tier quota, so a user who buys
+  // a pack never gets blocked by the per-user/day cap. Granted by
+  // the Razorpay top-up verify path; decremented atomically by
+  // enforceQuota when the daily quota would otherwise reject.
+  aiTopUpCredits: number;
   lastLogin?: Date;
+  // Cursor advanced by the recommendedJobs cron after each successful
+  // push so a seeker doesn't get the same job recommended twice. Reset
+  // when the user's preferences materially change (skills, locations).
+  lastRecommendedPushAt?: Date;
   createdAt: Date;
   updatedAt: Date;
   comparePassword(candidate: string): Promise<boolean>;
@@ -200,10 +264,49 @@ const userSchema = new Schema<IUser>(
     bannedAt: Date,
     banReason: String,
     isEmailVerified: { type: Boolean, default: false },
+    isPhoneVerified: { type: Boolean, default: false },
     emailVerificationToken: String,
     passwordResetToken: String,
     passwordResetExpires: Date,
     refreshTokens: { type: [String], default: [], select: false },
+    twoFactor: {
+      enabled: { type: Boolean, default: false, index: true },
+      method: {
+        type: String,
+        enum: ['totp', 'email_otp', 'phone_otp'],
+        default: 'totp',
+      },
+      secretEnc: { type: String, select: false },
+      backupCodes: { type: [String], default: [], select: false },
+      enrolledAt: Date,
+      lastVerifiedAt: Date,
+    },
+    privacy: {
+      openToWork: { type: Boolean, default: false, index: true },
+      hideFromCurrentEmployer: { type: Boolean, default: false },
+      hidePersonalDetails: { type: Boolean, default: false },
+      hideContactUntilShortlisted: { type: Boolean, default: true },
+      resumeVisibility: {
+        type: String,
+        enum: ['public', 'applied_only', 'private'],
+        default: 'applied_only',
+      },
+      searchableInResumeDatabase: { type: Boolean, default: true },
+      allowResumeDownload: { type: Boolean, default: true },
+    },
+    security: {
+      registrationIp: String,
+      registrationUserAgent: String,
+      knownDeviceFingerprints: { type: [String], default: [], select: false },
+      knownIps: { type: [String], default: [], select: false },
+      lastSeenIp: String,
+      failedLoginCount: { type: Number, default: 0 },
+      lockedUntil: Date,
+      passwordChangedAt: Date,
+      requirePasswordReset: { type: Boolean, default: false },
+      trustScore: { type: Number, default: 50, min: 0, max: 100, index: true },
+    },
+    lastActivityAt: Date,
     referralCode: {
       type: String,
       unique: true,
@@ -353,8 +456,10 @@ const userSchema = new Schema<IUser>(
     },
     subscription: {
       tier: {
+        // No enum constraint — plan tiers are now admin-managed via the
+        // SubscriptionPlan collection and may include custom slugs beyond
+        // the original free/weekly/monthly/yearly set.
         type: String,
-        enum: ['free', 'weekly', 'monthly', 'yearly'],
         default: 'free',
       },
       status: {
@@ -371,6 +476,10 @@ const userSchema = new Schema<IUser>(
       // flips true, so the trial cannot be re-claimed by toggling.
       trialActivatedAt: Date,
       trialUsed: { type: Boolean, default: false },
+    },
+    templateDownloads: {
+      count: { type: Number, default: 0, min: 0 },
+      periodStart: { type: Date, default: null },
     },
     notificationPreferences: {
       push: { type: Boolean, default: true },
@@ -401,7 +510,9 @@ const userSchema = new Schema<IUser>(
       },
       coins: { type: Number, default: 0, min: 0 },
     },
+    aiTopUpCredits: { type: Number, default: 0, min: 0 },
     lastLogin: Date,
+    lastRecommendedPushAt: Date,
   },
   { timestamps: true },
 );

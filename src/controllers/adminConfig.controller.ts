@@ -9,8 +9,14 @@ import {
   listAppConfig,
   setAppConfig,
 } from '../services/config/config.service';
+import { CONFIG_REGISTRY } from '../services/config/configRegistry';
 import { AppConfig, type AppConfigCategory } from '../models/AppConfig';
-import { ADZUNA_COUNTRY, RAPIDAPI_JSEARCH_HOST, SMTP_HOST, SMTP_PORT } from '../config/constants';
+import {
+  ADZUNA_COUNTRY,
+  OPENWEBNINJA_JSEARCH_URL,
+  SMTP_HOST,
+  SMTP_PORT,
+} from '../config/constants';
 import { logger } from '../utils/logger';
 
 const VALID_CATEGORIES: AppConfigCategory[] = [
@@ -20,10 +26,23 @@ const VALID_CATEGORIES: AppConfigCategory[] = [
   'email',
   'firebase',
   'cron',
+  'ai',
   'misc',
 ];
 
 const KEY_REGEX = /^[A-Z][A-Z0-9_]{0,79}$/;
+
+/**
+ * Keys that are auto-projected from another admin surface — direct
+ * /config edits on these would be clobbered on the next sync. Surface
+ * the source surface in the UI so the operator knows where to actually
+ * make the change.
+ */
+const MANAGED_KEYS: Record<string, { surface: string; href: string }> = {
+  GEMINI_API_KEY: { surface: '/ai page (AiKey routing)', href: '/ai' },
+  ANTHROPIC_API_KEY: { surface: '/ai page (AiKey routing)', href: '/ai' },
+  GROQ_API_KEY: { surface: '/ai page (AiKey routing)', href: '/ai' },
+};
 
 /**
  * Map the service's AppConfigSummary onto the shape the admin app
@@ -43,6 +62,7 @@ const toEntry = (
   hasValue: row.hasValue,
   notes: row.notes,
   updatedAt: (row.updatedAt ?? updatedAtFallback ?? new Date()).toISOString(),
+  managedBy: MANAGED_KEYS[row.key],
 });
 
 export const listConfig = asyncHandler(
@@ -157,36 +177,30 @@ const PROBES: Record<string, () => Promise<ProbeResult>> = {
       : { ok: false, detail: `serpapi returned ${r.status}: ${truncate(r.data?.error)}` };
   },
 
-  // ── RapidAPI (JSearch): single search to cheapest endpoint ─────────
-  RAPIDAPI_KEY: async () => {
-    const key = getAppConfig('RAPIDAPI_KEY');
-    if (!key) return { ok: false, detail: 'RAPIDAPI_KEY not set' };
-    const r = await axios.get(`https://${RAPIDAPI_JSEARCH_HOST}/search`, {
-      params: { query: 'developer', page: '1', num_pages: '1' },
-      headers: {
-        'X-RapidAPI-Key': key,
-        'X-RapidAPI-Host': RAPIDAPI_JSEARCH_HOST,
-      },
+  // ── OpenWebNinja JSearch v2: single search smoke-test ──────────────
+  OPENWEBNINJA_API_KEY: async () => {
+    const key = getAppConfig('OPENWEBNINJA_API_KEY');
+    if (!key) return { ok: false, detail: 'OPENWEBNINJA_API_KEY not set' };
+    const r = await axios.get(OPENWEBNINJA_JSEARCH_URL, {
+      params: { query: 'developer', num_pages: '1' },
+      headers: { 'X-API-Key': key, Accept: '*/*' },
       timeout: 12000,
       validateStatus: () => true,
     });
     return r.status === 200
       ? { ok: true, detail: `JSearch returned ${r.data?.data?.length ?? 0} hits` }
-      : { ok: false, detail: `rapidapi returned ${r.status}` };
+      : { ok: false, detail: `openwebninja returned ${r.status}` };
   },
 
-  // ── TheirStack: capabilities endpoint ───────────────────────────────
-  THEIRSTACK_API_KEY: async () => {
-    const key = getAppConfig('THEIRSTACK_API_KEY');
-    if (!key) return { ok: false, detail: 'THEIRSTACK_API_KEY not set' };
-    const r = await axios.get('https://api.theirstack.com/v0/users/me/info', {
-      headers: { Authorization: `Bearer ${key}` },
-      timeout: 8000,
-      validateStatus: () => true,
-    });
-    return r.status === 200
-      ? { ok: true, detail: 'theirstack auth ok' }
-      : { ok: false, detail: `theirstack returned ${r.status}` };
+  // ── Legacy RapidAPI JSearch: fallback only ─────────────────────────
+  RAPIDAPI_KEY: async () => {
+    const key = getAppConfig('RAPIDAPI_KEY');
+    if (!key) return { ok: false, detail: 'RAPIDAPI_KEY not set' };
+    // The scraper now uses OpenWebNinja; the RapidAPI key is only kept
+    // as a fallback. Probing it would consume one of the rare free
+    // requests on the old plan — instead, just confirm the secret is
+    // present without firing a real search.
+    return { ok: true, detail: 'present (legacy fallback — OPENWEBNINJA_API_KEY preferred)' };
   },
 
   // ── Gemini: models list (free) ──────────────────────────────────────
@@ -397,5 +411,31 @@ export const probeConfig = asyncHandler(
         detail: `probe failed: ${(err as Error).message}`,
       });
     }
+  },
+);
+
+/**
+ * Catalog of every config key the backend knows about. Powers the
+ * "Suggest a key" dropdown on the admin /config page so an operator
+ * doesn't have to remember the exact key name, category or secret flag.
+ * Entries already populated in the DB are flagged so the UI can hide
+ * them from the dropdown.
+ */
+export const listConfigRegistry = asyncHandler(
+  async (_req: AuthRequest, res: Response) => {
+    const existing = new Set(
+      (await AppConfig.find({}, { key: 1 }).lean()).map((r) => r.key),
+    );
+    res.json({
+      entries: CONFIG_REGISTRY.map((e) => ({
+        key: e.key,
+        category: e.category,
+        isSecret: e.isSecret,
+        description: e.description,
+        defaultValue: e.defaultValue,
+        usedBy: e.usedBy,
+        alreadyConfigured: existing.has(e.key),
+      })),
+    });
   },
 );

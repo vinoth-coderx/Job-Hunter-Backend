@@ -1,5 +1,6 @@
 import { Response } from 'express';
 import crypto from 'node:crypto';
+import { Readable } from 'node:stream';
 import { asyncHandler } from '../utils/asyncHandler';
 import { ApiError } from '../utils/ApiError';
 import { AuthRequest } from '../types';
@@ -8,6 +9,7 @@ import { logger } from '../utils/logger';
 import { parseResumeText } from '../services/ai/resumeParser.service';
 import { runResumeOnboarding } from '../services/ai/combined/resumeOnboarding.service';
 import { enforceQuota, refundQuota } from '../services/ai/quota.service';
+import { getCreditWeight } from '../config/aiCreditWeights';
 import { maybeGrantProfileCompleteBonus } from '../services/coins/coin.service';
 import { Job } from '../models/Job';
 import { JOB_FRESHNESS_DAYS } from '../config/constants';
@@ -18,6 +20,7 @@ import {
   signedDeliveryUrl,
   uploadBuffer,
 } from '../config/cloudinary';
+import { generateBrandedResumePdf } from '../services/resume/resumePdf.service';
 
 const SIGNED_URL_TTL_SEC = 600; // 10 min — long enough to start a download.
 
@@ -87,6 +90,18 @@ export const uploadResumeHandler = asyncHandler(async (req: AuthRequest, res: Re
     format: fmt,
   });
 
+  // Defensive guard: Cloudinary occasionally returns a 200 with an
+  // empty publicId on misconfigured accounts. Catching it here and
+  // 500ing surfaces the failure to the client instead of silently
+  // persisting a half-formed resumeFile that the download/delete
+  // paths will reject with "no resume on file" later.
+  if (!result.publicId) {
+    logger.error('Cloudinary upload returned empty publicId', { result });
+    throw ApiError.internal(
+      'Resume storage misconfigured: upload returned no asset id',
+    );
+  }
+
   const resumeText = await extractTextFromBuffer(req.file.buffer, req.file.mimetype);
 
   user.profile.resumeFile = {
@@ -100,7 +115,27 @@ export const uploadResumeHandler = asyncHandler(async (req: AuthRequest, res: Re
   };
   user.profile.resumeUrl = result.url;
   if (resumeText) user.profile.resumeText = resumeText;
+  user.markModified('profile.resumeFile');
   await user.save();
+
+  // Round-trip verification: re-read the user document and confirm
+  // resumeFile.publicId actually landed in Mongo. Mongoose's strict
+  // schema mode has been observed to silently drop sub-document
+  // writes when the parent path isn't explicitly marked modified —
+  // the markModified above + this read-back catches any residual
+  // drift before the client thinks the upload succeeded.
+  const reread = await User.findById(user._id).select('profile.resumeFile').lean();
+  const storedPublicId = reread?.profile?.resumeFile?.publicId;
+  if (!storedPublicId) {
+    logger.error('Resume upload did not persist resumeFile', {
+      userId: user._id.toString(),
+      expectedPublicId: result.publicId,
+      stored: reread?.profile?.resumeFile ?? null,
+    });
+    throw ApiError.internal(
+      'Resume upload didn\'t persist correctly. Please contact support.',
+    );
+  }
 
   if (oldPublicId && oldPublicId !== result.publicId) {
     await destroyAsset(oldPublicId, 'raw', 'authenticated');
@@ -143,7 +178,75 @@ export const downloadResumeHandler = asyncHandler(async (req: AuthRequest, res: 
     attachmentFilename: file.originalName,
   });
 
-  res.redirect(302, signed);
+  // Why we proxy instead of `res.redirect(302, signed)`:
+  // Mobile HTTP clients (Dart's `package:http`) follow 302s but keep the
+  // original Authorization header attached to the follow-up request.
+  // Cloudinary saw the unrecognised Bearer token and returned 404 with
+  // no body, which the client surfaced as "no resume on file" — even
+  // though the asset was perfectly fine. Streaming the bytes through
+  // here strips that header path entirely and lets us bubble a real
+  // upstream-failure message when Cloudinary itself errors.
+  try {
+    const upstream = await fetch(signed, {
+      redirect: 'follow',
+      headers: { Accept: file.mimeType || 'application/octet-stream' },
+    });
+    if (!upstream.ok || !upstream.body) {
+      logger.warn('Resume proxy: upstream non-2xx', {
+        status: upstream.status,
+        publicId: file.publicId,
+      });
+      // Upstream-404 means the Mongo `resumeFile` record points at an
+      // asset that no longer exists in Cloudinary (deleted manually,
+      // failed upload that left a stub, env swap, etc.). Two things:
+      //
+      //   1. Heal the user doc — clear the orphaned reference so the
+      //      next call short-circuits at the "no resume on file" guard
+      //      above instead of round-tripping to Cloudinary again.
+      //   2. Surface the right status — 410 Gone is what the Flutter
+      //      `_handleMissingResume` already branches on to prompt
+      //      re-upload. Returning 500 here got logged as a server-side
+      //      bug and showed a generic error on the client.
+      if (upstream.status === 404) {
+        await User.updateOne(
+          { _id: user._id },
+          { $unset: { 'profile.resumeFile': '' } },
+        ).catch((e) => {
+          logger.warn('Resume proxy: failed to clear orphaned resumeFile', {
+            err: (e as Error).message,
+          });
+        });
+        throw ApiError.gone(
+          'Your resume is no longer in storage. Please re-upload it.',
+        );
+      }
+      // Anything else (502 from Cloudinary, transient 5xx) is a real
+      // server-side problem and stays an internal error.
+      throw ApiError.internal(
+        `Resume storage returned ${upstream.status}. Please re-upload your resume.`,
+      );
+    }
+    res.setHeader('Content-Type', file.mimeType || 'application/octet-stream');
+    if (file.size) res.setHeader('Content-Length', String(file.size));
+    res.setHeader(
+      'Content-Disposition',
+      `inline; filename="${file.originalName || 'resume'}"`,
+    );
+    // Stream the body through. `Readable.fromWeb` lifts the WHATWG
+    // ReadableStream that `fetch` returns into a Node stream so we can
+    // pipe it into the Express response.
+    const nodeStream = Readable.fromWeb(upstream.body as never);
+    nodeStream.pipe(res);
+    await new Promise<void>((resolve, reject) => {
+      nodeStream.on('end', resolve);
+      nodeStream.on('error', reject);
+      res.on('close', resolve);
+    });
+  } catch (err) {
+    if (err instanceof ApiError) throw err;
+    logger.warn('Resume proxy fetch failed', { err });
+    throw ApiError.internal('Could not load resume from storage');
+  }
 });
 
 export const resumeMetaHandler = asyncHandler(async (req: AuthRequest, res: Response) => {
@@ -215,7 +318,8 @@ export const resumeOnboardHandler = asyncHandler(async (req: AuthRequest, res: R
     return;
   }
 
-  const quota = await enforceQuota(userId);
+  const weight = getCreditWeight('resume_onboarding');
+  const quota = await enforceQuota(userId, weight);
 
   const sinceMs = Date.now() - JOB_FRESHNESS_DAYS * 24 * 60 * 60 * 1000;
   const candidates = await Job.find({
@@ -230,12 +334,12 @@ export const resumeOnboardHandler = asyncHandler(async (req: AuthRequest, res: R
   try {
     result = await runResumeOnboarding(text, candidates as never);
   } catch (err) {
-    await refundQuota(userId);
+    await refundQuota(userId, weight);
     throw err;
   }
 
   if (!result) {
-    await refundQuota(userId);
+    await refundQuota(userId, weight);
     res.json({
       success: true,
       message: 'Resume too short or AI unavailable',
@@ -248,12 +352,62 @@ export const resumeOnboardHandler = asyncHandler(async (req: AuthRequest, res: R
   res.json({ success: true, data: result, quota });
 });
 
+/**
+ * Branded resume PDF download. Renders the user's structured resume
+ * profile through the Job Hunter template (Puppeteer-headless) and
+ * streams the PDF bytes back. No AI cost — pure template render — but
+ * we still require a populated profile so the output isn't an empty
+ * shell.
+ */
+export const downloadBrandedResumePdfHandler = asyncHandler(
+  async (req: AuthRequest, res: Response) => {
+    if (!req.user) throw ApiError.unauthorized();
+    const user = await User.findById(req.user._id);
+    if (!user) throw ApiError.notFound('User not found');
+
+    const p = user.profile;
+    const hasContent =
+      Boolean(p.resumeProfile?.profileSummary) ||
+      (p.skills && p.skills.length > 0) ||
+      (p.resumeProfile?.employments && p.resumeProfile.employments.length > 0) ||
+      (p.resumeProfile?.educations && p.resumeProfile.educations.length > 0);
+    if (!hasContent) {
+      throw ApiError.badRequest(
+        'Fill in at least your summary, skills, or experience before downloading the branded resume',
+      );
+    }
+
+    const { buffer, filename } = await generateBrandedResumePdf(user);
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader(
+      'Content-Disposition',
+      `attachment; filename="${filename}"`,
+    );
+    res.setHeader('Cache-Control', 'private, no-store');
+    res.end(buffer);
+  },
+);
+
 export const deleteResumeHandler = asyncHandler(async (req: AuthRequest, res: Response) => {
   if (!req.user) throw ApiError.unauthorized();
   const user = await User.findById(req.user._id);
-  if (!user || !user.profile.resumeFile) throw ApiError.notFound('No resume to delete');
+  if (!user) throw ApiError.notFound('User not found');
 
-  const publicId = user.profile.resumeFile.publicId;
+  // Resume state is spread across three fields (resumeFile, resumeText,
+  // resumeUrl) and they can drift on legacy accounts — e.g. resumeText
+  // got persisted but the Cloudinary upload never completed, leaving
+  // resumeFile undefined. Clear every trace regardless so the user can
+  // recover from those stuck states by tapping Remove + re-uploading.
+  const hadAnything =
+    Boolean(user.profile.resumeFile) ||
+    Boolean(user.profile.resumeText) ||
+    Boolean(user.profile.resumeUrl);
+  if (!hadAnything) {
+    res.json({ success: true, message: 'No resume to delete' });
+    return;
+  }
+
+  const publicId = user.profile.resumeFile?.publicId;
   user.profile.resumeFile = undefined;
   user.profile.resumeText = undefined;
   user.profile.resumeUrl = undefined;

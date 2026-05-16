@@ -78,8 +78,8 @@ const subscriptionSchema = new Schema<ISubscription>(
   {
     user: { type: Schema.Types.ObjectId, ref: 'User', required: true, index: true },
     tier: {
+      // Admin-managed via SubscriptionPlan; enum removed to allow custom slugs.
       type: String,
-      enum: ['free', 'weekly', 'monthly', 'yearly'],
       required: true,
     },
     status: {

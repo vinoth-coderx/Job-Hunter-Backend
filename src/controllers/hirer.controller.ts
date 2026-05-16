@@ -12,6 +12,9 @@ import {
   publicIdFromUrl,
   uploadBuffer,
 } from '../config/cloudinary';
+import { generateCompanyDescription } from '../services/ai/companyDescription.service';
+import { enforceQuota, refundQuota } from '../services/ai/quota.service';
+import { getCreditWeight } from '../config/aiCreditWeights';
 
 // ─────────────────────────────────────────────────────────────────────────
 // Schemas
@@ -81,6 +84,13 @@ const sanitiseProfile = (p: IHirerProfile) => ({
   rating: p.rating,
   followersCount: p.followersCount,
   hirerSubscription: p.hirerSubscription,
+  // Trust signals consumed by SafeApplyBadge / FraudWarningBanner on
+  // the seeker side. `approvalStatus` distinguishes "pending review"
+  // and "suspended" companies so the UI can warn without leaking the
+  // recruiter's email or any moderation detail.
+  approvalStatus: p.approvalStatus,
+  trustScore: p.trustScore,
+  dailyPostLimit: p.dailyPostLimit,
   createdAt: p.createdAt,
   updatedAt: p.updatedAt,
 });
@@ -340,3 +350,71 @@ export const getHirerStats = asyncHandler(async (req: AuthRequest, res: Response
     },
   });
 });
+
+export const generateCompanyDescriptionSchema = z.object({
+  body: z.object({
+    companyName: z.string().min(2).max(200).optional(),
+    industry: z.string().max(120).optional(),
+    sizeBand: z.string().max(60).optional(),
+    hqLocation: z.string().max(120).optional(),
+    whatYouDo: z.string().max(2000).optional(),
+    toneHint: z.enum(['professional', 'casual', 'startup']).optional(),
+  }),
+});
+
+/**
+ * AI-draft the "About" section for the hirer onboarding/edit screen.
+ * Pulls companyName from the existing profile when present so the
+ * hirer doesn't have to re-type it; falls back to the body field for
+ * first-time setup before save. One quota slot, refunded on failure.
+ */
+export const generateCompanyDescriptionEndpoint = asyncHandler(
+  async (req: AuthRequest, res: Response) => {
+    if (!req.user) throw ApiError.unauthorized();
+    const userId = String(req.user._id);
+
+    const body = req.body as z.infer<typeof generateCompanyDescriptionSchema>['body'];
+
+    let companyName = (body.companyName || '').trim();
+    if (!companyName) {
+      const profile = await HirerProfile.findOne({ user: userId })
+        .select('companyName')
+        .lean();
+      companyName = profile?.companyName?.trim() || '';
+    }
+    if (companyName.length < 2) {
+      throw ApiError.badRequest('Company name is required to generate a description');
+    }
+
+    const weight = getCreditWeight('company_description');
+    const quota = await enforceQuota(userId, weight);
+
+    let result;
+    try {
+      result = await generateCompanyDescription(
+        {
+          companyName,
+          industry: body.industry,
+          sizeBand: body.sizeBand,
+          hqLocation: body.hqLocation,
+          whatYouDo: body.whatYouDo,
+          toneHint: body.toneHint,
+        },
+        { userId },
+      );
+    } catch (err) {
+      await refundQuota(userId, weight);
+      throw err;
+    }
+
+    if (!result.usedAi) {
+      await refundQuota(userId, weight);
+    }
+
+    res.json({
+      success: true,
+      data: result,
+      quota,
+    });
+  },
+);

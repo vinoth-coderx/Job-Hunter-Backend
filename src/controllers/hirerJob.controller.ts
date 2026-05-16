@@ -7,7 +7,23 @@ import { asyncHandler } from '../utils/asyncHandler';
 import { ApiError } from '../utils/ApiError';
 import { AuthRequest, JobStatus } from '../types';
 import { generateJd } from '../services/ai/jdGenerator.service';
-import { enforceQuota, refundQuota } from '../services/ai/quota.service';
+import { extractSkills } from '../services/ai/skillExtractor.service';
+import {
+  generateScreeningQuestions,
+  peekCachedScreeningQuestions,
+} from '../services/ai/screeningQuestions.service';
+import {
+  polishJd,
+  peekCachedPolishedJd,
+} from '../services/ai/jdPolish.service';
+import {
+  enforceQuota,
+  getQuotaSnapshot,
+  refundQuota,
+} from '../services/ai/quota.service';
+import { getCreditWeight } from '../config/aiCreditWeights';
+import { JobModeration } from '../models/JobModeration';
+import { writeAudit } from '../services/security/audit.service';
 
 // ─────────────────────────────────────────────────────────────────────────
 // Schemas
@@ -113,6 +129,34 @@ export const createJob = asyncHandler(async (req: AuthRequest, res: Response) =>
   if (!req.user) throw ApiError.unauthorized();
   const profile = await requireHirerProfile(req.user.id);
 
+  // Suspended / banned recruiters cannot publish. They can still read
+  // their existing jobs (the hirer dashboard endpoints don't go through
+  // this guard) but the post path is closed.
+  if (profile.approvalStatus === 'suspended' || profile.approvalStatus === 'banned') {
+    throw new ApiError(
+      403,
+      profile.approvalStatus === 'banned'
+        ? 'Your hirer account is banned. Contact support.'
+        : 'Your hirer account is suspended. Resolve open reports before posting.',
+    );
+  }
+
+  // Daily posting limit — drawn from HirerProfile.dailyPostLimit (which
+  // scales with trust score). External (scraped) jobs don't count.
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const todaysCount = await Job.countDocuments({
+    postedBy: req.user._id,
+    isNative: true,
+    createdAt: { $gte: today },
+  });
+  if (todaysCount >= profile.dailyPostLimit) {
+    throw new ApiError(
+      429,
+      `Daily posting limit reached (${profile.dailyPostLimit}). Build trust by verifying your company to unlock more.`,
+    );
+  }
+
   const body = req.body as z.infer<typeof createJobSchema>['body'];
   const status: JobStatus = body.saveAsDraft ? 'draft' : 'active';
   const now = new Date();
@@ -153,6 +197,33 @@ export const createJob = asyncHandler(async (req: AuthRequest, res: Response) =>
     fetchedAt: now,
     isActive: status === 'active',
   });
+
+  // Drafts skip moderation — only publish flow goes through the
+  // pipeline. When the hirer flips a draft to active later, the status
+  // change handler re-runs moderation.
+  if (status === 'active') {
+    const { moderateJob } = await import('../services/security/moderation.service');
+    const result = await moderateJob(job);
+    // ModerationDecision includes 'auto_rejected'; the Job.moderation
+    // enum exposes 'rejected' to the rest of the app (no need for the
+    // app to distinguish auto vs manual rejection — both close the
+    // listing).
+    job.moderation.status =
+      result.decision === 'auto_rejected' ? 'rejected' : result.decision;
+    job.moderation.riskScore = result.riskScore;
+    job.moderation.flags = result.flags;
+    job.moderation.contentHash = result.contentHash;
+    job.moderation.lastModelRun = new Date();
+    if (result.duplicateOf) {
+      job.moderation.duplicateOf = new mongoose.Types.ObjectId(result.duplicateOf);
+    }
+    job.isPublic = result.decision === 'auto_approved';
+    if (result.decision === 'auto_rejected') {
+      job.status = 'closed';
+      job.isActive = false;
+    }
+    await job.save();
+  }
 
   res.status(201).json({ success: true, data: job });
 });
@@ -374,21 +445,251 @@ export const generateJdEndpoint = asyncHandler(async (req: AuthRequest, res: Res
   if (!profile) throw ApiError.forbidden('Hirer profile required to generate JD');
 
   const body = req.body as z.infer<typeof generateJdSchema>['body'];
-  const quota = await enforceQuota(userId);
+  const weight = getCreditWeight('jd_generator');
+  const quota = await enforceQuota(userId, weight);
 
   let jd;
   try {
     jd = await generateJd({ ...body, companyName: profile.companyName });
   } catch (err) {
-    await refundQuota(userId);
+    await refundQuota(userId, weight);
     throw err;
   }
 
   if (!jd) {
-    await refundQuota(userId);
+    await refundQuota(userId, weight);
     res.json({ success: true, data: null, message: 'AI unavailable', quota });
     return;
   }
 
   res.json({ success: true, data: jd, quota });
 });
+
+export const extractSkillsSchema = z.object({
+  body: z.object({
+    text: z.string().min(30).max(8000),
+  }),
+});
+
+/**
+ * Extract a normalised skill list from a JD draft. Used by the hirer
+ * post-job flow's "Suggest skills" affordance — surfaces the implicit
+ * skill requirements the AI reads in the JD body so the hirer can
+ * accept them as the listing's structured `skills` array.
+ *
+ * Routed through Groq (cheap, fast). Doesn't burn quota — the call is
+ * short and cached for 7d per identical text.
+ */
+export const extractSkillsEndpoint = asyncHandler(
+  async (req: AuthRequest, res: Response) => {
+    if (!req.user) throw ApiError.unauthorized();
+    await requireHirerProfile(req.user.id);
+
+    const { text } = req.body as z.infer<typeof extractSkillsSchema>['body'];
+    const result = await extractSkills(text, { userId: String(req.user._id) });
+    res.json({ success: true, data: result });
+  },
+);
+
+export const submitModerationAppealSchema = z.object({
+  body: z.object({
+    reason: z.string().min(20).max(2000),
+  }),
+});
+
+/**
+ * Hirer-side appeal against a moderation rejection. Mutates the LATEST
+ * `JobModeration` row for this job in place — only the most recent
+ * decision is appealable, and only when:
+ *   - Decision is `auto_rejected` OR an admin override marked it `rejected`
+ *   - There isn't already a pending appeal (one open appeal per row)
+ *
+ * The job document itself stays in its current state (rejected / closed)
+ * until the admin resolves the appeal.
+ */
+export const submitModerationAppeal = asyncHandler(
+  async (req: AuthRequest, res: Response) => {
+    if (!req.user) throw ApiError.unauthorized();
+    const profile = await requireHirerProfile(req.user.id);
+
+    const id = String(req.params.id);
+    if (!isValidObjectId(id)) throw ApiError.badRequest('Invalid job id');
+
+    const job = await Job.findById(id);
+    if (!job || !job.isNative) throw ApiError.notFound('Job not found');
+    assertOwnership(job, profile._id);
+
+    const moderation = await JobModeration.findOne({ job: job._id }).sort({
+      createdAt: -1,
+    });
+    if (!moderation) {
+      throw ApiError.badRequest('No moderation record exists for this job');
+    }
+
+    const isRejected =
+      moderation.decision === 'auto_rejected' ||
+      moderation.overrideDecision === 'rejected';
+    if (!isRejected) {
+      throw ApiError.badRequest('Only rejected jobs can be appealed');
+    }
+
+    if (moderation.appeal && moderation.appeal.status === 'pending') {
+      throw ApiError.badRequest(
+        'An appeal is already pending review for this job',
+      );
+    }
+
+    const { reason } = req.body as z.infer<
+      typeof submitModerationAppealSchema
+    >['body'];
+
+    // `req.user._id` is typed optional because guest sessions don't have
+    // a DB record. We've already guarded `req.user` above, and the hirer
+    // profile lookup requires a real user, so the bang is safe.
+    const userId = req.user._id!;
+    const submittedAt = new Date();
+    moderation.appeal = {
+      submittedBy: userId,
+      reason,
+      submittedAt,
+      status: 'pending',
+    };
+    await moderation.save();
+
+    await writeAudit({
+      actor: { id: userId, email: req.user.email },
+      actorType: 'hirer',
+      category: 'job_moderation',
+      action: 'moderation:appeal_submitted',
+      target: { type: 'Job', id: job._id, label: job.title },
+      metadata: { reason: reason.slice(0, 200) },
+      req,
+    });
+
+    res.json({
+      success: true,
+      data: {
+        jobId: job._id.toString(),
+        appealStatus: 'pending',
+        submittedAt,
+      },
+    });
+  },
+);
+
+export const generateScreeningQuestionsSchema = z.object({
+  body: z.object({
+    title: z.string().min(3).max(200),
+    description: z.string().min(20).max(20000),
+    skills: z.array(z.string().min(1).max(100)).max(40).default([]),
+  }),
+});
+
+/**
+ * AI screening-question generator. Hirer hits this from the post-job
+ * editor; the response is 3-5 ready-to-edit questions in the same shape
+ * `IScreeningQuestion` uses, so the editor drops them straight into its
+ * working list. The hirer gets to keep / edit / delete each one before
+ * the job is saved.
+ *
+ * Cache pre-check by hash(title + skills + description prefix) — same
+ * draft re-asked is free of quota.
+ */
+export const generateScreeningQuestionsEndpoint = asyncHandler(
+  async (req: AuthRequest, res: Response) => {
+    if (!req.user) throw ApiError.unauthorized();
+    const userId = String(req.user._id);
+
+    const { title, description, skills } = req.body as z.infer<
+      typeof generateScreeningQuestionsSchema
+    >['body'];
+
+    const cached = await peekCachedScreeningQuestions(
+      title,
+      description,
+      skills,
+    );
+    let quota = await getQuotaSnapshot(userId);
+    if (cached) {
+      res.json({
+        success: true,
+        data: { questions: cached, usedAi: true, cached: true },
+        quota,
+      });
+      return;
+    }
+
+    const weight = getCreditWeight('screening_questions');
+    if (weight > 0) quota = await enforceQuota(userId, weight);
+
+    let result;
+    try {
+      result = await generateScreeningQuestions({
+        title,
+        description,
+        skills,
+        userId,
+      });
+    } catch (err) {
+      if (weight > 0) await refundQuota(userId, weight);
+      throw err;
+    }
+    // Refund when we got the heuristic fallback so the hirer isn't
+    // charged for "no AI ran".
+    if (weight > 0 && !result.usedAi) {
+      await refundQuota(userId, weight);
+    }
+
+    res.json({
+      success: true,
+      data: result,
+      quota,
+    });
+  },
+);
+
+export const polishJdSchema = z.object({
+  body: z.object({
+    title: z.string().min(3).max(200),
+    description: z.string().min(50).max(20000),
+  }),
+});
+
+/**
+ * AI polish for the hirer's JD draft. Returns the rewritten body plus
+ * a list of changes applied. Cache pre-check by hash(title +
+ * description) so re-clicking on an unchanged draft is free.
+ */
+export const polishJdEndpoint = asyncHandler(
+  async (req: AuthRequest, res: Response) => {
+    if (!req.user) throw ApiError.unauthorized();
+    const userId = String(req.user._id);
+
+    const { title, description } = req.body as z.infer<
+      typeof polishJdSchema
+    >['body'];
+
+    const cached = await peekCachedPolishedJd(title, description);
+    let quota = await getQuotaSnapshot(userId);
+    if (cached) {
+      res.json({ success: true, data: cached, quota });
+      return;
+    }
+
+    const weight = getCreditWeight('jd_polish');
+    if (weight > 0) quota = await enforceQuota(userId, weight);
+
+    let result;
+    try {
+      result = await polishJd({ title, description, userId });
+    } catch (err) {
+      if (weight > 0) await refundQuota(userId, weight);
+      throw err;
+    }
+    if (weight > 0 && !result.usedAi) {
+      await refundQuota(userId, weight);
+    }
+
+    res.json({ success: true, data: result, quota });
+  },
+);

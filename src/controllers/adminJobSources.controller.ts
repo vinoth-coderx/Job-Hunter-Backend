@@ -47,6 +47,8 @@ export const getJobSources = asyncHandler(
           generic: def.type === 'generic' ? def.generic : undefined,
           lastRunAt: stats.lastRunAt ?? undefined,
           lastJobCount: stats.lastJobsFetched || 0,
+          lastStatus: stats.lastStatus ?? undefined,
+          lastStatusDetail: stats.lastStatusDetail ?? undefined,
           lastError:
             stats.lastErrors > 0
               ? `${stats.lastErrors} error(s) in last run`

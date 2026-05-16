@@ -8,7 +8,7 @@ import mongoose, { Schema, Document, Model } from 'mongoose';
  * (b) register new "generic REST" sources with field-mapping configs
  * that drive the upcoming `GenericApiScraper`.
  *
- * The 6 historical scrapers (adzuna, serpapi, rapidapi, theirstack,
+ * The 5 historical scrapers (adzuna, serpapi, rapidapi,
  * arbeitnow, puppeteer) remain `type: "builtin"` — their fetch logic
  * is in code (services/scrapers/*) and isn't editable from the admin.
  * Only `enabled`, `queries`, `locations` and `notes` matter for them.

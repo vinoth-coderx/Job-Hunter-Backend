@@ -101,6 +101,14 @@ export const slowDownAfterFailures = async (
   }
 };
 
+// Routes that legitimately accept HTML, script-like or operator-like text
+// in their request bodies (e.g. admin uploading a resume template HTML
+// file). Body inspection is skipped for these paths — the URL itself is
+// still scanned, and they remain auth-gated by their own router middleware.
+const BODY_SCAN_BYPASS_PREFIXES = [
+  '/api/v1/admin/resume-templates',
+];
+
 export const detectSuspiciousActivity = (
   req: Request,
   _res: Response,
@@ -108,6 +116,7 @@ export const detectSuspiciousActivity = (
 ): void => {
   const ua = req.headers['user-agent'] || '';
   const url = req.originalUrl;
+  const decodedUrl = decodeURIComponent(url);
 
   const suspicious = [
     /\.\.\//,
@@ -117,7 +126,16 @@ export const detectSuspiciousActivity = (
     /\$where|\$ne|\$gt|\$regex/,
   ];
 
-  if (suspicious.some((re) => re.test(decodeURIComponent(url)) || re.test(JSON.stringify(req.body || {})))) {
+  // Always scan the URL itself (path/query). Scan the body only for
+  // routes that don't legitimately carry HTML or code-like payloads.
+  const scanBody = !BODY_SCAN_BYPASS_PREFIXES.some((p) => decodedUrl.startsWith(p));
+  const body = scanBody ? JSON.stringify(req.body || {}) : '';
+
+  if (
+    suspicious.some(
+      (re) => re.test(decodedUrl) || (scanBody && re.test(body)),
+    )
+  ) {
     logger.warn(`Suspicious request blocked from ${req.ip} ua="${ua}" url="${url}"`);
     return next(ApiError.badRequest('Request blocked'));
   }

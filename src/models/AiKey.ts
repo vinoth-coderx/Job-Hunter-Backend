@@ -11,7 +11,7 @@ import mongoose, { Schema, Document, Model } from 'mongoose';
  * never accidentally leaks it. The admin UI never receives the plaintext
  * — only a flag indicating whether a value is stored.
  */
-export type AiProvider = 'gemini' | 'claude';
+export type AiProvider = 'gemini' | 'claude' | 'groq';
 export type AiTier = 'free' | 'paid';
 
 // Omit Document's `model` accessor — we want to use that name for the
@@ -46,7 +46,7 @@ const aiKeySchema = new Schema<IAiKey>(
   {
     provider: {
       type: String,
-      enum: ['gemini', 'claude'],
+      enum: ['gemini', 'claude', 'groq'],
       required: true,
       index: true,
     },

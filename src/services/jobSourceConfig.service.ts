@@ -13,11 +13,36 @@ import { logger } from '../utils/logger';
  * `syncBuiltinSources()` for that — invoked at boot too so additions
  * appear automatically without resetting admin toggles.
  */
+/**
+ * Builtin source slugs that used to exist but have since been removed
+ * from the catalog. Their JobSourceConfig rows linger on existing
+ * deployments and the admin UI keeps showing them. Boot purges any
+ * `type: builtin` row whose source isn't in KNOWN_SCRAPERS anymore.
+ * Generic (admin-registered) sources are NEVER auto-purged because
+ * the admin owns those rows.
+ */
+const purgeRetiredBuiltins = async (): Promise<void> => {
+  const known = new Set(KNOWN_SCRAPERS.map((d) => d.source));
+  const builtins = await JobSourceConfig.find({ type: 'builtin' }, { source: 1 }).lean();
+  const retired = builtins
+    .map((d) => d.source)
+    .filter((s) => !known.has(s));
+  if (retired.length === 0) return;
+  const res = await JobSourceConfig.deleteMany({
+    type: 'builtin',
+    source: { $in: retired },
+  });
+  logger.info(
+    `JobSourceConfig: purged ${res.deletedCount} retired builtin(s): ${retired.join(', ')}`,
+  );
+};
+
 export const seedJobSourceConfigs = async (): Promise<void> => {
   try {
     const existing = await JobSourceConfig.estimatedDocumentCount();
     if (existing > 0) {
       await syncBuiltinSources();
+      await purgeRetiredBuiltins();
       return;
     }
     await JobSourceConfig.insertMany(

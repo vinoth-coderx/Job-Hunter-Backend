@@ -4,6 +4,7 @@ import { Alert } from '../models/Alert';
 import { asyncHandler } from '../utils/asyncHandler';
 import { ApiError } from '../utils/ApiError';
 import { AuthRequest } from '../types';
+import { suggestAlertNames } from '../services/ai/alertNamer.service';
 
 export const createAlertSchema = z.object({
   body: z.object({
@@ -88,3 +89,30 @@ export const deleteAlert = asyncHandler(async (req: AuthRequest, res: Response) 
   if (!removed) throw ApiError.notFound('Alert not found');
   res.json({ success: true, message: 'Alert deleted' });
 });
+
+export const suggestAlertNameSchema = z.object({
+  body: z.object({
+    query: z.string().max(200).default(''),
+    filters: z.array(z.string().max(80)).max(20).default([]),
+    location: z.string().max(120).optional(),
+  }),
+});
+
+/**
+ * Suggest 2-3 alert names for the seeker's saved-search payload. Cached
+ * 7d server-side and uses Groq (weight 0), so re-asking on the same
+ * filters never burns quota.
+ */
+export const suggestAlertNamesEndpoint = asyncHandler(
+  async (req: AuthRequest, res: Response) => {
+    if (!req.user) throw ApiError.unauthorized();
+    const { query, filters, location } = req.body as z.infer<
+      typeof suggestAlertNameSchema
+    >['body'];
+    const names = await suggestAlertNames(
+      { query, filters, location },
+      { userId: String(req.user._id) },
+    );
+    res.json({ success: true, data: { names } });
+  },
+);

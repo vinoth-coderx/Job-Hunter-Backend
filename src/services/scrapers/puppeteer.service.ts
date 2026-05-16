@@ -84,9 +84,11 @@ export class PuppeteerScraper extends BaseScraper {
 
       const fresh = result.filter((j) => this.isWithinFreshness(j.postedAt));
       this.log(`Scraped ${fresh.length} fresh jobs for "${query}"`);
+      this.noteOk(fresh.length);
       return fresh;
     } catch (err) {
       this.logError(`Failed to scrape "${query}"`, err);
+      this.noteStatus('parse_error', (err as Error).message.slice(0, 80));
       return [];
     } finally {
       await page.close();

@@ -32,7 +32,7 @@ export interface AiGenerateResult {
 }
 
 export interface AiProvider {
-  name: 'gemini' | 'claude';
+  name: 'gemini' | 'claude' | 'groq';
   enabled: boolean;
   generate(opts: AiGenerateOptions): Promise<AiGenerateResult>;
 }
@@ -44,5 +44,19 @@ export class AiProviderQuotaError extends Error {
   constructor(message: string) {
     super(message);
     this.name = 'AiProviderQuotaError';
+  }
+}
+
+/**
+ * Thrown when the provider rejects the request for authentication
+ * reasons (HTTP 401 / 403 — invalid, expired or revoked API key). The
+ * provider chain in `generate()` treats this the same as a quota error
+ * and falls through to the next configured provider, because a bad key
+ * means the provider is functionally unusable until an admin rotates it.
+ */
+export class AiProviderAuthError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'AiProviderAuthError';
   }
 }

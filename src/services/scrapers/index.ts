@@ -1,8 +1,8 @@
 import { AdzunaScraper } from './adzuna.service';
 import { SerpApiScraper } from './serpapi.service';
 import { RapidApiScraper } from './rapidapi.service';
+import { RealtimeWebSearchScraper } from './realtimeWebSearch.service';
 import { ArbeitnowScraper } from './arbeitnow.service';
-import { TheirStackScraper } from './theirstack.service';
 import { PuppeteerScraper } from './puppeteer.service';
 import { GenericApiScraper } from './generic.service';
 import { Job } from '../../models/Job';
@@ -16,8 +16,8 @@ import { IJobSourceConfig } from '../../models/JobSourceConfig';
 const adzuna = new AdzunaScraper();
 const serp = new SerpApiScraper();
 const rapid = new RapidApiScraper();
+const realtimeWebSearch = new RealtimeWebSearchScraper();
 const arbeitnow = new ArbeitnowScraper();
-const theirstack = new TheirStackScraper();
 const puppeteerScraper = new PuppeteerScraper();
 
 const DEFAULT_QUERIES = [
@@ -68,7 +68,15 @@ export const fetchAllJobs = async (opts: FetchOptions = {}): Promise<{
     .filter((c) => c.type === 'generic' && c.enabled && c.generic)
     .map((c) => new GenericApiScraper(c));
 
-  for (const s of [adzuna, serp, rapid, arbeitnow, theirstack, puppeteerScraper, ...genericScrapers]) {
+  for (const s of [
+    adzuna,
+    serp,
+    rapid,
+    realtimeWebSearch,
+    arbeitnow,
+    puppeteerScraper,
+    ...genericScrapers,
+  ]) {
     s.resetForNewRun();
   }
 
@@ -77,8 +85,8 @@ export const fetchAllJobs = async (opts: FetchOptions = {}): Promise<{
     adzuna: 0,
     serpapi: 0,
     rapidapi: 0,
+    realtime_web_search: 0,
     arbeitnow: 0,
-    theirstack: 0,
     puppeteer: 0,
   };
   // Seed bySource counters for generic sources so the tracker rollup
@@ -107,8 +115,9 @@ export const fetchAllJobs = async (opts: FetchOptions = {}): Promise<{
     if (isOn('adzuna')) time('adzuna', adzuna.fetch(query, location));
     if (isOn('serpapi')) time('serpapi', serp.fetch(query, location));
     if (isOn('rapidapi')) time('rapidapi', rapid.fetch(query, location));
+    if (isOn('realtime_web_search'))
+      time('realtime_web_search', realtimeWebSearch.fetch(query, location));
     if (isOn('arbeitnow')) time('arbeitnow', arbeitnow.fetch(query, location));
-    if (isOn('theirstack')) time('theirstack', theirstack.fetch(query, location));
     if (usePuppeteer && isOn('puppeteer'))
       time('puppeteer', puppeteerScraper.fetch(query, location));
     for (const g of genericScrapers) {
@@ -156,9 +165,11 @@ export const fetchAllJobs = async (opts: FetchOptions = {}): Promise<{
           $set: {
             title: j.title,
             company: j.company,
+            companyLogoUrl: j.companyLogoUrl,
             location: j.location,
             description: j.description,
             url: j.url,
+            applyUrl: j.applyUrl,
             salaryMin: j.salaryMin,
             salaryMax: j.salaryMax,
             currency: j.currency,
@@ -193,20 +204,38 @@ export const fetchAllJobs = async (opts: FetchOptions = {}): Promise<{
     bySource,
   );
 
+  // Map source → BaseScraper so we can read each scraper's last-run
+  // status (set during fetch via noteStatus). Generic scrapers expose the
+  // same `lastRunStatus` getter via their BaseScraper inheritance.
+  const sourceToScraper: Record<string, { lastRunStatus: { status: string; detail?: string } } | undefined> = {
+    adzuna,
+    serpapi: serp,
+    rapidapi: rapid,
+    realtime_web_search: realtimeWebSearch,
+    arbeitnow,
+    puppeteer: puppeteerScraper,
+  };
+  for (const g of genericScrapers) {
+    sourceToScraper[g.source] = g;
+  }
+
   // Persist per-source rollup so the admin dashboard can render
   // last-run / 24h aggregates. Best-effort: tracker errors are swallowed
   // inside [recordScraperRun] so they can't bubble up and fail the run.
   const sources = Object.keys(bySource);
   await Promise.all(
-    sources.map((source) =>
-      recordScraperRun(source, {
+    sources.map((source) => {
+      const scraperStatus = sourceToScraper[source]?.lastRunStatus;
+      return recordScraperRun(source, {
         total: bySource[source] || 0,
         inserted: insertedBySource[source] || 0,
         updated: updatedBySource[source] || 0,
         errors: sourceErrors[source] || 0,
         durationMs: sourceDurationMs[source] || 0,
-      }),
-    ),
+        status: scraperStatus?.status,
+        statusDetail: scraperStatus?.detail,
+      });
+    }),
   );
 
   return { total: all.length, inserted, updated, bySource };
@@ -215,7 +244,7 @@ export const fetchAllJobs = async (opts: FetchOptions = {}): Promise<{
 export interface LiveFetchOptions {
   queries: string[];
   locations?: string[];
-  /** Include bulk-only sources (arbeitnow, theirstack). Off by default — these
+  /** Include bulk-only sources (arbeitnow). Off by default — these
    *  ignore query/location filters and self-throttle, so they're cron-only. */
   includeBulkSources?: boolean;
 }
@@ -251,9 +280,9 @@ export const fetchAllJobsLive = async (
       if (isOn('adzuna')) tasks.push(adzuna.fetch(query, location));
       if (isOn('serpapi')) tasks.push(serp.fetch(query, location));
       if (isOn('rapidapi')) tasks.push(rapid.fetch(query, location));
+      if (isOn('realtime_web_search')) tasks.push(realtimeWebSearch.fetch(query, location));
       if (includeBulk) {
         if (isOn('arbeitnow')) tasks.push(arbeitnow.fetch(query, location));
-        if (isOn('theirstack')) tasks.push(theirstack.fetch(query, location));
       }
       for (const g of genericScrapers) {
         tasks.push(g.fetch(query, location));
@@ -275,4 +304,4 @@ export const fetchAllJobsLive = async (
   return out;
 };
 
-export { adzuna, serp, rapid, arbeitnow, theirstack, puppeteerScraper };
+export { adzuna, serp, rapid, realtimeWebSearch, arbeitnow, puppeteerScraper };

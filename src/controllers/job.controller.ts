@@ -10,6 +10,7 @@ import { aiJobSearch } from '../services/ai/jobSearch.service';
 import { buildAllJobsPayload } from '../services/jobCache.service';
 import {
   FeedJob,
+  hydrateTrust,
   toFeedJobFromNative,
   toFeedJobFromScraped,
   deriveProfileQueries,
@@ -22,7 +23,9 @@ import {
 import { logger } from '../utils/logger';
 
 const OBJECT_ID_RE = /^[a-f0-9]{24}$/i;
-const EXTERNAL_ID_RE = /^([a-z]+):(.+)$/i;
+// Allow underscores so multi-word source slugs (e.g. `realtime_web_search`)
+// don't fall through to the "Invalid job id" branch.
+const EXTERNAL_ID_RE = /^([a-z][a-z0-9_]*):(.+)$/i;
 
 export const listJobsSchema = z.object({
   query: z.object({
@@ -72,6 +75,10 @@ const buildNativeFilter = (q: Record<string, unknown>): Record<string, unknown> 
     isNative: true,
     isActive: true,
     status: 'active',
+    // Only surface native listings that have cleared moderation. External
+    // (scraped) jobs aren't gated on this flag — they go through the
+    // source-level trust check inside the scrapers instead.
+    isPublic: true,
   };
 
   const qStr = str(q.q);
@@ -270,8 +277,10 @@ export const listJobs = asyncHandler(
     // Native results — query the DB with the user's filters.
     const nativeFilter = buildNativeFilter(q);
     const native = await Job.find(nativeFilter).limit(500).lean();
-    const nativeFeed = native.map((n) =>
-      toFeedJobFromNative(n as unknown as Parameters<typeof toFeedJobFromNative>[0]),
+    const nativeFeed = await hydrateTrust(
+      native.map((n) =>
+        toFeedJobFromNative(n as unknown as Parameters<typeof toFeedJobFromNative>[0]),
+      ),
     );
 
     // External results — live fetch using either the search query or the
@@ -340,11 +349,31 @@ export const getJob = asyncHandler(async (req: Request, res: Response) => {
   const id = String(req.params.id);
 
   if (OBJECT_ID_RE.test(id)) {
-    const job = await Job.findById(id).lean();
+    const job = await Job.findById(id)
+      .populate('hirerProfile', 'verification trustScore approvalStatus')
+      .lean();
     if (!job) throw ApiError.notFound('Job not found');
+    const hp = job.hirerProfile as unknown as
+      | {
+          verification?: { isVerified?: boolean };
+          trustScore?: number;
+          approvalStatus?: string;
+        }
+      | undefined;
     res.json({
       success: true,
-      data: toFeedJobFromNative(job as unknown as Parameters<typeof toFeedJobFromNative>[0]),
+      data: {
+        ...toFeedJobFromNative(
+          job as unknown as Parameters<typeof toFeedJobFromNative>[0],
+        ),
+        // Seeker-side trust signals. The feed-job shape doesn't carry
+        // these by default (saves a populate on every list query); we
+        // graft them on for the detail screen because they drive the
+        // VerifiedBadge / SafeApplyBadge / FraudWarningBanner rendering.
+        companyVerified: hp?.verification?.isVerified === true,
+        recruiterTrustScore: hp?.trustScore ?? null,
+        recruiterApproved: (hp?.approvalStatus ?? 'approved') === 'approved',
+      },
     });
     return;
   }
@@ -395,12 +424,17 @@ export const matchedJobs = asyncHandler(async (req: AuthRequest, res: Response) 
       Job.find(baseFilter).sort({ postedAt: -1 }).skip(skip).limit(limit).lean(),
       Job.countDocuments(baseFilter),
     ]);
-    res.json({
-      success: true,
-      data: items.map((j) => ({
-        job: toFeedJobFromNative(
+    const feedItems = await hydrateTrust(
+      items.map((j) =>
+        toFeedJobFromNative(
           j as unknown as Parameters<typeof toFeedJobFromNative>[0],
         ),
+      ),
+    );
+    res.json({
+      success: true,
+      data: feedItems.map((job) => ({
+        job,
         score: null,
         matchedSkills: [],
         missingSkills: [],
@@ -437,12 +471,17 @@ export const matchedJobs = asyncHandler(async (req: AuthRequest, res: Response) 
       Job.find(baseFilter).sort({ postedAt: -1 }).skip(skip).limit(limit).lean(),
       Job.countDocuments(baseFilter),
     ]);
-    res.json({
-      success: true,
-      data: items.map((j) => ({
-        job: toFeedJobFromNative(
+    const feedItems = await hydrateTrust(
+      items.map((j) =>
+        toFeedJobFromNative(
           j as unknown as Parameters<typeof toFeedJobFromNative>[0],
         ),
+      ),
+    );
+    res.json({
+      success: true,
+      data: feedItems.map((job) => ({
+        job,
         score: null,
         matchedSkills: [],
         missingSkills: [],
@@ -491,8 +530,10 @@ export const matchedJobs = asyncHandler(async (req: AuthRequest, res: Response) 
     .sort({ postedAt: -1 })
     .limit(500)
     .lean();
-  const nativeFeed = nativeDocs.map((n) =>
-    toFeedJobFromNative(n as unknown as Parameters<typeof toFeedJobFromNative>[0]),
+  const nativeFeed = await hydrateTrust(
+    nativeDocs.map((n) =>
+      toFeedJobFromNative(n as unknown as Parameters<typeof toFeedJobFromNative>[0]),
+    ),
   );
 
   // External candidates: profile-driven live fetch (cached in Redis).

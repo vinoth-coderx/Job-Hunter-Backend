@@ -123,7 +123,11 @@ export const runJobFetchNow = async () => {
   if (isRunning) throw new Error('A job fetch is already in progress');
   isRunning = true;
   try {
-    return await fetchAllJobs();
+    // Admin "Run now" honors every source the operator has enabled in
+    // the Job Sources panel — including Puppeteer, which fetchAllJobs()
+    // skips by default. The per-source `isOn()` gate inside fetchAllJobs
+    // is the actual authority on whether each scraper runs.
+    return await fetchAllJobs({ usePuppeteer: true });
   } finally {
     isRunning = false;
   }

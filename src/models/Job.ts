@@ -65,6 +65,24 @@ export interface IJob extends Document {
   applicationDeadline?: Date;
 
   status: JobStatus;
+  // Moderation — set only on native jobs. External (scraped) jobs are
+  // implicitly trusted because they come from already-curated sources;
+  // the moderation pipeline only runs against `isNative=true` rows.
+  moderation: {
+    status: 'pending' | 'auto_approved' | 'queued' | 'approved' | 'rejected';
+    riskScore?: number;
+    flags: string[];
+    duplicateOf?: mongoose.Types.ObjectId;
+    contentHash?: string;
+    reviewedAt?: Date;
+    reviewedBy?: mongoose.Types.ObjectId;
+    reviewNote?: string;
+    lastModelRun?: Date;
+  };
+  // True once the listing has cleared moderation AND the recruiter is
+  // `approved`. Feed queries filter on this flag instead of recomposing
+  // the moderation check on every read.
+  isPublic: boolean;
   isBoosted?: boolean;
   boostExpiresAt?: Date;
 
@@ -160,6 +178,23 @@ const jobSchema = new Schema<IJob>(
       default: 'active',
       index: true,
     },
+    moderation: {
+      status: {
+        type: String,
+        enum: ['pending', 'auto_approved', 'queued', 'approved', 'rejected'],
+        default: 'pending',
+        index: true,
+      },
+      riskScore: { type: Number, min: 0, max: 100 },
+      flags: { type: [String], default: [] },
+      duplicateOf: { type: Schema.Types.ObjectId, ref: 'Job' },
+      contentHash: { type: String, index: true },
+      reviewedAt: Date,
+      reviewedBy: { type: Schema.Types.ObjectId, ref: 'User' },
+      reviewNote: String,
+      lastModelRun: Date,
+    },
+    isPublic: { type: Boolean, default: false, index: true },
     isBoosted: { type: Boolean, default: false, index: true },
     boostExpiresAt: Date,
 

@@ -188,6 +188,7 @@ export const notificationPrefsSchema = z.object({
     jobAlerts: z.boolean().optional(),
     applicationUpdates: z.boolean().optional(),
     autoApplySummary: z.boolean().optional(),
+    aiPolish: z.boolean().optional(),
     quietHoursStart: z
       .string()
       .regex(/^([01]\d|2[0-3]):[0-5]\d$/)

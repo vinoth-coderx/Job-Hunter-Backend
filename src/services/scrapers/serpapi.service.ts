@@ -41,7 +41,7 @@ export class SerpApiScraper extends BaseScraper {
 
   async fetch(query: string, location = ''): Promise<ScrapedJob[]> {
     const apiKey = getAppConfig('SERPAPI_KEY');
-    if (!apiKey) return [];
+    if (this.needsKey(apiKey, 'SERPAPI_KEY')) return [];
     if (await this.isCooldown()) return [];
 
     const days = this.freshnessDays();
@@ -90,6 +90,7 @@ export class SerpApiScraper extends BaseScraper {
       this.log(
         `Fetched ${jobs.length} fresh jobs for "${query}" (${datePosted}/${days}d; raw=${rawCount})`,
       );
+      this.noteOk(jobs.length);
       return jobs;
     } catch (err) {
       await this.handleAxiosError(err, `fetch "${query}"`);

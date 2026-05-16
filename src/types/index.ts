@@ -22,7 +22,6 @@ export type KnownJobSource =
   | 'serpapi'
   | 'rapidapi'
   | 'arbeitnow'
-  | 'theirstack'
   | 'puppeteer'
   | 'playwright';
 export type JobSource = KnownJobSource | (string & {});
@@ -41,6 +40,9 @@ export type NotificationType =
   | 'subscription_expiry'
   | 'company_new_job'
   | 'new_applicant'
+  | 'security'
+  | 'verification'
+  | 'fraud_alert'
   | 'system';
 
 export interface ScrapedJob {
@@ -48,9 +50,14 @@ export interface ScrapedJob {
   source: JobSource;
   title: string;
   company: string;
+  companyLogoUrl?: string;
   location: string;
   description: string;
   url: string;
+  /** Best apply target picked at scrape-time. Frontend opens this before
+   *  falling back to `url`. JSearch fills it by priority: LinkedIn →
+   *  direct/official employer site → first available apply option. */
+  applyUrl?: string;
   salaryMin?: number;
   salaryMax?: number;
   currency?: string;

@@ -1,11 +1,11 @@
 import { Request, Response } from 'express';
 import { z } from 'zod';
-import { Subscription, SUBSCRIPTION_PLANS } from '../models/Subscription';
+import { Subscription } from '../models/Subscription';
 import { User } from '../models/User';
 import { WebhookEvent } from '../models/WebhookEvent';
 import { asyncHandler } from '../utils/asyncHandler';
 import { ApiError } from '../utils/ApiError';
-import { AuthRequest, SubscriptionTier } from '../types';
+import { AuthRequest } from '../types';
 import { logger } from '../utils/logger';
 import { env } from '../config/env';
 import { getAppConfig } from '../services/config/config.service';
@@ -20,15 +20,7 @@ import {
   RazorpayMode,
 } from '../services/razorpay.service';
 import { grantCoins, getBalance } from '../services/coins/coin.service';
-
-// Coin price per redeemable tier. Yearly is intentionally absent — at the
-// current earn rates a user would need months of streaks to hit 4-figure
-// yearly cost, so the alt-payment path stays focused on shorter tiers
-// where coins actually move the needle.
-const TIER_COIN_COST: Partial<Record<SubscriptionTier, number>> = {
-  weekly: 500,
-  monthly: 1500,
-};
+import { getPlan, getActivePlans } from '../services/subscriptionPlans.service';
 
 /**
  * Idempotently activate a subscription for a captured Razorpay payment.
@@ -42,14 +34,14 @@ const TIER_COIN_COST: Partial<Record<SubscriptionTier, number>> = {
  */
 const activateSubscriptionAfterPayment = async (params: {
   userId: string;
-  tier: SubscriptionTier;
+  tier: string;
   paymentId: string;
   orderId: string;
   amountPaise: number;
 }) => {
   const { userId, tier, paymentId, orderId, amountPaise } = params;
 
-  const plan = SUBSCRIPTION_PLANS[tier];
+  const plan = await getPlan(tier);
   if (!plan || plan.priceInr <= 0) {
     throw ApiError.badRequest(`Invalid paid tier: ${tier}`);
   }
@@ -116,7 +108,7 @@ const activateSubscriptionAfterPayment = async (params: {
 
 export const subscribeSchema = z.object({
   body: z.object({
-    tier: z.enum(['free', 'weekly', 'monthly', 'yearly']),
+    tier: z.string().min(1).max(40),
     paymentMethod: z.enum(['razorpay', 'stripe', 'manual']).optional(),
     paymentId: z.string().optional(),
     orderId: z.string().optional(),
@@ -124,18 +116,15 @@ export const subscribeSchema = z.object({
 });
 
 export const listPlans = asyncHandler(async (_req: AuthRequest, res: Response) => {
-  // Surface the coin price alongside each plan so the client can render
-  // the "Buy with coins" CTA without a second lookup.
-  const plans = Object.values(SUBSCRIPTION_PLANS).map((p) => ({
-    ...p,
-    coinCost: TIER_COIN_COST[p.tier as SubscriptionTier] ?? null,
-  }));
+  // Active-only — admin-deactivated plans should disappear from the
+  // user pricing page. `coinCost` is on the plan record itself now.
+  const plans = await getActivePlans();
   res.json({ success: true, data: plans });
 });
 
 export const redeemWithCoinsSchema = z.object({
   body: z.object({
-    tier: z.enum(['weekly', 'monthly']),
+    tier: z.string().min(1).max(40),
   }),
 });
 
@@ -166,13 +155,13 @@ export const redeemWithCoins = asyncHandler(
       typeof redeemWithCoinsSchema
     >['body'];
 
-    const cost = TIER_COIN_COST[tier];
+    const plan = await getPlan(tier);
+    if (!plan) throw ApiError.badRequest('Invalid subscription tier');
+
+    const cost = plan.coinCost ?? 0;
     if (!cost || cost <= 0) {
       throw ApiError.badRequest(`Tier '${tier}' is not redeemable with coins`);
     }
-
-    const plan = SUBSCRIPTION_PLANS[tier];
-    if (!plan) throw ApiError.badRequest('Invalid subscription tier');
 
     // 1. Cheap pre-check — saves a CoinLedger insert + rollback in the
     //    common "user mis-clicked while broke" path.
@@ -286,13 +275,14 @@ export const currentSubscription = asyncHandler(async (req: AuthRequest, res: Re
   }).sort({ endDate: -1 });
 
   const user = await User.findById(req.user._id);
+  const tier = user?.subscription.tier || 'free';
   res.json({
     success: true,
     data: {
-      tier: user?.subscription.tier || 'free',
+      tier,
       status: user?.subscription.status || 'active',
       activeSubscription: active,
-      plan: SUBSCRIPTION_PLANS[user?.subscription.tier || 'free'],
+      plan: await getPlan(tier),
     },
   });
 });
@@ -300,13 +290,13 @@ export const currentSubscription = asyncHandler(async (req: AuthRequest, res: Re
 export const subscribe = asyncHandler(async (req: AuthRequest, res: Response) => {
   if (!req.user) throw ApiError.unauthorized();
   const { tier, paymentMethod, paymentId, orderId } = req.body as {
-    tier: SubscriptionTier;
+    tier: string;
     paymentMethod?: 'razorpay' | 'stripe' | 'manual';
     paymentId?: string;
     orderId?: string;
   };
 
-  const plan = SUBSCRIPTION_PLANS[tier];
+  const plan = await getPlan(tier);
   if (!plan) throw ApiError.badRequest('Invalid subscription tier');
 
   if (tier !== 'free' && !paymentId) {
@@ -379,7 +369,7 @@ export const subscriptionHistory = asyncHandler(async (req: AuthRequest, res: Re
 
 export const createRazorpayOrderSchema = z.object({
   body: z.object({
-    tier: z.enum(['weekly', 'monthly', 'yearly']),
+    tier: z.string().min(1).max(40),
     // Client may request 'test' mode (debug builds, emulators). The server
     // ONLY honors this in non-production deployments — see resolveRazorpayMode.
     mode: z.enum(['test', 'live']).optional(),
@@ -400,17 +390,19 @@ export const verifyRazorpayPaymentSchema = z.object({
 
 /**
  * Create a Razorpay order pinned to a tier. The amount is taken from
- * SUBSCRIPTION_PLANS server-side — never from the client — so a
+ * the SubscriptionPlan record server-side — never from the client — so a
  * tampered request can't pay ₹1 for the yearly plan.
  */
 export const razorpayCreateOrder = asyncHandler(async (req: AuthRequest, res: Response) => {
   if (!req.user) throw ApiError.unauthorized();
   const { tier, mode: requestedMode } = req.body as {
-    tier: SubscriptionTier;
+    tier: string;
     mode?: RazorpayMode;
   };
-  const plan = SUBSCRIPTION_PLANS[tier];
-  if (!plan || plan.priceInr <= 0) throw ApiError.badRequest('Invalid paid tier');
+  const plan = await getPlan(tier);
+  if (!plan || !plan.isActive || plan.priceInr <= 0) {
+    throw ApiError.badRequest('Invalid paid tier');
+  }
 
   // Resolve which credential set to use. In production this is always 'live'
   // regardless of what the client asks; in dev/staging it honors a debug
@@ -495,7 +487,7 @@ export const razorpayVerifyPayment = asyncHandler(async (req: AuthRequest, res: 
   const order = await fetchRazorpayOrder(razorpay_order_id, mode);
   const notes = order.notes ?? {};
   const orderUserId = notes.userId;
-  const orderTier = notes.tier as SubscriptionTier | undefined;
+  const orderTier = notes.tier;
 
   // 3. Ownership.
   if (!orderUserId || orderUserId !== req.user.id) {
@@ -505,7 +497,7 @@ export const razorpayVerifyPayment = asyncHandler(async (req: AuthRequest, res: 
     throw ApiError.forbidden('Order does not belong to this user');
   }
 
-  if (!orderTier || !SUBSCRIPTION_PLANS[orderTier]) {
+  if (!orderTier || !(await getPlan(orderTier))) {
     throw ApiError.badRequest('Order is missing a valid tier');
   }
 
@@ -626,9 +618,9 @@ export const razorpayWebhook = asyncHandler(async (req: Request, res: Response) 
       const order = await fetchRazorpayOrder(payment.order_id, mode);
       const notes = order.notes ?? {};
       const userId = notes.userId;
-      const tier = notes.tier as SubscriptionTier | undefined;
+      const tier = notes.tier;
 
-      if (!userId || !tier || !SUBSCRIPTION_PLANS[tier]) {
+      if (!userId || !tier || !(await getPlan(tier))) {
         logger.warn(
           `Webhook ${event} for order ${payment.order_id}: missing/invalid notes (userId=${userId} tier=${tier}). Ignoring.`,
         );

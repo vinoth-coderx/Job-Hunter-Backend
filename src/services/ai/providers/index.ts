@@ -2,49 +2,161 @@ import { getAppConfig } from '../../config/config.service';
 import { logger } from '../../../utils/logger';
 import { claudeProvider } from './claude.provider';
 import { geminiProvider } from './gemini.provider';
+import { groqProvider } from './groq.provider';
+import { recordAiUsage } from '../usageLog.service';
 import {
   AiGenerateOptions,
   AiGenerateResult,
   AiProvider,
+  AiProviderAuthError,
   AiProviderQuotaError,
 } from './types';
 
-export { AiProviderQuotaError } from './types';
+export { AiProviderAuthError, AiProviderQuotaError } from './types';
 export type { AiTier, AiGenerateOptions, AiGenerateResult } from './types';
 
 /**
- * Resolve the active provider per-request so admin changes to
- * `AI_PROVIDER` propagate without a process restart. `claudeProvider`
- * and `geminiProvider` both expose `enabled` as a getter, so the
- * lookups here cost a single Map.get each.
+ * Optional context every caller can attach to a generate() call so the
+ * usage-log row is tagged with the originating feature + user. Untagged
+ * calls still log, just under feature='unknown' — but services should
+ * tag so the admin analytics page is useful.
  */
-const pickProvider = (): AiProvider => {
-  const preferred = getAppConfig('AI_PROVIDER') ?? 'gemini';
-  if (preferred === 'claude' && claudeProvider.enabled) return claudeProvider;
-  if (preferred === 'gemini' && geminiProvider.enabled) return geminiProvider;
-  // Configured provider has no key — fall back to whichever has a key set.
-  if (geminiProvider.enabled) return geminiProvider;
-  if (claudeProvider.enabled) return claudeProvider;
-  // Returned to callers; .generate() throws clearly when invoked.
+export interface AiCallContext {
+  userId?: string;
+  feature: string;
+}
+
+/**
+ * Build the provider chain for a single generate() call:
+ * preferred (or AI_PROVIDER from config) first, then the others in a
+ * fixed order. Only enabled providers (key configured) are returned —
+ * disabled ones are skipped, not surfaced as failures.
+ *
+ * The chain is consumed by `generate()`; the first provider answers the
+ * call, and any AiProviderQuotaError falls through to the next link
+ * automatically. Non-quota errors don't trigger fallback because they
+ * usually mean the caller's prompt is bad — retrying won't help.
+ */
+const ALL_PROVIDER_NAMES: ('gemini' | 'claude' | 'groq')[] = [
+  'gemini',
+  'claude',
+  'groq',
+];
+
+const providerByName = (name: 'gemini' | 'claude' | 'groq'): AiProvider => {
+  if (name === 'claude') return claudeProvider;
+  if (name === 'groq') return groqProvider;
   return geminiProvider;
 };
 
-export const isAiEnabled = (): boolean => geminiProvider.enabled || claudeProvider.enabled;
+const buildProviderChain = (
+  preferred?: 'gemini' | 'claude' | 'groq',
+): AiProvider[] => {
+  const want =
+    preferred ??
+    (getAppConfig('AI_PROVIDER') as 'gemini' | 'claude' | 'groq' | null) ??
+    'gemini';
+  // Preferred first, then the rest in `ALL_PROVIDER_NAMES` order — dedupe
+  // and keep only the providers that currently have a key configured.
+  const ordered = [want, ...ALL_PROVIDER_NAMES.filter((n) => n !== want)];
+  const seen = new Set<string>();
+  const chain: AiProvider[] = [];
+  for (const name of ordered) {
+    if (seen.has(name)) continue;
+    seen.add(name);
+    const p = providerByName(name);
+    if (p.enabled) chain.push(p);
+  }
+  return chain;
+};
+
+export const isAiEnabled = (): boolean =>
+  geminiProvider.enabled || claudeProvider.enabled || groqProvider.enabled;
+
+export const isProviderEnabled = (name: 'gemini' | 'claude' | 'groq'): boolean => {
+  if (name === 'gemini') return geminiProvider.enabled;
+  if (name === 'claude') return claudeProvider.enabled;
+  return groqProvider.enabled;
+};
 
 /**
- * Generate text. Thin pass-through to the active provider.
+ * Generate text. Records one AiUsageLog row per call attempt
+ * (success or failure). `opts.provider` lets callers force a specific
+ * lane (e.g. moderation uses 'groq' first, then escalates to 'gemini').
+ *
+ * Fallback: if the chosen provider throws an `AiProviderQuotaError`,
+ * the next provider in the chain (preferred → others) is tried with the
+ * same prompt. Non-quota errors short-circuit because they're almost
+ * always caller-side (bad prompt, validation) and retrying won't help.
  */
-export const generate = (opts: AiGenerateOptions): Promise<AiGenerateResult> =>
-  pickProvider().generate(opts);
+export const generate = async (
+  opts: AiGenerateOptions & { provider?: 'gemini' | 'claude' | 'groq' },
+  ctx?: AiCallContext,
+): Promise<AiGenerateResult> => {
+  const chain = buildProviderChain(opts.provider);
+  if (chain.length === 0) {
+    // No provider has a key configured. Call gemini so its existing
+    // "provider disabled" error bubbles up with a clear message.
+    return geminiProvider.generate(opts);
+  }
+  let lastFallbackError: Error | null = null;
+  for (const provider of chain) {
+    const startedAt = Date.now();
+    try {
+      const result = await provider.generate(opts);
+      recordAiUsage({
+        userId: ctx?.userId,
+        feature: ctx?.feature ?? 'unknown',
+        provider: provider.name,
+        tier: opts.tier,
+        inputTokens: result.inputTokens,
+        outputTokens: result.outputTokens,
+        latencyMs: Date.now() - startedAt,
+        success: true,
+      });
+      return result;
+    } catch (err) {
+      const isQuota = err instanceof AiProviderQuotaError;
+      const isAuth = err instanceof AiProviderAuthError;
+      const isFallbackable = isQuota || isAuth;
+      const errorCode = isQuota
+        ? 'quota'
+        : isAuth
+          ? 'auth'
+          : (err as Error)?.name ?? 'error';
+      recordAiUsage({
+        userId: ctx?.userId,
+        feature: ctx?.feature ?? 'unknown',
+        provider: provider.name,
+        tier: opts.tier,
+        latencyMs: Date.now() - startedAt,
+        success: false,
+        errorCode,
+      });
+      if (!isFallbackable) throw err;
+      lastFallbackError = err as Error;
+      // Try the next provider in the chain on quota OR auth (bad key)
+      // errors — both render this provider unusable for the request.
+    }
+  }
+  // Every provider in the chain returned a quota or auth error.
+  throw (
+    lastFallbackError ??
+    new AiProviderQuotaError('All AI providers unavailable (quota or auth)')
+  );
+};
 
 /**
  * Generate JSON and parse. Strips fences if the provider added any.
  * Returns null on parse failure so callers can fall back gracefully
  * instead of bubbling SyntaxError to the request.
  */
-export const generateJson = async <T>(opts: AiGenerateOptions): Promise<T | null> => {
+export const generateJson = async <T>(
+  opts: AiGenerateOptions & { provider?: 'gemini' | 'claude' | 'groq' },
+  ctx?: AiCallContext,
+): Promise<T | null> => {
   try {
-    const res = await pickProvider().generate({ ...opts, json: true });
+    const res = await generate({ ...opts, json: true }, ctx);
     const cleaned = res.text.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '');
     return JSON.parse(cleaned) as T;
   } catch (err) {
@@ -55,4 +167,21 @@ export const generateJson = async <T>(opts: AiGenerateOptions): Promise<T | null
     }
     throw err;
   }
+};
+
+/**
+ * Convenience: log a cache hit so the admin dashboard can show the
+ * "cache savings" ratio. Call this from a service when it serves a
+ * cached response without invoking the provider.
+ */
+export const recordCacheHit = (ctx: AiCallContext, tier: 'lite' | 'smart' = 'lite'): void => {
+  recordAiUsage({
+    userId: ctx.userId,
+    feature: ctx.feature,
+    provider: 'gemini',
+    tier,
+    latencyMs: 0,
+    success: true,
+    cacheHit: true,
+  });
 };

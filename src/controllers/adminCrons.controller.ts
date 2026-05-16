@@ -25,6 +25,21 @@ import {
   startAutoApplyCron,
   stopAutoApplyCron,
 } from '../jobs/autoApply.cron';
+import {
+  runTrustMaintenanceNow,
+  startTrustMaintenanceCron,
+  stopTrustMaintenanceCron,
+} from '../jobs/trustMaintenance.cron';
+import {
+  runCandidateSuggestionsWarmupNow,
+  startCandidateSuggestionsWarmupCron,
+  stopCandidateSuggestionsWarmupCron,
+} from '../jobs/candidateSuggestionsWarmup.cron';
+import {
+  runAiCostAlertNow,
+  startAiCostAlertCron,
+  stopAiCostAlertCron,
+} from '../jobs/aiCostAlert.cron';
 import { nextRunFromExpression } from '../utils/cronNextRun';
 
 /** Wire each known cron name to the function that runs its body. */
@@ -33,6 +48,9 @@ const RUNNERS: Record<string, () => Promise<void>> = {
   appliedJobsCleanup: runAppliedJobsCleanupNow,
   alertChecker: checkAlertsNow,
   autoApply: runAutoApplyTickNow,
+  trustMaintenance: runTrustMaintenanceNow,
+  candidateSuggestionsWarmup: runCandidateSuggestionsWarmupNow,
+  aiCostAlert: runAiCostAlertNow,
   // jobScraper isn't on a node-cron schedule today (admin-triggered only),
   // but we still surface it so the UI can dispatch it manually.
   jobScraper: async () => {
@@ -51,10 +69,16 @@ const restartAllCrons = (): void => {
   stopJobScraperCron();
   stopAlertCheckerCron();
   stopAutoApplyCron();
+  stopTrustMaintenanceCron();
+  stopCandidateSuggestionsWarmupCron();
+  stopAiCostAlertCron();
   if (cronsEnabled()) {
     startJobScraperCron();
     startAlertCheckerCron();
     startAutoApplyCron();
+    startTrustMaintenanceCron();
+    startCandidateSuggestionsWarmupCron();
+    startAiCostAlertCron();
   }
 };
 

@@ -8,6 +8,7 @@ import {
   markRead,
   startConversationSchema,
   sendMessageSchema,
+  getSmartReplies,
 } from '../controllers/chat.controller';
 import { authenticate } from '../middleware/auth';
 import { validate } from '../middleware/validate';
@@ -30,5 +31,6 @@ router.post(
   sendMessage,
 );
 router.put('/:id/read', markRead);
+router.get('/:id/smart-replies', getSmartReplies);
 
 export default router;

@@ -6,6 +6,8 @@ import { NotificationType } from '../../types';
 import { emitToUser } from '../chat/socket';
 import { logger } from '../../utils/logger';
 import { sendToTokens } from './fcm.service';
+import { getAppConfig } from '../config/config.service';
+import { rewriteNotificationCopy } from '../ai/notificationCopy.service';
 
 interface NotifyParams {
   user: mongoose.Types.ObjectId | string;
@@ -32,12 +34,49 @@ interface NotifyParams {
 /// Emits `notification:new` over Socket.IO with the saved doc as
 /// payload; the client listens and prepends without a fetch.
 export const notifyUser = async (params: NotifyParams): Promise<INotification> => {
+  // Optional AI rewrite of title/body. Off by default — admins flip
+  // NOTIFICATION_AI_REWRITE='1' in AppConfig to enable. Failures fall
+  // back to the original copy silently so the notification still goes
+  // out. Cached aggressively (30d) so recurring templates are nearly
+  // free after the first call.
+  let title = params.title;
+  let body = params.body;
+  if (getAppConfig('NOTIFICATION_AI_REWRITE') === '1') {
+    // Per-user opt-out: skip the rewrite when the recipient turned the
+    // `aiPolish` pref off. We default to ON so users who never touched
+    // the setting still benefit from the platform-wide flag.
+    let userOptedIn = true;
+    try {
+      const recipient = await User.findById(params.user)
+        .select('notificationPreferences.aiPolish')
+        .lean();
+      if (recipient?.notificationPreferences?.aiPolish === false) {
+        userOptedIn = false;
+      }
+    } catch {
+      // best-effort — fall through to the default ON
+    }
+    if (userOptedIn) {
+      try {
+        const polished = await rewriteNotificationCopy({
+          type: params.type,
+          title,
+          body,
+        });
+        title = polished.title;
+        body = polished.body;
+      } catch (err) {
+        logger.warn(`notify rewrite skipped: ${(err as Error).message}`);
+      }
+    }
+  }
+
   const doc = await Notification.create({
     user: params.user,
     role: params.role,
     type: params.type,
-    title: params.title,
-    body: params.body,
+    title,
+    body,
     data: params.data,
   });
 

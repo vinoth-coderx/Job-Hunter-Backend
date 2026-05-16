@@ -30,7 +30,8 @@ export class AdzunaScraper extends BaseScraper {
   async fetch(query: string, location = ''): Promise<ScrapedJob[]> {
     const appId = getAppConfig('ADZUNA_APP_ID');
     const appKey = getAppConfig('ADZUNA_APP_KEY');
-    if (!appId || !appKey) return [];
+    if (this.needsKey(appId, 'ADZUNA_APP_ID')) return [];
+    if (this.needsKey(appKey, 'ADZUNA_APP_KEY')) return [];
     if (await this.isCooldown()) return [];
 
     const days = this.freshnessDays();
@@ -78,6 +79,7 @@ export class AdzunaScraper extends BaseScraper {
       this.log(
         `Fetched ${jobs.length} fresh jobs for "${query}" (${days}d window; raw=${rawCount})`,
       );
+      this.noteOk(jobs.length);
       return jobs;
     } catch (err) {
       await this.handleAxiosError(err, `fetch "${query}"`);

@@ -4,14 +4,22 @@ import mongoose from 'mongoose';
 import { Conversation } from '../models/Conversation';
 import { Message } from '../models/Message';
 import { User } from '../models/User';
-import { DeviceToken } from '../models/DeviceToken';
 import { asyncHandler } from '../utils/asyncHandler';
 import { ApiError } from '../utils/ApiError';
 import { AuthRequest } from '../types';
 import { emitToUser } from '../services/chat/socket';
-import { sendToTokens } from '../services/notification/fcm.service';
+import { notifyUser } from '../services/notification/notify.service';
 import { uploadBuffer, CLOUDINARY_FOLDERS } from '../config/cloudinary';
 import { logger } from '../utils/logger';
+import { scanChatMessage } from '../services/security/chatSafety.service';
+import { writeAudit } from '../services/security/audit.service';
+import { suggestSmartReplies } from '../services/ai/chatSmartReply.service';
+import {
+  enforceQuota,
+  getQuotaSnapshot,
+  refundQuota,
+} from '../services/ai/quota.service';
+import { getCreditWeight } from '../config/aiCreditWeights';
 
 const isObjectId = (s: string) => /^[a-f0-9]{24}$/i.test(s);
 
@@ -84,6 +92,7 @@ interface PopulatedHirerLite {
   _id: mongoose.Types.ObjectId;
   companyLogoUrl?: string;
   companyName?: string;
+  verification?: { isVerified?: boolean };
 }
 
 interface PopulatedJobLite {
@@ -109,7 +118,7 @@ const jobLitePopulate = {
   select: 'title company companyLogoUrl hirerProfile postedBy',
   populate: {
     path: 'hirerProfile',
-    select: 'companyLogoUrl companyName',
+    select: 'companyLogoUrl companyName verification.isVerified',
   },
 } as const;
 
@@ -164,6 +173,16 @@ const resolveCompanyName = (job: PopulatedJobLite | null | undefined): string | 
   return undefined;
 };
 
+const resolveCompanyVerified = (
+  job: PopulatedJobLite | null | undefined,
+): boolean => {
+  const hp = job?.hirerProfile;
+  if (hp && typeof hp === 'object' && 'verification' in hp) {
+    return (hp as PopulatedHirerLite).verification?.isVerified === true;
+  }
+  return false;
+};
+
 export const listConversations = asyncHandler(async (req: AuthRequest, res: Response) => {
   if (!req.user) throw ApiError.unauthorized();
 
@@ -213,6 +232,7 @@ export const listConversations = asyncHandler(async (req: AuthRequest, res: Resp
       jobTitle: populated?.title,
       companyName: resolveCompanyName(populated),
       companyLogo: resolveCompanyLogo(populated),
+      companyVerified: resolveCompanyVerified(populated),
       lastMessage: c.lastMessage,
       unreadCount: (c.unreadCount as unknown as Record<string, number>)?.[viewerId] ?? 0,
       updatedAt: c.updatedAt,
@@ -339,6 +359,7 @@ const enrichConversation = (
     jobTitle: populated?.title,
     companyName: resolveCompanyName(populated),
     companyLogo: resolveCompanyLogo(populated),
+    companyVerified: resolveCompanyVerified(populated),
     application:
       applicationRaw && typeof applicationRaw === 'object' && '_id' in applicationRaw
         ? (applicationRaw as PopulatedAppliedJobLite)._id.toString()
@@ -381,6 +402,33 @@ export const sendMessage = asyncHandler(async (req: AuthRequest, res: Response) 
   const uploaded = req.file;
   if (!uploaded && content.length === 0) {
     throw ApiError.badRequest('Message must have content or a file attachment.');
+  }
+
+  // Outgoing safety scan. High/medium severity → hard block before
+  // persisting. Low severity → log only (matches like "registration
+  // fee" sometimes appear in legitimate context — too noisy to block).
+  if (content.length > 0) {
+    const safety = scanChatMessage(content);
+    if (safety.severity !== 'low') {
+      // Audit + drop. Use ApiError 422 so the client can render the
+      // blockReason inline without confusing it with a generic 4xx.
+      await writeAudit({
+        actor: { id: req.user._id!, email: req.user.email },
+        actorType: 'user',
+        category: 'security',
+        action: `chat:blocked:${safety.severity}`,
+        target: { type: 'Conversation', id: conv._id },
+        metadata: {
+          flags: safety.flags,
+          matchedTerms: safety.matchedTerms,
+        },
+        req,
+      });
+      throw new ApiError(422, safety.blockReason, {
+        flags: safety.flags,
+        severity: safety.severity,
+      });
+    }
   }
 
   // When a file rides along, push it to Cloudinary first. Images go to
@@ -459,9 +507,35 @@ export const sendMessage = asyncHandler(async (req: AuthRequest, res: Response) 
   // got the message, so push is purely a "wake the OS tray" extra.
   // Skipped for self-chat (the sender is the only participant).
   if (receiver.toString() !== req.user.id) {
+    // Resolve the receiver's role on this specific conversation so the
+    // notification lands in the right inbox tab. If the conversation
+    // hangs off a job, the job's `postedBy` is the hirer side — the
+    // other participant is therefore the seeker, and vice versa. Direct
+    // user-to-user chats fall through to 'seeker' which is where
+    // general inbound messages live.
+    let receiverRole: 'seeker' | 'hirer' = 'seeker';
+    try {
+      const populated = await Conversation.findById(conv._id)
+        .populate({ path: 'job', select: 'postedBy' })
+        .lean();
+      const jobDoc = populated?.job as
+        | { _id: mongoose.Types.ObjectId; postedBy?: mongoose.Types.ObjectId }
+        | null
+        | undefined;
+      if (jobDoc?.postedBy) {
+        receiverRole =
+          jobDoc.postedBy.toString() === receiver.toString()
+            ? 'hirer'
+            : 'seeker';
+      }
+    } catch {
+      /* fall through with default */
+    }
+
     void pushChatMessage({
       senderId: req.user.id,
       receiverId: receiver.toString(),
+      receiverRole,
       conversationId: conv._id.toString(),
       preview: previewContent,
     }).catch((err) => {
@@ -472,43 +546,46 @@ export const sendMessage = asyncHandler(async (req: AuthRequest, res: Response) 
   res.status(201).json({ success: true, data: message });
 });
 
-/// Send an FCM push for a new chat message. Loads sender name (for the
-/// banner title), receiver's push preference, and registered device
-/// tokens, then dispatches via `sendToTokens`. Invalid tokens are
-/// pruned so dead devices stop receiving.
+/// Persist + push a new chat message notification. Goes through
+/// `notifyUser` so the receiver gets:
+///   - a row in the in-app Notification inbox (so a missed message
+///     surfaces in the bell badge even after the OS-tray push is
+///     dismissed),
+///   - an FCM push to wake the system tray when backgrounded,
+///   - a `notification:new` socket emit for the foreground banner
+///     (independent of the `message:new` event the chat screen itself
+///     listens to).
+///
+/// The receiver's role on the conversation is required for inbox
+/// scoping — a hirer's notifications inbox must not list seeker-side
+/// chat threads and vice versa.
 const pushChatMessage = async (params: {
   senderId: string;
   receiverId: string;
+  receiverRole: 'seeker' | 'hirer';
   conversationId: string;
   preview: string;
 }): Promise<void> => {
-  const [sender, receiver, tokens] = await Promise.all([
-    User.findById(params.senderId).select('profile.fullName email').lean(),
-    User.findById(params.receiverId).select('notificationPreferences').lean(),
-    DeviceToken.find({ user: params.receiverId }).select('token').lean(),
-  ]);
-
-  if (!receiver) return;
-  if (receiver.notificationPreferences?.push === false) return;
-  const tokenStrs = tokens.map((t) => t.token).filter(Boolean);
-  if (tokenStrs.length === 0) return;
+  const sender = await User.findById(params.senderId)
+    .select('profile.fullName email')
+    .lean();
 
   const senderName =
     sender?.profile?.fullName?.trim() || sender?.email || 'New message';
-  const body = params.preview.trim().length > 0 ? params.preview : 'sent a message';
+  const body =
+    params.preview.trim().length > 0 ? params.preview : 'sent a message';
 
-  const result = await sendToTokens(tokenStrs, {
+  await notifyUser({
+    user: params.receiverId,
+    role: params.receiverRole,
+    type: 'new_message',
     title: senderName,
     body,
     data: {
-      type: 'new_message',
       conversationId: params.conversationId,
+      senderId: params.senderId,
     },
   });
-
-  if (result.invalidTokens && result.invalidTokens.length > 0) {
-    await DeviceToken.deleteMany({ token: { $in: result.invalidTokens } });
-  }
 };
 
 export const markRead = asyncHandler(async (req: AuthRequest, res: Response) => {
@@ -539,3 +616,63 @@ export const markRead = asyncHandler(async (req: AuthRequest, res: Response) => 
 
   res.json({ success: true, data: { modified: result.modifiedCount } });
 });
+
+/**
+ * AI smart-reply suggestions for the hirer's chat composer. Pulls the
+ * last 8 turns of the conversation, runs them through Groq, returns 3
+ * short reply variants. Cached server-side (1h, hash of last 6 turns)
+ * so paging through a long thread doesn't burn fresh quota per render.
+ *
+ * Only available on conversations where the requesting user is the
+ * recruiter (the hirer's user.id matches one participant). For
+ * candidate-side smart-reply we'd want a different prompt/persona —
+ * deferred until we have a clear UX call.
+ */
+export const getSmartReplies = asyncHandler(
+  async (req: AuthRequest, res: Response) => {
+    if (!req.user) throw ApiError.unauthorized();
+    const userId = String(req.user._id);
+
+    const conv = await ensureParticipant(req.user._id!, String(req.params.id));
+
+    // Pull the most recent 8 messages, oldest-first, in one query.
+    const recent = await Message.find({ conversation: conv._id })
+      .sort({ sentAt: -1 })
+      .limit(8)
+      .lean();
+    const turns = recent
+      .reverse()
+      .filter((m) => typeof m.content === 'string' && m.content.trim().length > 0)
+      .map((m) => ({
+        role:
+          m.sender.toString() === req.user!._id!.toString()
+            ? ('hirer' as const)
+            : ('candidate' as const),
+        text: m.content,
+      }));
+
+    const cached = await suggestSmartReplies({ turns, userId });
+    let quota = await getQuotaSnapshot(userId);
+    if (cached.cached) {
+      res.json({ success: true, data: cached, quota });
+      return;
+    }
+
+    // suggestSmartReplies has internal cache fallback; we only debit
+    // quota when the call actually hit the model. The service returns
+    // usedAi=false on cache hit, fallback path, or no-provider — refund
+    // in those cases. We do this AFTER the call so a single cache pre-
+    // check + call covers all branches; fine because the weight is small.
+    const weight = getCreditWeight('chat_smart_reply');
+    if (weight > 0 && cached.usedAi && !cached.cached) {
+      quota = await enforceQuota(userId, weight);
+    }
+    if (weight > 0 && !cached.usedAi) {
+      // No-op — nothing was debited yet. Kept here as a marker so the
+      // refund branch is obvious if we ever switch to debit-then-call.
+      await refundQuota(userId, 0);
+    }
+
+    res.json({ success: true, data: cached, quota });
+  },
+);

@@ -139,9 +139,33 @@ export const KNOWN_CRONS: Array<{ name: string; schedule: string; description: s
     description: 'Every 15 min — match new jobs against user alerts',
   },
   {
+    name: 'recommendedJobs',
+    schedule: '*/30 * * * *',
+    description:
+      'Every 30 min — system-generated push for high-match (>=70%) new jobs to every active seeker, independent of saved alerts',
+  },
+  {
     name: 'autoApply',
     schedule: '*/15 * * * *',
     description: 'Every 15 min — sweep users due for auto-apply (Asia/Kolkata)',
+  },
+  {
+    name: 'trustMaintenance',
+    schedule: '15 3 * * *',
+    description:
+      'Daily 03:15 IST — recompute hirer trust scores + sweep inactive sessions',
+  },
+  {
+    name: 'candidateSuggestionsWarmup',
+    schedule: '30 4 * * *',
+    description:
+      'Daily 04:30 IST — pre-warm AI candidate suggestions for active hirer jobs so the morning open is fast and free of fresh quota',
+  },
+  {
+    name: 'aiCostAlert',
+    schedule: '0 9 * * *',
+    description:
+      'Daily 09:00 IST — email admins when 30-day AI spend projection crosses AI_COST_ALERT_USD_30D',
   },
 ];
 

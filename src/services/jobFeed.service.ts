@@ -5,6 +5,8 @@ import { IJob } from '../models/Job';
 import { AppliedJob } from '../models/AppliedJob';
 import { IUser } from '../models/User';
 import { ScrapedJob, JobType, RemoteType, JobSource } from '../types';
+import { HirerProfile } from '../models/HirerProfile';
+import mongoose from 'mongoose';
 
 /**
  * Feed orchestration. Owns the merge between native (hirer-posted) jobs
@@ -58,6 +60,13 @@ export interface FeedJob {
   responsibilities?: string[];
   perks?: string[];
   department?: string;
+
+  /// Trust signals derived from the hirer profile, set by the side-load
+  /// helper `hydrateTrust`. External (scraped) jobs leave these
+  /// undefined; the UI renders `VerifiedBadge` only when the flag is
+  /// explicitly true.
+  companyVerified?: boolean;
+  recruiterTrustScore?: number;
 }
 
 export const toFeedJobFromNative = (j: IJob): FeedJob => ({
@@ -90,6 +99,38 @@ export const toFeedJobFromNative = (j: IJob): FeedJob => ({
   department: j.department,
 });
 
+/// Side-loads hirer trust signals (companyVerified + recruiterTrustScore)
+/// onto a list of native FeedJobs in a single $in query. External jobs
+/// are left untouched. Designed to be cheap enough to run on every list
+/// response — a single Mongo round-trip per page.
+export const hydrateTrust = async (feed: FeedJob[]): Promise<FeedJob[]> => {
+  const ids = new Set<string>();
+  for (const f of feed) {
+    if (f.isNative && f.hirerProfile) ids.add(f.hirerProfile);
+  }
+  if (ids.size === 0) return feed;
+  const profiles = await HirerProfile.find({
+    _id: { $in: Array.from(ids).map((id) => new mongoose.Types.ObjectId(id)) },
+  })
+    .select('verification.isVerified trustScore')
+    .lean();
+  const byId = new Map<string, { verified: boolean; trustScore: number }>();
+  for (const p of profiles) {
+    byId.set(p._id.toString(), {
+      verified: p.verification?.isVerified === true,
+      trustScore: typeof p.trustScore === 'number' ? p.trustScore : 50,
+    });
+  }
+  for (const f of feed) {
+    if (!f.isNative || !f.hirerProfile) continue;
+    const t = byId.get(f.hirerProfile);
+    if (!t) continue;
+    f.companyVerified = t.verified;
+    f.recruiterTrustScore = t.trustScore;
+  }
+  return feed;
+};
+
 export const toFeedJobFromScraped = (s: ScrapedJob): FeedJob => ({
   id: `${s.source}:${s.externalId}`,
   isNative: false,
@@ -97,9 +138,14 @@ export const toFeedJobFromScraped = (s: ScrapedJob): FeedJob => ({
   externalId: s.externalId,
   title: s.title,
   company: s.company,
+  companyLogoUrl: s.companyLogoUrl,
   location: s.location,
   description: s.description,
   url: s.url,
+  // Prefer the curated applyUrl (LinkedIn / direct / official) picked at
+  // scrape-time. Falls back to `url` so the frontend always has *some*
+  // target — older cached entries without applyUrl still work.
+  applyUrl: s.applyUrl || s.url,
   salaryMin: s.salaryMin,
   salaryMax: s.salaryMax,
   currency: s.currency,

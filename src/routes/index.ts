@@ -21,6 +21,10 @@ import teamRoutes from './team.routes';
 import gamificationRoutes from './gamification.routes';
 import referralRoutes from './referrals.routes';
 import adminRoutes from './admin.routes';
+import securityRoutes from './security.routes';
+import reportsRoutes from './reports.routes';
+import verificationRoutes from './verification.routes';
+import resumeTemplateRoutes from './resumeTemplates.routes';
 
 const router = Router();
 
@@ -45,6 +49,10 @@ router.use('/mock-interviews', mockInterviewRoutes);
 router.use('/hirer/team', teamRoutes);
 router.use('/seeker', gamificationRoutes);
 router.use('/seeker/referrals', referralRoutes);
+router.use('/security', securityRoutes);
+router.use('/reports', reportsRoutes);
+router.use('/hirer/verification', verificationRoutes);
+router.use('/resume-templates', resumeTemplateRoutes);
 router.use('/admin', adminRoutes);
 
 export default router;

@@ -6,6 +6,7 @@ import {
   AiGenerateOptions,
   AiGenerateResult,
   AiProvider,
+  AiProviderAuthError,
   AiProviderQuotaError,
 } from './types';
 
@@ -25,6 +26,18 @@ const isQuotaError = (err: unknown): boolean => {
   const msg = (err as Error)?.message?.toLowerCase() ?? '';
   const status = (err as { status?: number })?.status;
   return status === 429 || msg.includes('rate') || msg.includes('quota');
+};
+
+const isAuthError = (err: unknown): boolean => {
+  const msg = (err as Error)?.message?.toLowerCase() ?? '';
+  const status = (err as { status?: number })?.status;
+  return (
+    status === 401 ||
+    status === 403 ||
+    msg.includes('invalid x-api-key') ||
+    msg.includes('authentication_error') ||
+    msg.includes('invalid api key')
+  );
 };
 
 export const claudeProvider: AiProvider = {
@@ -66,6 +79,14 @@ export const claudeProvider: AiProvider = {
         outputTokens: res.usage?.output_tokens,
       };
     } catch (err) {
+      if (isAuthError(err)) {
+        logger.warn(
+          `Claude auth error (key rejected): ${(err as Error).message}`,
+        );
+        throw new AiProviderAuthError(
+          'Claude API key is invalid or revoked — rotate it in the admin /ai page',
+        );
+      }
       if (isQuotaError(err)) {
         logger.warn(`Claude quota error: ${(err as Error).message}`);
         throw new AiProviderQuotaError('Claude API quota or rate limit reached');

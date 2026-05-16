@@ -1,7 +1,21 @@
-import rateLimit from 'express-rate-limit';
+import rateLimit, { type RateLimitRequestHandler } from 'express-rate-limit';
 import { Request } from 'express';
 import { createHash } from 'crypto';
-import { RATE_LIMIT_WINDOW_MS, RATE_LIMIT_MAX_REQUESTS } from '../config/constants';
+import { getAppConfig } from '../services/config/config.service';
+
+// Default values used when the admin hasn't overridden them in AppConfig
+// (or when AppConfig is unreachable at boot). Generous for a multi-screen
+// app: a fresh launch easily fires 20-30 requests and the user comfortably
+// racks up another 50+ in a few minutes — 600 / 15min ~= 40/min steady
+// state, still tight enough to block scraping.
+const DEFAULT_RATE_LIMIT_WINDOW_MS = 15 * 60 * 1000;
+const DEFAULT_RATE_LIMIT_MAX_REQUESTS = 600;
+
+const positiveInt = (raw: string | null, fallback: number): number => {
+  if (!raw) return fallback;
+  const n = Number(raw);
+  return Number.isFinite(n) && n > 0 ? n : fallback;
+};
 
 // Authenticated users get a per-token bucket so two users sharing the
 // same NAT (mobile carrier, office Wi-Fi) don't fight over one IP-based
@@ -19,18 +33,35 @@ const tokenAwareKey = (req: Request): string => {
   return 'ip:' + (req.ip ?? 'unknown');
 };
 
-export const generalLimiter = rateLimit({
-  windowMs: RATE_LIMIT_WINDOW_MS,
-  max: RATE_LIMIT_MAX_REQUESTS,
-  standardHeaders: true,
-  legacyHeaders: false,
-  // Health pings (uptime monitors, Render's keep-alive, the app's first
-  // launch ping) aren't user actions — letting them count towards the
-  // bucket would push real users into 429s on slow startups.
-  skip: (req) => req.path === '/' || req.path.endsWith('/health'),
-  keyGenerator: tokenAwareKey,
-  message: { success: false, message: 'Too many requests. Please try again later.' },
-});
+/**
+ * Factory so the limiter resolves its window + max from AppConfig at
+ * createApp() time — by then `preloadAppConfig()` has populated the
+ * cache. A module-level `const` would snapshot the values at import
+ * time (before preload), forcing admins back to .env edits + restarts
+ * to change limits.
+ */
+export const createGeneralLimiter = (): RateLimitRequestHandler => {
+  const windowMs = positiveInt(
+    getAppConfig('RATE_LIMIT_WINDOW_MS'),
+    DEFAULT_RATE_LIMIT_WINDOW_MS,
+  );
+  const max = positiveInt(
+    getAppConfig('RATE_LIMIT_MAX_REQUESTS'),
+    DEFAULT_RATE_LIMIT_MAX_REQUESTS,
+  );
+  return rateLimit({
+    windowMs,
+    max,
+    standardHeaders: true,
+    legacyHeaders: false,
+    // Health pings (uptime monitors, Render's keep-alive, the app's first
+    // launch ping) aren't user actions — letting them count towards the
+    // bucket would push real users into 429s on slow startups.
+    skip: (req) => req.path === '/' || req.path.endsWith('/health'),
+    keyGenerator: tokenAwareKey,
+    message: { success: false, message: 'Too many requests. Please try again later.' },
+  });
+};
 
 export const authLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,

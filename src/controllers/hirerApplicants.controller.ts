@@ -10,6 +10,33 @@ import { ApiError } from '../utils/ApiError';
 import { AuthRequest } from '../types';
 import { notifyUser } from '../services/notification/notify.service';
 import { emitToUser } from '../services/chat/socket';
+import { ResumeAccessLog } from '../models/ResumeAccessLog';
+import { User } from '../models/User';
+import { signedDeliveryUrl } from '../config/cloudinary';
+import { getCreditWeight } from '../config/aiCreditWeights';
+import {
+  peekCachedRanking,
+  rankApplicants,
+  type RankableApplicant,
+} from '../services/ai/applicantRanker.service';
+import {
+  peekCachedSuggestions,
+  suggestCandidates,
+  type SuggestableCandidate,
+} from '../services/ai/candidateSuggester.service';
+import {
+  draftRecruiterOutreach,
+  peekCachedOutreach,
+} from '../services/ai/recruiterOutreach.service';
+import {
+  peekCachedTldr,
+  summariseResume,
+} from '../services/ai/resumeTldr.service';
+import {
+  enforceQuota,
+  getQuotaSnapshot,
+  refundQuota,
+} from '../services/ai/quota.service';
 
 // ─────────────────────────────────────────────────────────────────────────
 // Schemas
@@ -60,6 +87,27 @@ export const updateHirerNotesSchema = z.object({
   }),
 });
 
+export const rankApplicantsSchema = z.object({
+  body: z
+    .object({
+      // Optional cap. Backend hard-cap is 25 to keep one prompt under
+      // ~12k tokens; if the hirer has 200 applications they'll page.
+      limit: z.coerce.number().int().min(1).max(25).optional(),
+    })
+    .partial(),
+});
+
+export const candidateSuggestionsSchema = z.object({
+  body: z
+    .object({
+      /** Max suggestions to return; backend hard-cap is 20. */
+      limit: z.coerce.number().int().min(1).max(20).optional(),
+      /** Cap on the candidate pool we score against; backend max 50. */
+      poolSize: z.coerce.number().int().min(1).max(50).optional(),
+    })
+    .partial(),
+});
+
 // ─────────────────────────────────────────────────────────────────────────
 // Helpers
 // ─────────────────────────────────────────────────────────────────────────
@@ -103,6 +151,16 @@ const buildApplicantPayload = (a: IAppliedJob, seeker: ReturnType<typeof sanitis
   jobId: a.job!.toString(),
   status: a.status,
   matchScore: a.matchScore,
+  aiRanking: a.aiRanking
+    ? {
+        score: a.aiRanking.score,
+        rank: a.aiRanking.rank,
+        summary: a.aiRanking.summary,
+        strengths: a.aiRanking.strengths,
+        concerns: a.aiRanking.concerns,
+        rankedAt: a.aiRanking.rankedAt,
+      }
+    : undefined,
   appliedAt: a.appliedAt,
   applyType: a.applyType,
   source: a.source,
@@ -256,34 +314,131 @@ export const getApplicantDetail = asyncHandler(async (req: AuthRequest, res: Res
 
   const u = application.user as unknown as { _id: mongoose.Types.ObjectId; email: string; profile: IUser['profile'] } | null;
 
+  // Resume privacy gate. The seeker can hide contact details until they
+  // are shortlisted; mask phone + email until the application has been
+  // moved off `applied`/`viewed`. The resumeUrl itself is gated below
+  // by allowResumeDownload on the dedicated download endpoint, not here.
+  const seekerDoc = u
+    ? await User.findById(u._id).select('privacy')
+    : null;
+  const privacy = seekerDoc?.privacy;
+  const showContact =
+    !privacy?.hideContactUntilShortlisted ||
+    ['shortlisted', 'interview', 'offer', 'hired'].includes(
+      application.status,
+    );
+
+  // Append-only access log: every hirer view of an applicant's resume
+  // is preserved here. The seeker sees this list under
+  // Settings → Security → Resume access log.
+  if (u && u.profile.resumeUrl) {
+    ResumeAccessLog.create({
+      resumeOwner: u._id,
+      accessor: req.user._id,
+      accessorRole: 'hirer',
+      company: profile.companyName,
+      action: 'view',
+      application: application._id,
+      ip: req.ip,
+      userAgent: req.headers['user-agent'] as string | undefined,
+    }).catch(() => undefined);
+  }
+
   res.json({
     success: true,
     data: {
       ...buildApplicantPayload(application, u
         ? {
             id: u._id.toString(),
-            email: u.email,
+            email: showContact ? u.email : 'hidden until shortlisted',
             fullName: u.profile.fullName,
             avatar: u.profile.avatar,
             headline: u.profile.headline,
-            phone: u.profile.phone,
+            phone: showContact ? u.profile.phone : undefined,
             skills: u.profile.skills,
             experienceYears: u.profile.experienceYears,
             preferredLocations: u.profile.preferredLocations,
             resumeUrl: u.profile.resumeUrl,
           }
         : null),
-      // Extended view — full profile context for the detail screen.
       seekerProfile: u
         ? {
             ...u.profile,
-            // Avoid leaking refresh tokens etc. — User.find with the select
-            // above already projects only the safe fields.
+            phone: showContact ? u.profile.phone : undefined,
           }
         : null,
+      seekerPrivacy: {
+        hideContactUntilShortlisted:
+          privacy?.hideContactUntilShortlisted ?? false,
+        allowResumeDownload: privacy?.allowResumeDownload ?? true,
+        contactRevealed: showContact,
+      },
     },
   });
 });
+
+const formatFromMime = (mime?: string): string => {
+  if (mime === 'application/pdf') return 'pdf';
+  if (mime === 'application/msword') return 'doc';
+  if (
+    mime === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+  ) {
+    return 'docx';
+  }
+  return 'bin';
+};
+
+/// Hirer-facing applicant resume download. Gated on the seeker's
+/// `privacy.allowResumeDownload` flag — when off, the hirer can still
+/// view the resume in-app but can't pull a signed URL. Every successful
+/// call writes a `download` row to ResumeAccessLog so the seeker can
+/// see who fetched a copy.
+export const downloadApplicantResume = asyncHandler(
+  async (req: AuthRequest, res: Response) => {
+    if (!req.user) throw ApiError.unauthorized();
+    const profile = await requireHirerProfile(req.user.id);
+    const id = String(req.params.id);
+    if (!isObjectId(id)) throw ApiError.badRequest('Invalid application id');
+
+    const application = await AppliedJob.findById(id);
+    if (!application) throw ApiError.notFound('Application not found');
+    await requireOwnedJob(application.job!.toString(), profile._id);
+
+    const seeker = await User.findById(application.user).select(
+      'privacy profile.resumeFile profile.resumeUrl',
+    );
+    if (!seeker?.profile?.resumeFile?.publicId) {
+      throw ApiError.notFound('Applicant has no resume on file');
+    }
+    if (seeker.privacy?.allowResumeDownload === false) {
+      throw ApiError.forbidden(
+        'Applicant has disabled resume downloads. View only.',
+      );
+    }
+
+    const file = seeker.profile.resumeFile;
+    const signed = signedDeliveryUrl(file.publicId!, {
+      resourceType: 'raw',
+      type: 'authenticated',
+      format: formatFromMime(file.mimeType),
+      expiresInSec: 300,
+      attachmentFilename: file.originalName,
+    });
+
+    await ResumeAccessLog.create({
+      resumeOwner: seeker._id,
+      accessor: req.user._id,
+      accessorRole: 'hirer',
+      company: profile.companyName,
+      action: 'download',
+      application: application._id,
+      ip: req.ip,
+      userAgent: req.headers['user-agent'] as string | undefined,
+    });
+
+    res.redirect(302, signed);
+  },
+);
 
 const TERMINAL: ApplicationStatus[] = ['hired', 'rejected', 'withdrawn'];
 
@@ -453,3 +608,440 @@ export const updateHirerNotes = asyncHandler(async (req: AuthRequest, res: Respo
 
   res.json({ success: true, data: { id: application._id.toString() } });
 });
+
+/**
+ * AI-rank the applicants for a job. Top N (default 25, hard-capped at 25
+ * to keep one prompt under the model's effective input window). One quota
+ * slot per fresh ranking; cache hits (same job + same applicant set,
+ * unchanged job description) are free.
+ *
+ * Returns rankings sorted by aiScore desc with one-line summary +
+ * strengths/concerns each. Falls back to heuristic skill-overlap ranking
+ * when no AI provider is configured.
+ */
+export const rankJobApplicants = asyncHandler(
+  async (req: AuthRequest, res: Response) => {
+    if (!req.user) throw ApiError.unauthorized();
+    const userId = String(req.user._id);
+
+    const profile = await requireHirerProfile(req.user.id);
+    const job = await requireOwnedJob(String(req.params.jobId), profile._id);
+
+    const { limit } = req.body as z.infer<typeof rankApplicantsSchema>['body'];
+    const cap = Math.max(1, Math.min(25, limit ?? 25));
+
+    // Pull the most recent N applications. We sort by appliedAt desc so
+    // older applications drop off first when the cap binds — fits the
+    // "rank my latest pipeline" mental model.
+    const apps = await AppliedJob.find({ job: job._id })
+      .sort({ appliedAt: -1 })
+      .limit(cap)
+      .populate({
+        path: 'user',
+        select:
+          'profile.fullName profile.headline profile.experienceYears profile.skills profile.resumeText',
+      });
+
+    if (apps.length === 0) {
+      const quota = await getQuotaSnapshot(userId);
+      res.json({
+        success: true,
+        data: { rankings: [], usedAi: false, cached: false },
+        quota,
+      });
+      return;
+    }
+
+    const rankable: RankableApplicant[] = apps.map((a) => {
+      const u = a.user as unknown as IUser | null;
+      return {
+        applicationId: a._id.toString(),
+        fullName: u?.profile?.fullName ?? 'Candidate',
+        headline: u?.profile?.headline,
+        experienceYears: u?.profile?.experienceYears,
+        skills: u?.profile?.skills ?? [],
+        resumeText: u?.profile?.resumeText,
+        heuristicMatch: a.matchScore,
+      };
+    });
+
+    const ids = rankable.map((r) => r.applicationId);
+    const cached = await peekCachedRanking(job._id.toString(), job.updatedAt, ids);
+    let quota = await getQuotaSnapshot(userId);
+    if (cached) {
+      res.json({
+        success: true,
+        data: { rankings: cached, usedAi: true, cached: true },
+        quota,
+      });
+      return;
+    }
+
+    const weight = getCreditWeight('applicant_rank');
+    quota = await enforceQuota(userId, weight);
+    let result;
+    try {
+      result = await rankApplicants({ job, applicants: rankable, userId });
+    } catch (err) {
+      await refundQuota(userId, weight);
+      throw err;
+    }
+    if (!result.usedAi) await refundQuota(userId, weight);
+
+    // Persist the ranking onto each AppliedJob so the detail screen can
+    // surface strengths/concerns long after the Redis cache expires.
+    // bulkWrite is one round-trip regardless of batch size.
+    if (result.rankings.length > 0) {
+      const now = new Date();
+      const ops = result.rankings.map((r) => ({
+        updateOne: {
+          filter: { _id: r.applicationId },
+          update: {
+            $set: {
+              aiRanking: {
+                score: r.aiScore,
+                rank: r.rank,
+                summary: r.summary,
+                strengths: r.strengths,
+                concerns: r.concerns,
+                rankedAt: now,
+              },
+            },
+          },
+        },
+      }));
+      await AppliedJob.bulkWrite(ops, { ordered: false });
+    }
+
+    res.json({
+      success: true,
+      data: {
+        rankings: result.rankings,
+        usedAi: result.usedAi,
+        cached: result.cached,
+      },
+      quota,
+    });
+  },
+);
+
+/**
+ * AI candidate suggestions for a job. Pulls "silver medalist" candidates
+ * from THIS hirer's past applicant pool — i.e. users who have applied
+ * to one of the hirer's other jobs (so the hirer already has lawful
+ * access to their resume) but haven't applied to THIS job yet. Ranks
+ * them against the new job and surfaces the top fits with strengths +
+ * concerns so the hirer can proactively reach out.
+ *
+ * Privacy: the pool is gated to the hirer's existing applicant graph;
+ * we never surface users they haven't already received an application
+ * from. This keeps the feature non-creepy and consistent with the
+ * platform's existing trust model.
+ *
+ * Cost: one `candidate_suggest` quota slot per fresh ranking (weight
+ * lives in aiCreditWeights). Same job + same pool → cache hit, free.
+ */
+export const suggestJobCandidates = asyncHandler(
+  async (req: AuthRequest, res: Response) => {
+    if (!req.user) throw ApiError.unauthorized();
+    const userId = String(req.user._id);
+
+    const profile = await requireHirerProfile(req.user.id);
+    const job = await requireOwnedJob(String(req.params.jobId), profile._id);
+
+    const { limit, poolSize } = req.body as z.infer<
+      typeof candidateSuggestionsSchema
+    >['body'];
+    const finalLimit = Math.max(1, Math.min(20, limit ?? 10));
+    const finalPool = Math.max(1, Math.min(50, poolSize ?? 50));
+
+    // Exclude users who have already applied to THIS job — suggesting
+    // them would be redundant; they're already on the applicants screen.
+    const existingApplicants = await AppliedJob.distinct('user', {
+      job: job._id,
+    });
+
+    // Pool = distinct users from this hirer's other jobs, excluding
+    // rejected/withdrawn (hirer didn't want them) and the THIS-job set.
+    const candidateUserIds = await AppliedJob.aggregate<{
+      _id: mongoose.Types.ObjectId;
+      lastSeenAt: Date;
+    }>([
+      {
+        $match: {
+          hirerProfile: profile._id,
+          job: { $ne: job._id },
+          status: { $nin: ['rejected', 'withdrawn'] },
+          user: { $nin: existingApplicants },
+        },
+      },
+      {
+        $group: {
+          _id: '$user',
+          lastSeenAt: { $max: '$appliedAt' },
+        },
+      },
+      { $sort: { lastSeenAt: -1 } },
+      { $limit: finalPool },
+    ]);
+
+    if (candidateUserIds.length === 0) {
+      const quota = await getQuotaSnapshot(userId);
+      res.json({
+        success: true,
+        data: {
+          suggestions: [],
+          usedAi: false,
+          cached: false,
+          poolSize: 0,
+        },
+        quota,
+      });
+      return;
+    }
+
+    const users = await User.find({
+      _id: { $in: candidateUserIds.map((c) => c._id) },
+    }).select(
+      'profile.fullName profile.headline profile.experienceYears profile.skills profile.resumeText profile.avatar',
+    );
+
+    const lastSeenMap = new Map<string, Date>(
+      candidateUserIds.map((c) => [c._id.toString(), c.lastSeenAt]),
+    );
+
+    const pool: SuggestableCandidate[] = users.map((u) => ({
+      userId: u._id.toString(),
+      fullName: u.profile?.fullName ?? 'Candidate',
+      headline: u.profile?.headline,
+      experienceYears: u.profile?.experienceYears,
+      skills: u.profile?.skills ?? [],
+      resumeText: u.profile?.resumeText,
+      lastSeenAt: lastSeenMap.get(u._id.toString())?.toISOString(),
+    }));
+
+    // Cheap cache probe before debiting quota — same job + same pool
+    // means we already paid for this ranking earlier.
+    const ids = pool.map((c) => c.userId);
+    const cached = await peekCachedSuggestions(
+      job._id.toString(),
+      job.updatedAt,
+      ids,
+    );
+    let quota = await getQuotaSnapshot(userId);
+    if (cached) {
+      const trimmed = cached.slice(0, finalLimit);
+      res.json({
+        success: true,
+        data: {
+          suggestions: decorateWithProfile(trimmed, users, lastSeenMap),
+          usedAi: true,
+          cached: true,
+          poolSize: pool.length,
+        },
+        quota,
+      });
+      return;
+    }
+
+    const weight = getCreditWeight('candidate_suggest');
+    quota = await enforceQuota(userId, weight);
+    let result;
+    try {
+      result = await suggestCandidates({
+        job,
+        pool,
+        userId,
+        limit: finalLimit,
+      });
+    } catch (err) {
+      await refundQuota(userId, weight);
+      throw err;
+    }
+    if (!result.usedAi) await refundQuota(userId, weight);
+
+    res.json({
+      success: true,
+      data: {
+        suggestions: decorateWithProfile(
+          result.suggestions,
+          users,
+          lastSeenMap,
+        ),
+        usedAi: result.usedAi,
+        cached: result.cached,
+        poolSize: result.poolSize,
+      },
+      quota,
+    });
+  },
+);
+
+/**
+ * Decorate the lean AI output with profile fields the UI needs. Keeps
+ * the candidate-suggester service free of frontend concerns while still
+ * giving the hirer screen everything it needs to render a card without
+ * a second round-trip per user.
+ */
+const decorateWithProfile = (
+  suggestions: { userId: string; score: number; rank: number; summary: string; strengths: string[]; concerns: string[] }[],
+  users: Array<{
+    _id: mongoose.Types.ObjectId;
+    profile?: {
+      fullName?: string;
+      headline?: string;
+      avatar?: string;
+      experienceYears?: number;
+      skills?: string[];
+    };
+  }>,
+  lastSeenMap: Map<string, Date>,
+) => {
+  const byId = new Map(users.map((u) => [u._id.toString(), u]));
+  return suggestions.map((s) => {
+    const u = byId.get(s.userId);
+    return {
+      userId: s.userId,
+      score: s.score,
+      rank: s.rank,
+      summary: s.summary,
+      strengths: s.strengths,
+      concerns: s.concerns,
+      fullName: u?.profile?.fullName ?? 'Candidate',
+      headline: u?.profile?.headline,
+      avatar: u?.profile?.avatar,
+      experienceYears: u?.profile?.experienceYears,
+      topSkills: (u?.profile?.skills ?? []).slice(0, 6),
+      lastSeenAt: lastSeenMap.get(s.userId)?.toISOString(),
+    };
+  });
+};
+
+/**
+ * AI-drafted recruiter outreach for a (job, candidate) pair. Returns
+ * 2-3 short opener variants the hirer can paste into the in-app chat.
+ * Cache pre-check by (jobId + candidateId + jobUpdatedAt) so re-opening
+ * the same candidate card costs no quota.
+ */
+export const draftCandidateOutreach = asyncHandler(
+  async (req: AuthRequest, res: Response) => {
+    if (!req.user) throw ApiError.unauthorized();
+    const userId = String(req.user._id);
+
+    const profile = await requireHirerProfile(req.user.id);
+    const job = await requireOwnedJob(String(req.params.jobId), profile._id);
+
+    const candidateId = String(req.params.userId);
+    if (!isObjectId(candidateId)) {
+      throw ApiError.badRequest('Invalid candidate id');
+    }
+
+    const candidate = await User.findById(candidateId).select(
+      'profile.fullName profile.headline profile.experienceYears profile.skills',
+    );
+    if (!candidate) throw ApiError.notFound('Candidate not found');
+
+    const cached = await peekCachedOutreach(
+      job._id.toString(),
+      candidate._id.toString(),
+      job.updatedAt,
+    );
+    let quota = await getQuotaSnapshot(userId);
+    if (cached) {
+      res.json({
+        success: true,
+        data: { drafts: cached, usedAi: true, cached: true },
+        quota,
+      });
+      return;
+    }
+
+    const weight = getCreditWeight('recruiter_outreach');
+    if (weight > 0) quota = await enforceQuota(userId, weight);
+
+    let result;
+    try {
+      result = await draftRecruiterOutreach({
+        job,
+        candidate,
+        userId,
+      });
+    } catch (err) {
+      if (weight > 0) await refundQuota(userId, weight);
+      throw err;
+    }
+    if (weight > 0 && !result.usedAi) {
+      await refundQuota(userId, weight);
+    }
+
+    res.json({ success: true, data: result, quota });
+  },
+);
+
+/**
+ * AI 2-line TL;DR of the applicant's resume. Cached by hash(resumeText)
+ * so the same resume re-opened across hirers is free of quota — useful
+ * when a strong candidate applies to multiple roles. Cache pre-check
+ * skips the quota debit entirely.
+ */
+export const getApplicantResumeTldr = asyncHandler(
+  async (req: AuthRequest, res: Response) => {
+    if (!req.user) throw ApiError.unauthorized();
+    const userId = String(req.user._id);
+
+    const profile = await requireHirerProfile(req.user.id);
+    const id = String(req.params.id);
+    if (!isObjectId(id)) throw ApiError.badRequest('Invalid application id');
+
+    const application = await AppliedJob.findById(id).populate({
+      path: 'user',
+      select: 'profile.resumeText',
+    });
+    if (!application) throw ApiError.notFound('Application not found');
+    await requireOwnedJob(application.job!.toString(), profile._id);
+
+    const seeker = application.user as unknown as
+      | { profile?: { resumeText?: string } }
+      | null;
+    const resumeText = (seeker?.profile?.resumeText || '').trim();
+    if (resumeText.length < 100) {
+      const quota = await getQuotaSnapshot(userId);
+      res.json({
+        success: true,
+        data: {
+          summary: 'No resume text on file for this applicant.',
+          strengths: [],
+          yearsOfExperience: null,
+          topRoles: [],
+          usedAi: false,
+          cached: false,
+        },
+        quota,
+      });
+      return;
+    }
+
+    const cached = await peekCachedTldr(resumeText);
+    let quota = await getQuotaSnapshot(userId);
+    if (cached) {
+      res.json({ success: true, data: cached, quota });
+      return;
+    }
+
+    const weight = getCreditWeight('resume_tldr');
+    if (weight > 0) quota = await enforceQuota(userId, weight);
+
+    let result;
+    try {
+      result = await summariseResume({ resumeText, userId });
+    } catch (err) {
+      if (weight > 0) await refundQuota(userId, weight);
+      throw err;
+    }
+    if (weight > 0 && !result.usedAi) {
+      await refundQuota(userId, weight);
+    }
+
+    res.json({ success: true, data: result, quota });
+  },
+);

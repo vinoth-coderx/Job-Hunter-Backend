@@ -6,13 +6,31 @@ import { API_VERSION } from './config/constants';
 import { connectDatabase, disconnectDatabase } from './config/database';
 import { connectRedis, disconnectRedis } from './config/redis';
 import { preloadAppConfig } from './services/config/config.service';
+import { syncAllProvidersToAppConfig } from './services/ai/aiKeySync.service';
 import { seedJobSourceConfigs } from './services/jobSourceConfig.service';
 import { startJobScraperCron, stopJobScraperCron } from './jobs/jobScraper.cron';
 import { startAlertCheckerCron, stopAlertCheckerCron } from './jobs/alertChecker.cron';
 import { startAutoApplyCron, stopAutoApplyCron } from './jobs/autoApply.cron';
+import {
+  startRecommendedJobsCron,
+  stopRecommendedJobsCron,
+} from './jobs/recommendedJobs.cron';
+import {
+  startTrustMaintenanceCron,
+  stopTrustMaintenanceCron,
+} from './jobs/trustMaintenance.cron';
+import {
+  startCandidateSuggestionsWarmupCron,
+  stopCandidateSuggestionsWarmupCron,
+} from './jobs/candidateSuggestionsWarmup.cron';
+import {
+  startAiCostAlertCron,
+  stopAiCostAlertCron,
+} from './jobs/aiCostAlert.cron';
 import { backfillApplicantHirerLinks } from './jobs/backfillApplicantHirer';
 import { initSocket, closeSocket } from './services/chat/socket';
 import { puppeteerScraper } from './services/scrapers';
+import { closeResumePdfBrowser } from './services/resume/resumePdf.service';
 import { logger } from './utils/logger';
 
 let server: http.Server;
@@ -27,6 +45,12 @@ const start = async (): Promise<void> => {
     // env vars on a cache miss.
     await preloadAppConfig().catch((err) =>
       logger.warn('AppConfig preload failed — continuing with env fallback', err),
+    );
+    // Project the active AiKey for each provider into AppConfig so the
+    // runtime providers (gemini/claude/groq) see admin-managed keys on
+    // first request. Idempotent — safe to run every boot.
+    await syncAllProvidersToAppConfig().catch((err) =>
+      logger.warn('AiKey → AppConfig sync failed at boot — admin re-save will repair', err),
     );
     // Seed the admin-managed job source catalog on first boot and
     // back-fill any new builtin scrapers added in code since.
@@ -57,6 +81,10 @@ const start = async (): Promise<void> => {
       startJobScraperCron();
       startAlertCheckerCron();
       startAutoApplyCron();
+      startRecommendedJobsCron();
+      startTrustMaintenanceCron();
+      startCandidateSuggestionsWarmupCron();
+      startAiCostAlertCron();
       void backfillApplicantHirerLinks();
     });
   } catch (err) {
@@ -70,6 +98,10 @@ const shutdown = async (signal: string): Promise<void> => {
   stopJobScraperCron();
   stopAlertCheckerCron();
   stopAutoApplyCron();
+  stopRecommendedJobsCron();
+  stopTrustMaintenanceCron();
+  stopCandidateSuggestionsWarmupCron();
+  stopAiCostAlertCron();
   await closeSocket().catch((e) => logger.warn('Socket close failed', e));
 
   if (server) {
@@ -81,6 +113,9 @@ const shutdown = async (signal: string): Promise<void> => {
   } catch (err) {
     logger.warn('Puppeteer close failed', err);
   }
+  await closeResumePdfBrowser().catch((e) =>
+    logger.warn('Resume PDF browser close failed', e),
+  );
 
   await disconnectRedis().catch((e) => logger.warn('Redis disconnect failed', e));
   await disconnectDatabase().catch((e) => logger.warn('DB disconnect failed', e));

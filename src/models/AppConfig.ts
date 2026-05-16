@@ -22,6 +22,7 @@ export type AppConfigCategory =
   | 'email'
   | 'firebase'
   | 'cron'
+  | 'ai'
   | 'misc';
 
 export interface IAppConfig extends Document {
@@ -48,7 +49,7 @@ const appConfigSchema = new Schema<IAppConfig>(
     },
     category: {
       type: String,
-      enum: ['job-board', 'payment', 'cloudinary', 'email', 'firebase', 'cron', 'misc'],
+      enum: ['job-board', 'payment', 'cloudinary', 'email', 'firebase', 'cron', 'ai', 'misc'],
       required: true,
       index: true,
     },

@@ -6,6 +6,17 @@ import { AppliedJob } from '../models/AppliedJob';
 import { asyncHandler } from '../utils/asyncHandler';
 import { ApiError } from '../utils/ApiError';
 import { AuthRequest } from '../types';
+import {
+  generateHirerDigest,
+  peekCachedDigest,
+} from '../services/ai/hirerDigest.service';
+import {
+  enforceQuota,
+  getQuotaSnapshot,
+  refundQuota,
+} from '../services/ai/quota.service';
+import { getCreditWeight } from '../config/aiCreditWeights';
+import { buildHirerAttention } from '../services/hirer/attention.service';
 
 const requireHirerProfile = async (userId: string) => {
   const profile = await HirerProfile.findOne({ user: userId });
@@ -171,3 +182,59 @@ export const getHirerAnalytics = asyncHandler(async (req: AuthRequest, res: Resp
     },
   });
 });
+
+/**
+ * AI weekly digest for the hirer dashboard. Same-day cache means the
+ * first dashboard visit of the day generates it; everyone else (and
+ * subsequent refreshes) hit cache. Weight 1 — small Groq call.
+ */
+export const getHirerDigestEndpoint = asyncHandler(
+  async (req: AuthRequest, res: Response) => {
+    if (!req.user) throw ApiError.unauthorized();
+    const userId = String(req.user._id);
+    const profile = await requireHirerProfile(req.user.id);
+
+    const cached = await peekCachedDigest(profile._id.toString());
+    let quota = await getQuotaSnapshot(userId);
+    if (cached) {
+      res.json({
+        success: true,
+        data: { ...cached, cached: true },
+        quota,
+      });
+      return;
+    }
+
+    const weight = getCreditWeight('hirer_digest');
+    if (weight > 0) quota = await enforceQuota(userId, weight);
+
+    let result;
+    try {
+      result = await generateHirerDigest({
+        hirerProfileId: profile._id,
+        userId,
+      });
+    } catch (err) {
+      if (weight > 0) await refundQuota(userId, weight);
+      throw err;
+    }
+    if (weight > 0 && !result.usedAi) {
+      await refundQuota(userId, weight);
+    }
+
+    res.json({ success: true, data: result, quota });
+  },
+);
+
+/**
+ * "Needs attention" snapshot — the four pipeline blockers a hirer
+ * should action when they land. Pure data aggregation, no AI cost.
+ */
+export const getHirerAttentionEndpoint = asyncHandler(
+  async (req: AuthRequest, res: Response) => {
+    if (!req.user) throw ApiError.unauthorized();
+    const profile = await requireHirerProfile(req.user.id);
+    const data = await buildHirerAttention(profile._id);
+    res.json({ success: true, data });
+  },
+);

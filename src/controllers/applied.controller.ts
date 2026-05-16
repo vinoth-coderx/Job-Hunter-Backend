@@ -7,11 +7,40 @@ import { notifyUser } from '../services/notification/notify.service';
 import { emitToUser } from '../services/chat/socket';
 import { asyncHandler } from '../utils/asyncHandler';
 import { ApiError } from '../utils/ApiError';
-import { AuthRequest } from '../types';
+import { AuthRequest, JobSource } from '../types';
 import { heuristicMatch, toMatchable } from '../services/ai/matcher.service';
 import { User } from '../models/User';
 import { APPLIED_JOB_VIEW_DAYS } from '../jobs/jobScraper.cron';
 import { grantCoins } from '../services/coins/coin.service';
+import { lookupExternalJobFromCache } from '../services/jobFeed.service';
+
+// Same id-shape detection used by job.controller — kept in sync so the
+// apply route can branch on whether the jobId is a native ObjectId
+// (Mongo doc lookup) or an external `source:externalId` (Redis cache
+// lookup). Underscores are allowed in the source slug for newer
+// scrapers like `realtime_web_search`.
+const OBJECT_ID_RE = /^[a-f0-9]{24}$/i;
+const EXTERNAL_ID_RE = /^([a-z][a-z0-9_]*):(.+)$/i;
+
+// Whitelist of values the AppliedJob.source enum accepts. External jobs
+// from scrapers (adzuna, rapidapi, …) don't fit those buckets, so we
+// fold everything else into 'other' to stay schema-valid.
+const APPLIED_SOURCE_ENUM = new Set([
+  'native',
+  'indeed',
+  'naukri',
+  'linkedin',
+  'other',
+]);
+const toAppliedSource = (
+  src: string,
+): 'native' | 'indeed' | 'naukri' | 'linkedin' | 'other' =>
+  (APPLIED_SOURCE_ENUM.has(src) ? src : 'other') as
+    | 'native'
+    | 'indeed'
+    | 'naukri'
+    | 'linkedin'
+    | 'other';
 
 // Apply earn rate. 5 coins per apply, capped at 50/day so the user can
 // still earn meaningfully (10 applies a day) without farming via spam-
@@ -54,7 +83,106 @@ export const updateAppliedSchema = z.object({
 
 export const applyToJob = asyncHandler(async (req: AuthRequest, res: Response) => {
   if (!req.user) throw ApiError.unauthorized();
-  const { jobId, notes } = req.body;
+  const { jobId, notes } = req.body as { jobId: string; notes?: string };
+
+  // ── External scraped jobs (id shape: "source:externalId") ─────────
+  // These have no Mongo Job row. We resolve them from the per-query
+  // Redis cache populated by the search/feed endpoints. Without this
+  // branch, `Job.findById(jobId)` below would CastError and the user
+  // would see "Invalid _id: adzuna:5730665262" the instant they tap
+  // Apply on any scraped listing.
+  const extMatch = EXTERNAL_ID_RE.exec(jobId);
+  if (!OBJECT_ID_RE.test(jobId) && extMatch) {
+    const source = extMatch[1] as JobSource;
+    const externalId = extMatch[2];
+
+    const dup = await AppliedJob.findOne({
+      user: req.user._id,
+      'jobSnapshot.source': source,
+      'jobSnapshot.externalId': externalId,
+    });
+    if (dup) throw ApiError.conflict('You have already applied to this job');
+
+    const cached = await lookupExternalJobFromCache(source, externalId);
+    if (!cached) {
+      // The Redis cache expires every 30 min. If the seeker re-opens
+      // an old search-result tab after that, the snapshot is gone and
+      // we can't safely reconstruct it server-side. The Flutter side
+      // can recover by re-running the search.
+      throw ApiError.badRequest(
+        'This listing has expired from cache. Re-open it from search results and try again.',
+      );
+    }
+
+    const user = await User.findById(req.user._id);
+    const score = user
+      ? heuristicMatch(user, {
+          id: jobId,
+          title: cached.title,
+          company: cached.company,
+          description: cached.description,
+          location: cached.location,
+          skills: cached.skills,
+          remoteType: cached.remoteType,
+          jobType: cached.jobType,
+          salaryMin: cached.salaryMin,
+          salaryMax: cached.salaryMax,
+        }).score
+      : undefined;
+
+    const applied = await AppliedJob.create({
+      user: req.user._id,
+      // no `job` ref — external listing
+      jobSnapshot: {
+        title: cached.title,
+        company: cached.company,
+        location: cached.location,
+        url: cached.applyUrl || cached.url,
+        description: cached.description,
+        salaryMin: cached.salaryMin,
+        salaryMax: cached.salaryMax,
+        currency: cached.currency,
+        jobType: cached.jobType,
+        remoteType: cached.remoteType,
+        skills: cached.skills,
+        companyLogo: cached.companyLogoUrl,
+        postedAt: cached.postedAt,
+        source,
+        externalId,
+      },
+      applyType: 'external_manual',
+      source: toAppliedSource(source),
+      notes,
+      matchScore: score,
+      status: 'applied',
+      statusHistory: [
+        { status: 'applied', changedAt: new Date(), changedBy: req.user._id },
+      ],
+    });
+
+    const coinGrant = await grantCoins({
+      user: req.user.id,
+      amount: APPLY_COIN_AMOUNT,
+      source: 'apply',
+      idempotencyKey: `apply:${applied._id.toString()}`,
+      sourceRefId: applied._id.toString(),
+      dailyCap: APPLY_DAILY_CAP,
+    });
+
+    res.status(201).json({
+      success: true,
+      message: 'Marked as applied',
+      data: applied,
+      coinsAwarded: coinGrant.amount,
+      coinsBalance: coinGrant.balance,
+    });
+    return;
+  }
+
+  // ── Native jobs (Mongo ObjectId path) ─────────────────────────────
+  if (!OBJECT_ID_RE.test(jobId)) {
+    throw ApiError.badRequest('Invalid jobId');
+  }
 
   const job = await Job.findById(jobId);
   if (!job) throw ApiError.notFound('Job not found');
@@ -87,7 +215,7 @@ export const applyToJob = asyncHandler(async (req: AuthRequest, res: Response) =
       externalId: job.externalId,
     },
     applyType: job.isNative ? 'one_click' : 'external_manual',
-    source: job.isNative ? 'native' : (job.source || 'other'),
+    source: job.isNative ? 'native' : toAppliedSource(job.source || 'other'),
     notes,
     matchScore: score,
     status: 'applied',
@@ -288,6 +416,7 @@ export const quickApply = asyncHandler(async (req: AuthRequest, res: Response) =
 export const listApplied = asyncHandler(async (req: AuthRequest, res: Response) => {
   if (!req.user) throw ApiError.unauthorized();
   const status = typeof req.query.status === 'string' ? req.query.status : undefined;
+  const typeFilter = typeof req.query.type === 'string' ? req.query.type : undefined;
   const pageRaw = typeof req.query.page === 'string' ? Number(req.query.page) : NaN;
   const limitRaw = typeof req.query.limit === 'string' ? Number(req.query.limit) : NaN;
   const page = Number.isFinite(pageRaw) && pageRaw > 0 ? pageRaw : 1;
@@ -305,6 +434,15 @@ export const listApplied = asyncHandler(async (req: AuthRequest, res: Response) 
     appliedAt: { $gte: cutoff },
   };
   if (status) filter.status = status;
+
+  // `?type=native`  → in-app Easy Apply / quick-apply / auto-apply only.
+  // `?type=external` → applications recorded via the WebView redirect.
+  // No param → both (preserves existing callers).
+  if (typeFilter === 'native') {
+    filter.applyType = { $in: ['one_click', 'custom_form', 'auto_apply'] };
+  } else if (typeFilter === 'external') {
+    filter.applyType = 'external_manual';
+  }
 
   const [items, total] = await Promise.all([
     AppliedJob.find(filter).sort({ appliedAt: -1 }).skip(skip).limit(limit).populate('job'),

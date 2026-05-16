@@ -8,6 +8,10 @@ import { asyncHandler } from '../utils/asyncHandler';
 import { AuthRequest } from '../types';
 import { logger } from '../utils/logger';
 import { randomToken } from '../utils/crypto';
+import { createSession, revokeSession } from '../services/security/session.service';
+import { writeAudit } from '../services/security/audit.service';
+import { UserSession } from '../models/UserSession';
+import { hash } from '../utils/crypto';
 import { recordFailedLogin, isLockedOut, clearFailedLogins } from '../middleware/security';
 import { getFirebaseAdmin } from '../services/firebase/admin.service';
 
@@ -70,7 +74,20 @@ export const register = asyncHandler(async (req: Request, res: Response) => {
   });
 
   user.refreshTokens = [tokens.refreshToken];
+  // Snapshot the registration vector for fraud forensics. Never
+  // surfaced to the user; powers admin "suspicious signup" rules.
+  user.security.registrationIp = req.ip;
+  user.security.registrationUserAgent = req.headers['user-agent'] as string | undefined;
   await user.save();
+
+  await createSession({ userId: user._id, refreshToken: tokens.refreshToken, req });
+  await writeAudit({
+    actor: { id: user._id, email: user.email },
+    actorType: 'user',
+    category: 'auth',
+    action: 'register',
+    req,
+  });
 
   logger.info(`New user registered: ${email}`);
 
@@ -128,6 +145,18 @@ export const login = asyncHandler(async (req: Request, res: Response) => {
   user.lastLogin = new Date();
   await user.save();
 
+  // Track the device + flag new-device logins. createSession also
+  // writes a SecurityEvent + in-app notification when the fingerprint
+  // hasn't been seen on this account before.
+  await createSession({ userId: user._id, refreshToken: tokens.refreshToken, req });
+  await writeAudit({
+    actor: { id: user._id, email: user.email },
+    actorType: 'user',
+    category: 'auth',
+    action: 'login:password',
+    req,
+  });
+
   res.json({
     success: true,
     message: 'Logged in successfully',
@@ -168,6 +197,17 @@ export const refreshToken = asyncHandler(async (req: Request, res: Response) => 
   ].slice(-5);
   await user.save();
 
+  // Rotate the session row keyed off the old refresh token. Revoke the
+  // old session so a leaked refresh-token can't outlive its rotation.
+  const oldHash = hash(token);
+  const oldSession = await UserSession.findOne({ refreshTokenHash: oldHash });
+  if (oldSession) {
+    oldSession.revokedAt = new Date();
+    oldSession.revokedReason = 'rotated';
+    await oldSession.save();
+  }
+  await createSession({ userId: user._id, refreshToken: tokens.refreshToken, req });
+
   res.json({ success: true, data: tokens });
 });
 
@@ -178,7 +218,21 @@ export const logout = asyncHandler(async (req: AuthRequest, res: Response) => {
   if (user && token) {
     user.refreshTokens = (user.refreshTokens || []).filter((t) => t !== token);
     await user.save();
+    // Revoke the matching session row so it disappears from the
+    // "Active sessions" list immediately, not on the next sweep.
+    const tokenHash = hash(token);
+    const session = await UserSession.findOne({ refreshTokenHash: tokenHash });
+    if (session && req.user._id) {
+      await revokeSession(req.user._id, session._id.toString(), 'logout');
+    }
   }
+  await writeAudit({
+    actor: { id: req.user._id, email: req.user.email },
+    actorType: 'user',
+    category: 'auth',
+    action: 'logout',
+    req,
+  });
   res.json({ success: true, message: 'Logged out' });
 });
 
@@ -367,6 +421,15 @@ export const firebaseLogin = asyncHandler(async (req: Request, res: Response) =>
   user.refreshTokens = [...(user.refreshTokens || []).slice(-4), tokens.refreshToken];
   user.lastLogin = new Date();
   await user.save();
+
+  await createSession({ userId: user._id, refreshToken: tokens.refreshToken, req });
+  await writeAudit({
+    actor: { id: user._id, email: user.email },
+    actorType: 'user',
+    category: 'auth',
+    action: 'login:firebase',
+    req,
+  });
 
   res.json({
     success: true,

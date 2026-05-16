@@ -5,8 +5,14 @@ import { asyncHandler } from '../utils/asyncHandler';
 import { ApiError } from '../utils/ApiError';
 import { AiKey, IAiKey, AiProvider } from '../models/AiKey';
 import { encryptSecret, decryptSecret } from '../utils/aesCrypto';
+import {
+  syncProviderToAppConfig,
+  syncAllProvidersToAppConfig,
+} from '../services/ai/aiKeySync.service';
+import { getAppConfig } from '../services/config/config.service';
+import { isProviderEnabled } from '../services/ai/providers';
 
-const PROVIDERS: AiProvider[] = ['gemini', 'claude'];
+const PROVIDERS: AiProvider[] = ['gemini', 'claude', 'groq'];
 
 /** Strip the encrypted key before returning to the admin UI — it never
  * round-trips. The UI works off the document fields it can safely see.
@@ -168,6 +174,7 @@ export const createAiKey = asyncHandler(
       ...parsed,
       createdBy: req.user?._id,
     });
+    await syncProviderToAppConfig(created.provider);
     const lean = created.toObject();
     res.json(toResponse(lean as unknown as IAiKey));
   },
@@ -180,10 +187,17 @@ export const updateAiKey = asyncHandler(
     if (Object.keys(parsed).length === 0) {
       throw ApiError.badRequest('No updatable fields supplied');
     }
+    // Capture the pre-update provider so we can re-sync the old provider
+    // if the admin migrated this key between providers (rare but valid).
+    const before = await AiKey.findById(id).lean<IAiKey>();
     const updated = await AiKey.findByIdAndUpdate(id, parsed, {
       new: true,
     }).lean<IAiKey>();
     if (!updated) throw ApiError.notFound('AI key not found');
+    await syncProviderToAppConfig(updated.provider);
+    if (before && before.provider !== updated.provider) {
+      await syncProviderToAppConfig(before.provider);
+    }
     res.json(toResponse(updated));
   },
 );
@@ -201,6 +215,7 @@ export const toggleAiKey = asyncHandler(
       { new: true },
     ).lean<IAiKey>();
     if (!updated) throw ApiError.notFound('AI key not found');
+    await syncProviderToAppConfig(updated.provider);
     res.json(toResponse(updated));
   },
 );
@@ -208,8 +223,12 @@ export const toggleAiKey = asyncHandler(
 export const deleteAiKey = asyncHandler(
   async (req: AuthRequest, res: Response) => {
     const id = requireObjectId(req.params.id);
+    // Capture the provider so we can re-sync after deletion (the winner
+    // for this provider may now be a different key, or none at all).
+    const doomed = await AiKey.findById(id).lean<IAiKey>();
     const r = await AiKey.deleteOne({ _id: id });
     if (r.deletedCount === 0) throw ApiError.notFound('AI key not found');
+    if (doomed) await syncProviderToAppConfig(doomed.provider);
     res.json({ ok: true });
   },
 );
@@ -253,6 +272,27 @@ export const testAiKey = asyncHandler(
         res.json({ ok: true, latencyMs: Date.now() - start });
         return;
       }
+      if (k.provider === 'groq') {
+        // Groq is OpenAI-compatible; the /models endpoint accepts a
+        // Bearer token and doesn't spend any tokens. Same shape as the
+        // gemini/claude branches above.
+        const base = (k.baseUrl?.trim() || 'https://api.groq.com/openai/v1').replace(/\/+$/, '');
+        const resp = await fetch(`${base}/models`, {
+          method: 'GET',
+          headers: { Authorization: `Bearer ${apiKey}` },
+        });
+        if (!resp.ok) {
+          const body = await resp.text().catch(() => '');
+          res.json({
+            ok: false,
+            latencyMs: Date.now() - start,
+            detail: `${resp.status} ${resp.statusText}${body ? ` — ${body.slice(0, 120)}` : ''}`,
+          });
+          return;
+        }
+        res.json({ ok: true, latencyMs: Date.now() - start });
+        return;
+      }
       // Claude: hit the models endpoint with the x-api-key header.
       const resp = await fetch('https://api.anthropic.com/v1/models', {
         method: 'GET',
@@ -278,5 +318,46 @@ export const testAiKey = asyncHandler(
         detail: (err as Error).message,
       });
     }
+  },
+);
+
+/**
+ * Re-run the AiKey → AppConfig bridge for every provider and return a
+ * per-provider report. Useful when the boot-time sync missed something
+ * (server was offline when the admin added a key, encrypt key rotated,
+ * AiKey rows became inactive, etc.) — the operator hits this to make
+ * the runtime providers see the current AiKey state without restarting
+ * the process. Report shape lets the admin UI render a
+ * traffic-light per provider:
+ *
+ *   { gemini: { keyRowsTotal, activeRows, syncedToAppConfig, providerEnabled }, ... }
+ */
+export const syncAiKeysToAppConfig = asyncHandler(
+  async (_req: AuthRequest, res: Response) => {
+    await syncAllProvidersToAppConfig();
+    const APP_CFG: Record<AiProvider, string> = {
+      gemini: 'GEMINI_API_KEY',
+      claude: 'ANTHROPIC_API_KEY',
+      groq: 'GROQ_API_KEY',
+    };
+    const report: Record<AiProvider, {
+      keyRowsTotal: number;
+      activeRows: number;
+      syncedToAppConfig: boolean;
+      providerEnabled: boolean;
+    }> = { gemini: {} as never, claude: {} as never, groq: {} as never };
+    for (const p of PROVIDERS) {
+      const [keyRowsTotal, activeRows] = await Promise.all([
+        AiKey.countDocuments({ provider: p }),
+        AiKey.countDocuments({ provider: p, isActive: true }),
+      ]);
+      report[p] = {
+        keyRowsTotal,
+        activeRows,
+        syncedToAppConfig: Boolean(getAppConfig(APP_CFG[p])),
+        providerEnabled: isProviderEnabled(p),
+      };
+    }
+    res.json({ ok: true, report });
   },
 );

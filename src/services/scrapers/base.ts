@@ -20,25 +20,89 @@ export const getFreshnessDaysForSource = (source: string): number => {
   return JOB_FRESHNESS_DAYS;
 };
 
+/**
+ * Coarse-grained reason the scraper produced (or didn't produce) jobs on
+ * its last call. Surfaced to the admin dashboard so 0-job rows can tell
+ * the operator WHY: an unconfigured key reads differently from a 401, a
+ * cooldown, or a working API that legitimately returned nothing.
+ */
+export type ScraperRunStatus =
+  | 'ok'
+  | 'no_key'
+  | 'cooldown'
+  | 'auth_error'
+  | 'rate_limited'
+  | 'network_error'
+  | 'empty_query'
+  | 'parse_error'
+  | 'unknown';
+
+const STATUS_PRIORITY: Record<ScraperRunStatus, number> = {
+  // Higher = "stickier" — once we hit auth_error in a run we don't want
+  // a later `ok` (which might have been from a cached/empty result) to
+  // overwrite it. The dashboard needs to surface the most actionable
+  // signal seen during the run.
+  unknown: 0,
+  ok: 1,
+  empty_query: 2,
+  no_key: 3,
+  cooldown: 4,
+  network_error: 5,
+  rate_limited: 6,
+  parse_error: 7,
+  auth_error: 8,
+};
+
 export abstract class BaseScraper {
   abstract source: string;
 
   private runFailureCount = 0;
   private static readonly MAX_FAILURES_PER_RUN = 2;
 
+  /// Last status observed across fetch() invocations within the current
+  /// orchestrator run. `resetForNewRun()` clears it back to 'unknown'.
+  /// Read by `index.ts` after the run finishes and stored on the
+  /// scraperTracker so the admin dashboard can show it as a status pill.
+  private _lastStatus: ScraperRunStatus = 'unknown';
+  private _lastStatusDetail: string | undefined;
+
   abstract fetch(query: string, location?: string): Promise<ScrapedJob[]>;
 
   resetForNewRun(): void {
     this.runFailureCount = 0;
+    this._lastStatus = 'unknown';
+    this._lastStatusDetail = undefined;
+  }
+
+  /**
+   * Records a status seen during fetch(). The highest-priority status
+   * (per STATUS_PRIORITY) wins for the run — so a single 401 sticks even
+   * if later calls return 'ok' from a cached/empty path.
+   */
+  protected noteStatus(status: ScraperRunStatus, detail?: string): void {
+    if (STATUS_PRIORITY[status] >= STATUS_PRIORITY[this._lastStatus]) {
+      this._lastStatus = status;
+      this._lastStatusDetail = detail;
+    }
+  }
+
+  /** Read-only accessor used by the orchestrator when recording stats. */
+  get lastRunStatus(): { status: ScraperRunStatus; detail?: string } {
+    return { status: this._lastStatus, detail: this._lastStatusDetail };
   }
 
   protected async isCooldown(): Promise<boolean> {
     const v = await redis.get(`scraper:cooldown:${this.source}`);
     if (v) {
       logger.debug(`[${this.source}] in cooldown — skipping (${v})`);
+      this.noteStatus('cooldown', v);
       return true;
     }
-    return this.runFailureCount >= BaseScraper.MAX_FAILURES_PER_RUN;
+    if (this.runFailureCount >= BaseScraper.MAX_FAILURES_PER_RUN) {
+      this.noteStatus('cooldown', 'failure threshold reached');
+      return true;
+    }
+    return false;
   }
 
   protected async setCooldown(reason: string, seconds: number): Promise<void> {
@@ -65,21 +129,26 @@ export abstract class BaseScraper {
       logger.warn(`[${this.source}] ${context} → ${status || 'NETWORK'}: ${apiMsg}`);
 
       if (status === 401 || status === 403) {
+        this.noteStatus('auth_error', `HTTP ${status}: ${apiMsg.slice(0, 80)}`);
         await this.setCooldown(`auth/quota error ${status}`, 60 * 60);
         return;
       }
       if (status === 429) {
+        this.noteStatus('rate_limited', apiMsg.slice(0, 80));
         await this.setCooldown('rate limited', 15 * 60);
         return;
       }
       if (!status && (ae.code === 'ECONNABORTED' || ae.code === 'ETIMEDOUT')) {
+        this.noteStatus('network_error', 'timeout');
         await this.setCooldown('timeout', 5 * 60);
         return;
       }
+      this.noteStatus('network_error', `HTTP ${status ?? '?'}: ${apiMsg.slice(0, 80)}`);
       return;
     }
 
     logger.warn(`[${this.source}] ${context} → ${(err as Error).message}`);
+    this.noteStatus('network_error', (err as Error).message.slice(0, 80));
   }
 
   /// Days back this scraper accepts. Reads the per-source App Config
@@ -98,6 +167,26 @@ export abstract class BaseScraper {
 
   protected log(msg: string, meta?: Record<string, unknown>): void {
     logger.info(`[${this.source}] ${msg}`, meta);
+  }
+
+  /**
+   * Sugar around `noteStatus('no_key')` + a single warn log per fetch.
+   * Returns true so callers can `if (this.needsKey(apiKey, 'X_KEY')) return [];`.
+   */
+  protected needsKey(value: string | null | undefined, keyName: string): boolean {
+    if (value && value.trim().length > 0) return false;
+    this.noteStatus('no_key', `missing AppConfig key: ${keyName}`);
+    logger.warn(`[${this.source}] skipped — AppConfig key '${keyName}' is not set`);
+    return true;
+  }
+
+  /**
+   * Convenience for the common "we ran the API call and got N items"
+   * path. Records `'ok'` with the count so the admin can tell apart
+   * "ran, got 0" from "didn't run".
+   */
+  protected noteOk(count: number): void {
+    this.noteStatus('ok', `returned ${count}`);
   }
 
   protected logError(msg: string, err: unknown): void {

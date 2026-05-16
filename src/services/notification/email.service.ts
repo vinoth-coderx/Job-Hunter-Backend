@@ -3,6 +3,27 @@ import { EMAIL_FROM, SMTP_HOST, SMTP_PORT } from '../../config/constants';
 import { getAppConfig } from '../config/config.service';
 import { logger } from '../../utils/logger';
 import { IJob } from '../../models/Job';
+import { polishEmailSubject } from '../ai/notificationCopy.service';
+
+/**
+ * Optionally polish an email subject via Groq when AppConfig flag
+ * `EMAIL_AI_REWRITE` is '1'. Cached aggressively (30d) so recurring
+ * subjects ("3 new jobs match your alert") only burn one rewrite per
+ * exact-match line. Falls back silently to the original subject.
+ */
+const maybePolishSubject = async (
+  subject: string,
+  type: string,
+  context?: Record<string, string | number>,
+): Promise<string> => {
+  if (getAppConfig('EMAIL_AI_REWRITE') !== '1') return subject;
+  try {
+    return await polishEmailSubject(subject, type, context);
+  } catch (err) {
+    logger.warn(`email subject polish skipped: ${(err as Error).message}`);
+    return subject;
+  }
+};
 
 let transporter: Transporter | null = null;
 let configuredFor: string | null = null;
@@ -31,6 +52,35 @@ const escapeHtml = (s: string): string =>
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&#39;');
+
+// Generic email sender used by OTP / security flows that don't fit the
+// templated alert paths above. Mirrors the same "no transporter →
+// silently skip" semantics so unconfigured envs don't crash.
+export const sendEmail = async (params: {
+  to: string;
+  subject: string;
+  text?: string;
+  html?: string;
+  /** Optional AI-rewrite type tag — only used when EMAIL_AI_REWRITE='1'. */
+  rewriteType?: string;
+}): Promise<void> => {
+  const t = getTransporter();
+  if (!t) {
+    logger.warn(`[email] transporter unavailable; skipping send to ${params.to}`);
+    return;
+  }
+  const subject = await maybePolishSubject(
+    params.subject,
+    params.rewriteType ?? 'transactional',
+  );
+  await t.sendMail({
+    from: EMAIL_FROM,
+    to: params.to,
+    subject,
+    text: params.text,
+    html: params.html,
+  });
+};
 
 const renderJobAlertHtml = (params: {
   fullName: string;
@@ -98,10 +148,16 @@ export const sendJobAlertEmail = async (params: {
   }
   if (params.jobs.length === 0) return;
 
-  const subject =
+  const subject = await maybePolishSubject(
     params.jobs.length === 1
       ? `New job: ${params.jobs[0].title} at ${params.jobs[0].company}`
-      : `${params.jobs.length} new jobs match your alert${params.alertName ? ` "${params.alertName}"` : ''}`;
+      : `${params.jobs.length} new jobs match your alert${params.alertName ? ` "${params.alertName}"` : ''}`,
+    'job_alert',
+    {
+      count: params.jobs.length,
+      ...(params.alertName ? { alert: params.alertName } : {}),
+    },
+  );
 
   const html = renderJobAlertHtml({
     fullName: params.fullName,
@@ -123,6 +179,143 @@ export const sendJobAlertEmail = async (params: {
     });
   } catch (err) {
     logger.warn(`email job alert failed: ${(err as Error).message}`);
+  }
+};
+
+/**
+ * Single-job recommendation email — sent by the `recommendedJobs` cron
+ * whenever the system finds a >=70% match for the seeker. The CTA
+ * routes through `https://jobhunter.app/job/<id>` so:
+ *   - With the app installed → Android App Links / iOS Universal Links
+ *     open the right screen directly.
+ *   - Without the app → the marketing page at jobhunter.app/job/<id>
+ *     surfaces Play Store + App Store install buttons (the same link
+ *     opens the right screen once the user installs).
+ *
+ * The Play Store / App Store links are also rendered inline so the
+ * recipient never has to hunt for them — they're the most common
+ * "what is this?" follow-up question for a new install.
+ */
+const RECOMMENDED_JOB_APP_HOST = 'https://jobhunter.app';
+// TODO(deploy): replace with the actual Play Store + App Store listings
+// once the apps are published. Kept as placeholders so the templates
+// render cleanly during development.
+const PLAY_STORE_URL =
+  'https://play.google.com/store/apps/details?id=com.example.job_hunter';
+const APP_STORE_URL = 'https://apps.apple.com/app/job-hunter/id000000000';
+
+const renderRecommendedJobHtml = (params: {
+  fullName: string;
+  job: {
+    id: string;
+    title: string;
+    company: string;
+    location: string;
+    salaryText?: string;
+    matchScore: number;
+  };
+}): string => {
+  const { fullName, job } = params;
+  const openInAppUrl = `${RECOMMENDED_JOB_APP_HOST}/job/${encodeURIComponent(job.id)}`;
+  const locationLine = [job.location, job.salaryText].filter(Boolean).join(' · ');
+  return `
+    <!DOCTYPE html>
+    <html><body style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Inter,sans-serif;background:#f7f9fc;padding:24px 0;margin:0;">
+      <table style="max-width:560px;margin:0 auto;background:#fff;border-radius:12px;padding:28px;">
+        <tr><td>
+          <div style="display:inline-block;background:#E6F0FF;color:#1857C2;padding:4px 10px;border-radius:999px;font-size:12px;font-weight:700;letter-spacing:0.2px;">
+            ${job.matchScore}% match
+          </div>
+          <h1 style="font-size:20px;color:#0a0a0a;margin:14px 0 6px 0;line-height:1.3;">
+            ${escapeHtml(job.title)}
+          </h1>
+          <p style="font-size:14px;color:#374151;margin:0 0 4px 0;font-weight:600;">
+            ${escapeHtml(job.company)}
+          </p>
+          ${
+            locationLine
+              ? `<p style="font-size:13px;color:#6b7280;margin:0 0 18px 0;">
+                   ${escapeHtml(locationLine)}
+                 </p>`
+              : ''
+          }
+          <p style="font-size:14px;color:#374151;margin:0 0 18px 0;line-height:1.5;">
+            Hi ${escapeHtml(fullName)}, this just landed and looks like a
+            strong fit for your profile.
+          </p>
+          <div style="margin:18px 0 8px 0;">
+            <a href="${escapeHtml(openInAppUrl)}"
+               style="background:#2D7BFF;color:#fff;padding:12px 18px;border-radius:10px;text-decoration:none;font-size:14px;font-weight:700;display:inline-block;">
+              Open in app
+            </a>
+          </div>
+          <p style="font-size:12px;color:#6b7280;margin:14px 0 6px 0;">
+            Don't have the app yet?
+          </p>
+          <table style="border-collapse:collapse;">
+            <tr>
+              <td style="padding-right:8px;">
+                <a href="${escapeHtml(PLAY_STORE_URL)}"
+                   style="display:inline-block;background:#0a0a0a;color:#fff;padding:8px 14px;border-radius:8px;text-decoration:none;font-size:12px;font-weight:600;">
+                  Get on Google Play
+                </a>
+              </td>
+              <td>
+                <a href="${escapeHtml(APP_STORE_URL)}"
+                   style="display:inline-block;background:#0a0a0a;color:#fff;padding:8px 14px;border-radius:8px;text-decoration:none;font-size:12px;font-weight:600;">
+                  Download on App Store
+                </a>
+              </td>
+            </tr>
+          </table>
+          <p style="font-size:11px;color:#9ca3af;margin-top:22px;">
+            You're getting this email because email recommendations are
+            on. Turn them off any time from
+            <em>Profile → Notification preferences</em>.
+          </p>
+        </td></tr>
+      </table>
+    </body></html>`;
+};
+
+export const sendRecommendedJobEmail = async (params: {
+  toEmail: string;
+  fullName: string;
+  job: {
+    id: string;
+    title: string;
+    company: string;
+    location: string;
+    salaryText?: string;
+    matchScore: number;
+  };
+}): Promise<void> => {
+  const t = getTransporter();
+  if (!t) {
+    logger.debug('SMTP not configured — skipping recommended job email');
+    return;
+  }
+  const subject = await maybePolishSubject(
+    `${params.job.matchScore}% match: ${params.job.title} at ${params.job.company}`,
+    'recommended_job',
+    {
+      score: params.job.matchScore,
+      company: params.job.company,
+    },
+  );
+  const html = renderRecommendedJobHtml({
+    fullName: params.fullName,
+    job: params.job,
+  });
+  try {
+    await t.sendMail({
+      from: EMAIL_FROM,
+      to: params.toEmail,
+      subject,
+      html,
+    });
+  } catch (err) {
+    logger.warn(`recommended job email failed: ${(err as Error).message}`);
   }
 };
 
@@ -181,7 +374,11 @@ export const sendTeamInviteEmail = async (params: {
     logger.debug('SMTP not configured — skipping team invite email');
     return;
   }
-  const subject = `You're invited to join ${params.companyName} on Job Hunter`;
+  const subject = await maybePolishSubject(
+    `You're invited to join ${params.companyName} on Job Hunter`,
+    'team_invite',
+    { company: params.companyName, role: params.role },
+  );
   const html = renderTeamInviteHtml(params);
   try {
     await t.sendMail({

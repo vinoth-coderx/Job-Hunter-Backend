@@ -43,10 +43,39 @@ export interface IHirerProfile extends Document {
 
   verification: {
     isVerified: boolean;
+    // Per-channel verification status. Each flag flips true when the
+    // corresponding Verification row is approved by admin (or, for
+    // domain_email, when the OTP is consumed). `isVerified` is the OR
+    // of all of these.
+    levels: {
+      gst: boolean;
+      domainEmail: boolean;
+      website: boolean;
+      linkedin: boolean;
+      identity: boolean;
+    };
     gstNumber?: string;
+    officialDomainEmail?: string;
+    linkedinPageUrl?: string;
     verifiedAt?: Date;
     verificationDocumentUrl?: string;
   };
+
+  // Anti-fraud state. `approvalStatus` gates whether this hirer can
+  // publish jobs at all — new accounts start in `pending_review` and
+  // are flipped to `approved` after admin signs off. `trustScore` is
+  // computed nightly from `services/trust/trustScore.service.ts` and
+  // influences moderation auto-approve thresholds and posting limits.
+  approvalStatus: 'pending_review' | 'approved' | 'suspended' | 'banned';
+  approvalNote?: string;
+  approvedAt?: Date;
+  approvedBy?: mongoose.Types.ObjectId;
+  trustScore: number;
+  dailyPostLimit: number;
+  totalJobsPosted: number;
+  totalJobsFlagged: number;
+  totalReportsAgainst: number;
+  riskFlags: string[];
 
   rating: {
     average: number;
@@ -126,10 +155,35 @@ const hirerProfileSchema = new Schema<IHirerProfile>(
 
     verification: {
       isVerified: { type: Boolean, default: false, index: true },
+      levels: {
+        gst: { type: Boolean, default: false },
+        domainEmail: { type: Boolean, default: false },
+        website: { type: Boolean, default: false },
+        linkedin: { type: Boolean, default: false },
+        identity: { type: Boolean, default: false },
+      },
       gstNumber: { type: String, trim: true, maxlength: 32 },
+      officialDomainEmail: { type: String, trim: true, lowercase: true, maxlength: 200 },
+      linkedinPageUrl: { type: String, maxlength: 500 },
       verifiedAt: Date,
       verificationDocumentUrl: String,
     },
+
+    approvalStatus: {
+      type: String,
+      enum: ['pending_review', 'approved', 'suspended', 'banned'],
+      default: 'pending_review',
+      index: true,
+    },
+    approvalNote: { type: String, maxlength: 2000 },
+    approvedAt: Date,
+    approvedBy: { type: Schema.Types.ObjectId, ref: 'User' },
+    trustScore: { type: Number, default: 30, min: 0, max: 100, index: true },
+    dailyPostLimit: { type: Number, default: 3, min: 0 },
+    totalJobsPosted: { type: Number, default: 0 },
+    totalJobsFlagged: { type: Number, default: 0 },
+    totalReportsAgainst: { type: Number, default: 0 },
+    riskFlags: { type: [String], default: [] },
 
     rating: {
       average: { type: Number, default: 0, min: 0, max: 5 },
