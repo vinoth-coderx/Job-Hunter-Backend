@@ -1,6 +1,13 @@
 import { AppConfig, type AppConfigCategory } from '../../models/AppConfig';
 import { decryptSecret, encryptSecret } from '../../utils/aesCrypto';
 import { logger } from '../../utils/logger';
+import {
+  readRuntimeMode,
+  writeRuntimeMode,
+  type RuntimeMode,
+} from '../../config/runtimeMode';
+
+export type { RuntimeMode };
 
 /**
  * In-memory cache of DB-backed runtime config. Boot does one `preload()`
@@ -18,11 +25,6 @@ import { logger } from '../../utils/logger';
  * the fallback for mode-agnostic keys (e.g. RUNTIME_MODE itself,
  * CRON_ENABLED, RATE_LIMIT_*) and for pre-migration data.
  */
-export type RuntimeMode = 'test' | 'live';
-
-export const RUNTIME_MODE_KEY = 'RUNTIME_MODE';
-export const DEFAULT_RUNTIME_MODE: RuntimeMode = 'live';
-
 interface CacheRow {
   test: string | null;
   live: string | null;
@@ -31,7 +33,6 @@ interface CacheRow {
 
 const cache = new Map<string, CacheRow>();
 let preloaded = false;
-let activeMode: RuntimeMode = DEFAULT_RUNTIME_MODE;
 
 const emptyRow = (): CacheRow => ({ test: null, live: null, legacy: null });
 
@@ -57,10 +58,6 @@ const decryptOrNull = (key: string, blob?: string | null): string | null => {
   }
 };
 
-const parseMode = (raw: string | null | undefined): RuntimeMode => {
-  return raw === 'test' ? 'test' : 'live';
-};
-
 export const preloadAppConfig = async (): Promise<void> => {
   const rows = await AppConfig.find({})
     .select('+valueEncrypted +testValueEncrypted +liveValueEncrypted')
@@ -79,23 +76,23 @@ export const preloadAppConfig = async (): Promise<void> => {
     }
     setRow(row.key, next);
   }
-  // Pick up the persisted runtime mode (defaults to 'live' for safety —
-  // fresh installs should opt into test mode explicitly).
-  activeMode = parseMode(cache.get(RUNTIME_MODE_KEY)?.legacy ?? null);
   preloaded = true;
   logger.info(
-    `AppConfig: preloaded ${cache.size} key(s) — runtime mode = ${activeMode}`,
+    `AppConfig: preloaded ${cache.size} key(s) — runtime mode = ${readRuntimeMode()}`,
   );
 };
 
 /**
  * Returns the active-mode value if present, else the legacy slot, else
- * the env fallback. Returns null when no source has the key.
+ * the env fallback. Returns null when no source has the key. The
+ * "active mode" is read fresh on every call so the test/live split
+ * stays consistent if a flip happens mid-process (rare — flips are
+ * usually followed by a restart).
  */
 export const getAppConfig = (key: string): string | null => {
   const row = cache.get(key);
   if (row) {
-    const modeValue = row[activeMode];
+    const modeValue = row[readRuntimeMode()];
     if (modeValue) return modeValue;
     if (row.legacy) return row.legacy;
   }
@@ -125,7 +122,7 @@ export const requireAppConfig = (key: string): string => {
 
 export const isAppConfigPreloaded = (): boolean => preloaded;
 
-export const getRuntimeMode = (): RuntimeMode => activeMode;
+export const getRuntimeMode = (): RuntimeMode => readRuntimeMode();
 
 export interface SetAppConfigArgs {
   key: string;
@@ -195,34 +192,17 @@ export const setAppConfig = async (args: SetAppConfigArgs): Promise<void> => {
   if (args.legacyValue !== undefined) row.legacy = args.legacyValue === '' ? null : args.legacyValue;
   setRow(args.key, row);
 
-  if (args.key === RUNTIME_MODE_KEY && args.legacyValue !== undefined) {
-    activeMode = parseMode(args.legacyValue);
-  }
 };
 
 /**
- * Flip the runtime mode atomically. Persists the new value to the
- * `RUNTIME_MODE` AppConfig row and updates the in-memory selector so the
- * next `getAppConfig(...)` call picks the right slot.
- *
- * Callers that hold their own initialised SDK clients (firebase-admin,
- * cloudinary, …) must additionally re-init when the mode flips —
- * `clearAppConfigCache` is *not* enough.
+ * Persist a runtime-mode change to disk. The caller MUST trigger a
+ * process restart afterwards — Mongo + Redis connections are bound at
+ * boot and cannot safely be swapped in-flight. See
+ * `flipModeAndScheduleRestart` in the admin controller for the full
+ * write → respond → exit sequence.
  */
-export const setRuntimeMode = async (
-  mode: RuntimeMode,
-  updatedBy?: string,
-): Promise<void> => {
-  await setAppConfig({
-    key: RUNTIME_MODE_KEY,
-    category: 'misc',
-    isSecret: false,
-    legacyValue: mode,
-    notes: 'Active runtime mode — flipped from admin /config page',
-    updatedBy,
-  });
-  activeMode = mode;
-  logger.info(`AppConfig: runtime mode → ${mode}`);
+export const setRuntimeMode = (mode: RuntimeMode): void => {
+  writeRuntimeMode(mode);
 };
 
 export const deleteAppConfig = async (key: string): Promise<void> => {

@@ -1,17 +1,28 @@
 import mongoose from 'mongoose';
 import { env } from './env';
+import { readRuntimeMode } from './runtimeMode';
 import { logger } from '../utils/logger';
 
 mongoose.set('strictQuery', true);
 
-const resolveMongoUri = (): { uri: string; label: 'prod' | 'test/dev' } => {
-  if (env.NODE_ENV === 'production') {
+/**
+ * The Mongo cluster the process connects to is driven by the persisted
+ * runtime mode (file-backed in `secrets/.runtime-mode`), NOT by
+ * `NODE_ENV`. This lets an operator flip between the test + live
+ * clusters from the admin UI without touching deployment env.
+ *
+ * `MONGODB_URI` is the test/dev cluster (also the fallback if no live
+ * URI is set). `MONGODB_URI_PROD` is the live cluster.
+ */
+const resolveMongoUri = (): { uri: string; label: 'live' | 'test' } => {
+  const mode = readRuntimeMode();
+  if (mode === 'live') {
     return {
       uri: env.MONGODB_URI_PROD ?? env.MONGODB_URI,
-      label: 'prod',
+      label: 'live',
     };
   }
-  return { uri: env.MONGODB_URI, label: 'test/dev' };
+  return { uri: env.MONGODB_URI, label: 'test' };
 };
 
 export const connectDatabase = async (): Promise<void> => {

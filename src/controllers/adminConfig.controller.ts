@@ -12,7 +12,6 @@ import {
   setRuntimeMode,
   type RuntimeMode,
 } from '../services/config/config.service';
-import { resetFirebaseAdmin } from '../services/firebase/admin.service';
 import { CONFIG_REGISTRY } from '../services/config/configRegistry';
 import { AppConfig, type AppConfigCategory } from '../models/AppConfig';
 import {
@@ -182,15 +181,20 @@ export const getMode = asyncHandler(async (_req: AuthRequest, res: Response) => 
 });
 
 /**
- * Flip the active runtime mode. Persists the new selection, invalidates
- * any cached SDK clients that were initialised with the old mode's
- * credentials, and returns the new mode + the timestamp.
+ * Flip the active runtime mode. Writes `secrets/.runtime-mode`,
+ * responds to the caller, then schedules `process.exit(0)` so the
+ * process manager (nodemon in dev, Render auto-deploy in prod, pm2,
+ * docker `restart: always`, …) restarts the backend with the new mode.
  *
- * Cloudinary re-configs lazily — `ensureCloudinary()` compares its
- * `configuredFor` sentinel against the current `CLOUDINARY_CLOUD_NAME`
- * on every read, so a fresh credential is picked up on the next call.
- * Firebase admin caches `initializeApp`, so we have to explicitly drop
- * it here.
+ * A restart is mandatory because both Mongo and Redis connections are
+ * bound at boot (Mongoose models, the singleton ioredis client, and
+ * ~25 importers of that client). Swapping them in-flight is
+ * intrusive enough that an explicit ~5s downtime is the safer trade.
+ *
+ * Caveat: each side's session store is in the side's Mongo, so the
+ * admin's own JWT will look up a user that doesn't exist in the new
+ * DB until the cross-DB admin seed has been run. The UI handles this
+ * by redirecting to /login on flip completion.
  */
 export const setMode = asyncHandler(async (req: AuthRequest, res: Response) => {
   const raw = req.body?.mode;
@@ -198,10 +202,19 @@ export const setMode = asyncHandler(async (req: AuthRequest, res: Response) => {
     throw ApiError.badRequest("mode must be 'test' or 'live'");
   }
   const mode = raw as RuntimeMode;
-  await setRuntimeMode(mode, req.user?.id);
-  await resetFirebaseAdmin();
-  logger.info(`Runtime mode flipped → ${mode} by ${req.user?.id ?? 'unknown'}`);
-  res.json({ mode, at: new Date().toISOString() });
+  if (mode === getRuntimeMode()) {
+    res.json({ mode, at: new Date().toISOString(), restarting: false });
+    return;
+  }
+  setRuntimeMode(mode);
+  logger.info(`Runtime mode flipped → ${mode} by ${req.user?.id ?? 'unknown'} — scheduling process restart`);
+  res.json({ mode, at: new Date().toISOString(), restarting: true });
+  // Give the response a moment to flush before tearing the process
+  // down. The process manager (nodemon / pm2 / Render) restarts us.
+  setTimeout(() => {
+    logger.warn('Exiting process for runtime-mode restart');
+    process.exit(0);
+  }, 500);
 });
 
 export const removeConfig = asyncHandler(

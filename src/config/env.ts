@@ -36,6 +36,13 @@ const envSchema = z.object({
   MONGODB_URI_PROD: z.string().optional(),
 
   // ── Redis (queues + caches; needed before any request) ──
+  // Per-mode URL takes priority when the matching runtime mode is
+  // active: `REDIS_URL_TEST` for test mode, `REDIS_URL_LIVE` for live
+  // mode. When the per-mode URL is missing, the bootstrap falls back to
+  // the discrete REDIS_HOST/PORT/USERNAME/PASSWORD/TLS quintet so a
+  // single-mode dev install still boots without extra config.
+  REDIS_URL_TEST: z.string().optional(),
+  REDIS_URL_LIVE: z.string().optional(),
   REDIS_HOST: z.string().default('localhost'),
   REDIS_PORT: z.string().default('6379').transform(Number),
   REDIS_USERNAME: z.string().optional(),

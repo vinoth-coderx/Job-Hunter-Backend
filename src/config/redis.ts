@@ -1,25 +1,49 @@
 import Redis, { RedisOptions } from 'ioredis';
 import { env } from './env';
 import { REDIS_DB } from './constants';
+import { readRuntimeMode } from './runtimeMode';
 import { logger } from '../utils/logger';
 
 const useTls = env.REDIS_TLS === 'true';
 
-const redisOpts: RedisOptions = {
-  host: env.REDIS_HOST,
-  port: env.REDIS_PORT,
-  username: env.REDIS_USERNAME || undefined,
-  password: env.REDIS_PASSWORD || undefined,
-  db: REDIS_DB,
-  maxRetriesPerRequest: 3,
-  enableReadyCheck: true,
-  lazyConnect: true,
-  connectTimeout: 10000,
-  retryStrategy: (times) => Math.min(times * 200, 5000),
-  ...(useTls ? { tls: { rejectUnauthorized: true } } : {}),
+/**
+ * Build ioredis options for the active runtime mode. URL form is
+ * preferred when set (`REDIS_URL_TEST` / `REDIS_URL_LIVE`) — ioredis
+ * accepts these directly. Otherwise we fall back to the discrete
+ * REDIS_* quintet (single Redis instance shared by both modes).
+ */
+const buildRedisOptions = (): { url?: string; opts: RedisOptions } => {
+  const mode = readRuntimeMode();
+  const modeUrl =
+    mode === 'live' ? env.REDIS_URL_LIVE : env.REDIS_URL_TEST;
+  const sharedOpts: RedisOptions = {
+    db: REDIS_DB,
+    maxRetriesPerRequest: 3,
+    enableReadyCheck: true,
+    lazyConnect: true,
+    connectTimeout: 10000,
+    retryStrategy: (times) => Math.min(times * 200, 5000),
+  };
+  if (modeUrl) {
+    logger.info(`Redis: using URL from REDIS_URL_${mode.toUpperCase()}`);
+    return { url: modeUrl, opts: sharedOpts };
+  }
+  return {
+    opts: {
+      ...sharedOpts,
+      host: env.REDIS_HOST,
+      port: env.REDIS_PORT,
+      username: env.REDIS_USERNAME || undefined,
+      password: env.REDIS_PASSWORD || undefined,
+      ...(useTls ? { tls: { rejectUnauthorized: true } } : {}),
+    },
+  };
 };
 
-export const redis = new Redis(redisOpts);
+const built = buildRedisOptions();
+export const redis = built.url
+  ? new Redis(built.url, built.opts)
+  : new Redis(built.opts);
 
 redis.on('connect', () => logger.info('Redis connected'));
 redis.on('ready', () => logger.info('Redis ready'));
