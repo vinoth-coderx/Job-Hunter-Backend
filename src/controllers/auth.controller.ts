@@ -351,10 +351,11 @@ export const firebaseLogin = asyncHandler(async (req: Request, res: Response) =>
     );
   }
 
-  const { idToken, fullName, phone } = req.body as {
+  const { idToken, fullName, phone, role } = req.body as {
     idToken: string;
     fullName?: string;
     phone?: string;
+    role?: 'seeker' | 'hirer';
   };
 
   let decoded;
@@ -377,11 +378,18 @@ export const firebaseLogin = asyncHandler(async (req: Request, res: Response) =>
     $or: [{ firebaseUid }, { email }],
   }).select('+refreshTokens');
 
+  let isNewUser = false;
+  // Only honor `role` when creating a fresh account. For existing users
+  // we deliberately ignore it — flipping activeRole here would let any
+  // seeker silently become a hirer just by hitting the recruiter login
+  // screen, bypassing the HirerProfile guard on /users/switch-role.
+  const requestedRole: 'seeker' | 'hirer' = role === 'hirer' ? 'hirer' : 'seeker';
   if (!user) {
     user = await User.create({
       email,
       firebaseUid,
       authProvider: 'firebase',
+      activeRole: requestedRole,
       isEmailVerified: decoded.email_verified ?? false,
       profile: {
         fullName: fullName?.trim() || decoded.name || email.split('@')[0],
@@ -396,7 +404,8 @@ export const firebaseLogin = asyncHandler(async (req: Request, res: Response) =>
       },
       subscription: { tier: 'free', status: 'active' },
     });
-    logger.info(`New user via Firebase Auth: ${email}`);
+    isNewUser = true;
+    logger.info(`New user via Firebase Auth: ${email} (activeRole=${requestedRole})`);
   } else if (!user.firebaseUid) {
     // Existing local/google account — link the Firebase UID so future
     // sign-ins take the fast path. Don't overwrite name/avatar fields
@@ -441,8 +450,11 @@ export const firebaseLogin = asyncHandler(async (req: Request, res: Response) =>
         fullName: user.profile.fullName,
         avatar: user.profile.avatar,
         role: 'user',
+        activeRole: user.activeRole,
         subscription: user.subscription,
+        isEmailVerified: user.isEmailVerified,
       },
+      isNewUser,
       ...tokens,
     },
   });

@@ -29,8 +29,20 @@ export interface IAppConfig extends Document {
   key: string;
   category: AppConfigCategory;
   isSecret: boolean;
-  valueEncrypted?: string; // populated iff isSecret === true
-  value?: string;          // populated iff isSecret === false
+  // Per-runtime-mode values. The active mode is selected by the
+  // `RUNTIME_MODE` AppConfig row ('test' or 'live'). At read time
+  // `getAppConfig` returns the active-mode slot, falling back to the
+  // legacy slot when only one side has been provisioned (e.g. for
+  // mode-agnostic keys like RUNTIME_MODE itself).
+  testValueEncrypted?: string;
+  testValue?: string;
+  liveValueEncrypted?: string;
+  liveValue?: string;
+  // Legacy single-mode slots — retained so pre-existing config rows keep
+  // working and so mode-agnostic keys (RUNTIME_MODE, CRON_ENABLED,
+  // RATE_LIMIT_*, etc.) have a place to live.
+  valueEncrypted?: string;
+  value?: string;
   notes?: string;
   updatedBy?: mongoose.Types.ObjectId;
   createdAt: Date;
@@ -56,6 +68,10 @@ const appConfigSchema = new Schema<IAppConfig>(
     isSecret: { type: Boolean, required: true, default: false },
     // select:false so a routine `find()` never leaks ciphertext to a
     // controller that forgot to project it explicitly.
+    testValueEncrypted: { type: String, select: false },
+    testValue: { type: String, maxlength: 4000 },
+    liveValueEncrypted: { type: String, select: false },
+    liveValue: { type: String, maxlength: 4000 },
     valueEncrypted: { type: String, select: false },
     value: { type: String, maxlength: 4000 },
     notes: { type: String, maxlength: 500 },

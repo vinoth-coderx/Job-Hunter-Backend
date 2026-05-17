@@ -6,9 +6,13 @@ import { ApiError } from '../utils/ApiError';
 import {
   deleteAppConfig,
   getAppConfig,
+  getRuntimeMode,
   listAppConfig,
   setAppConfig,
+  setRuntimeMode,
+  type RuntimeMode,
 } from '../services/config/config.service';
+import { resetFirebaseAdmin } from '../services/firebase/admin.service';
 import { CONFIG_REGISTRY } from '../services/config/configRegistry';
 import { AppConfig, type AppConfigCategory } from '../models/AppConfig';
 import {
@@ -46,8 +50,10 @@ const MANAGED_KEYS: Record<string, { surface: string; href: string }> = {
 
 /**
  * Map the service's AppConfigSummary onto the shape the admin app
- * expects. The admin UI never sees plaintext for secrets — only the
- * `hasValue` flag and a masked preview suitable for an "info" hint.
+ * expects. The admin UI never sees plaintext for secrets — for each
+ * slot (Test / Live / Legacy) the UI gets a `hasXValue` flag plus a
+ * masked preview suitable for an "info" hint. Non-secret slots surface
+ * the full value so the operator can confirm what's stored.
  */
 const toEntry = (
   row: Awaited<ReturnType<typeof listAppConfig>>[number],
@@ -56,10 +62,15 @@ const toEntry = (
   key: row.key,
   category: row.category,
   isSecret: row.isSecret,
-  // For non-secret rows we surface the actual value; for secrets only
-  // the hasValue flag is meaningful (the UI shows "••••" + an info chip).
-  value: row.isSecret ? undefined : row.preview ?? undefined,
-  hasValue: row.hasValue,
+  hasTestValue: row.hasTestValue,
+  hasLiveValue: row.hasLiveValue,
+  hasLegacyValue: row.hasLegacyValue,
+  testValue: row.isSecret ? undefined : row.testPreview ?? undefined,
+  liveValue: row.isSecret ? undefined : row.livePreview ?? undefined,
+  legacyValue: row.isSecret ? undefined : row.legacyPreview ?? undefined,
+  testPreview: row.testPreview,
+  livePreview: row.livePreview,
+  legacyPreview: row.legacyPreview,
   notes: row.notes,
   updatedAt: (row.updatedAt ?? updatedAtFallback ?? new Date()).toISOString(),
   managedBy: MANAGED_KEYS[row.key],
@@ -72,9 +83,24 @@ export const listConfig = asyncHandler(
   },
 );
 
+/**
+ * Pull a per-slot value from the request body. Accepts:
+ *   - `undefined` → slot untouched
+ *   - `''`        → slot cleared
+ *   - non-empty string → slot written
+ * Rejects anything else (numbers, objects, …).
+ */
+const readSlot = (raw: unknown, slotName: string): string | undefined => {
+  if (raw === undefined) return undefined;
+  if (typeof raw !== 'string') {
+    throw ApiError.badRequest(`${slotName} must be a string when provided`);
+  }
+  return raw;
+};
+
 export const upsertConfig = asyncHandler(
   async (req: AuthRequest, res: Response) => {
-    const { key, category, isSecret, value, notes } = req.body ?? {};
+    const { key, category, isSecret, notes } = req.body ?? {};
 
     if (typeof key !== 'string' || !KEY_REGEX.test(key)) {
       throw ApiError.badRequest(
@@ -90,36 +116,43 @@ export const upsertConfig = asyncHandler(
       throw ApiError.badRequest('isSecret must be a boolean');
     }
 
+    const testValue = readSlot(req.body?.testValue, 'testValue');
+    const liveValue = readSlot(req.body?.liveValue, 'liveValue');
+    const legacyValue = readSlot(req.body?.legacyValue, 'legacyValue');
+
     const existing = await AppConfig.findOne({ key }).lean();
 
-    // Value handling:
-    //  - new entry: value is required (secret or not)
-    //  - existing secret + empty value: keep existing ciphertext
-    //  - existing non-secret + empty value: empty allowed (admin chose blank)
+    // New entry: at least one slot must have a value. For mode-aware
+    // secrets the operator typically fills Live first; mode-agnostic
+    // keys (RUNTIME_MODE, CRON_ENABLED, …) write to legacyValue.
     if (!existing) {
-      if (typeof value !== 'string' || value.length === 0) {
-        throw ApiError.badRequest('Value is required for new config entries.');
+      const provided = [testValue, liveValue, legacyValue].filter(
+        (v) => typeof v === 'string' && v.length > 0,
+      );
+      if (provided.length === 0) {
+        throw ApiError.badRequest(
+          'At least one of testValue / liveValue / legacyValue is required for new entries.',
+        );
       }
     }
 
-    const wantsValueWrite =
-      typeof value === 'string' && value.length > 0;
+    const hasAnySlotUpdate =
+      testValue !== undefined || liveValue !== undefined || legacyValue !== undefined;
 
-    if (wantsValueWrite || (!isSecret && existing)) {
-      // Either user supplied a fresh value, or this is a non-secret edit
-      // where empty string is a valid stored value.
+    if (hasAnySlotUpdate) {
       await setAppConfig({
         key,
         category,
         isSecret,
-        value: value ?? '',
+        testValue,
+        liveValue,
+        legacyValue,
         notes: typeof notes === 'string' ? notes : undefined,
         updatedBy: req.user?.id,
       });
     } else {
-      // Existing secret, value omitted → only update metadata (category,
-      // notes, isSecret-flag). Use Mongo directly since the service
-      // always rewrites the value slot.
+      // Metadata-only edit (category/notes/isSecret flag). Update Mongo
+      // directly so the encrypted slots aren't rewritten.
       await AppConfig.updateOne(
         { key },
         {
@@ -139,6 +172,37 @@ export const upsertConfig = asyncHandler(
     res.json(toEntry(saved));
   },
 );
+
+/**
+ * Read the active runtime mode. The admin UI uses this to render the
+ * "🧪 Test ↔ 🚀 Live" toggle in its current position.
+ */
+export const getMode = asyncHandler(async (_req: AuthRequest, res: Response) => {
+  res.json({ mode: getRuntimeMode() });
+});
+
+/**
+ * Flip the active runtime mode. Persists the new selection, invalidates
+ * any cached SDK clients that were initialised with the old mode's
+ * credentials, and returns the new mode + the timestamp.
+ *
+ * Cloudinary re-configs lazily — `ensureCloudinary()` compares its
+ * `configuredFor` sentinel against the current `CLOUDINARY_CLOUD_NAME`
+ * on every read, so a fresh credential is picked up on the next call.
+ * Firebase admin caches `initializeApp`, so we have to explicitly drop
+ * it here.
+ */
+export const setMode = asyncHandler(async (req: AuthRequest, res: Response) => {
+  const raw = req.body?.mode;
+  if (raw !== 'test' && raw !== 'live') {
+    throw ApiError.badRequest("mode must be 'test' or 'live'");
+  }
+  const mode = raw as RuntimeMode;
+  await setRuntimeMode(mode, req.user?.id);
+  await resetFirebaseAdmin();
+  logger.info(`Runtime mode flipped → ${mode} by ${req.user?.id ?? 'unknown'}`);
+  res.json({ mode, at: new Date().toISOString() });
+});
 
 export const removeConfig = asyncHandler(
   async (req: AuthRequest, res: Response) => {
@@ -378,11 +442,17 @@ export const probeConfig = asyncHandler(
     const all = await listAppConfig();
     const row = all.find((r) => r.key === key);
     if (!row) throw ApiError.notFound(`Config "${key}" not found`);
-    if (!row.hasValue) {
+    // Probes use `getAppConfig` which respects the active runtime mode —
+    // so "value present" means *the active-mode side* is populated (or
+    // the legacy slot, which still backstops mode-agnostic keys).
+    const activeHasValue =
+      row.hasLegacyValue ||
+      (getRuntimeMode() === 'live' ? row.hasLiveValue : row.hasTestValue);
+    if (!activeHasValue) {
       res.json({
         ok: false,
         latencyMs: Date.now() - start,
-        detail: 'No value stored',
+        detail: `No value stored for the active runtime mode (${getRuntimeMode()})`,
       });
       return;
     }

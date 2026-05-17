@@ -139,7 +139,7 @@ export const setCronMaster = asyncHandler(
       key: 'CRON_ENABLED',
       category: 'cron',
       isSecret: false,
-      value: enabled ? 'true' : 'false',
+      legacyValue: enabled ? 'true' : 'false',
       updatedBy: req.user?.id,
     });
     // Apply the flip live — stop everything, then conditionally restart
@@ -173,7 +173,7 @@ export const setCronSchedule = asyncHandler(
       key: `CRON_SCHEDULE_${name}`,
       category: 'cron',
       isSecret: false,
-      value: schedule,
+      legacyValue: schedule,
       updatedBy: req.user?.id,
     });
     // Restart so the new expression takes effect immediately. Cheap op —

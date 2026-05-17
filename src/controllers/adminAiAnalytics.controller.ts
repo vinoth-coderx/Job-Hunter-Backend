@@ -113,7 +113,7 @@ export const updateCreditWeights = asyncHandler(
       // 'misc' so the admin AppConfig page still surfaces this row;
       // the dedicated weights editor is the canonical UI for it.
       category: 'misc',
-      value: serialized,
+      legacyValue: serialized,
       isSecret: false,
       notes: 'Per-feature AI quota weight overrides (admin-edited).',
       updatedBy: String(req.user._id),

@@ -84,3 +84,23 @@ export const getFirebaseAdmin = async (): Promise<Admin | null> => {
 export const isFirebaseConfigured = (): boolean =>
   Boolean(getAppConfig('FIREBASE_SERVICE_ACCOUNT_JSON')) ||
   Boolean(process.env.FIREBASE_SERVICE_ACCOUNT_PATH);
+
+/**
+ * Drop the cached firebase-admin instance + delete the underlying app so
+ * the next `getFirebaseAdmin()` re-reads credentials from scratch.
+ * Called when the runtime mode flips so the live mode's service account
+ * doesn't keep serving requests after a switch to test mode (or vice
+ * versa). Safe to call when nothing is initialised — both branches are
+ * no-ops then.
+ */
+export const resetFirebaseAdmin = async (): Promise<void> => {
+  if (cached) {
+    try {
+      await Promise.all(cached.apps.map((app) => app?.delete()));
+    } catch (err) {
+      logger.warn('firebase-admin: app.delete() failed during reset', err);
+    }
+  }
+  cached = null;
+  initAttempted = false;
+};

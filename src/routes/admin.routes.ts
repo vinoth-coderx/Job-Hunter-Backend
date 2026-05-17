@@ -8,6 +8,8 @@ import {
   removeConfig,
   probeConfig,
   listConfigRegistry,
+  getMode,
+  setMode,
 } from '../controllers/adminConfig.controller';
 
 import {
@@ -126,6 +128,8 @@ router.post('/users/:id/unban', unbanUser);
 // --- App Config -----------------------------------------------------------
 router.get('/config', listConfig);
 router.get('/config/registry', listConfigRegistry);
+router.get('/config/mode', getMode);
+router.put('/config/mode', setMode);
 router.put('/config', upsertConfig);
 router.delete('/config/:key', removeConfig);
 router.get('/config/:key/probe', probeConfig);
