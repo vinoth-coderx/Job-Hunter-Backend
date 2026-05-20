@@ -8,4 +8,5 @@ router.use(auth_1.authenticate);
 router.get('/badges', gamification_controller_1.listBadges);
 router.get('/streak', gamification_controller_1.getStreak);
 router.post('/streak/checkin', gamification_controller_1.checkInStreak);
+router.get('/coins', gamification_controller_1.getCoins);
 exports.default = router;

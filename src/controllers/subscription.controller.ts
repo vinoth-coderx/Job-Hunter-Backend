@@ -15,10 +15,9 @@ import {
   verifyWebhookSignature,
   fetchRazorpayOrder,
   fetchRazorpayPayment,
-  resolveRazorpayMode,
   getRazorpayKeyId,
-  RazorpayMode,
 } from '../services/razorpay.service';
+import { runWithMode, type RuntimeMode } from '../config/dbConnections';
 import { grantCoins, getBalance } from '../services/coins/coin.service';
 import { getPlan, getActivePlans } from '../services/subscriptionPlans.service';
 
@@ -370,9 +369,6 @@ export const subscriptionHistory = asyncHandler(async (req: AuthRequest, res: Re
 export const createRazorpayOrderSchema = z.object({
   body: z.object({
     tier: z.string().min(1).max(40),
-    // Client may request 'test' mode (debug builds, emulators). The server
-    // ONLY honors this in non-production deployments — see resolveRazorpayMode.
-    mode: z.enum(['test', 'live']).optional(),
   }),
 });
 
@@ -381,7 +377,6 @@ export const verifyRazorpayPaymentSchema = z.object({
     razorpay_order_id: z.string().min(1),
     razorpay_payment_id: z.string().min(1),
     razorpay_signature: z.string().min(1),
-    mode: z.enum(['test', 'live']).optional(),
     // tier is intentionally NOT accepted here — we derive it from the order's
     // server-set notes inside the handler. Trusting a client-supplied tier
     // would let a user pay for the cheapest plan and claim the most expensive.
@@ -395,20 +390,15 @@ export const verifyRazorpayPaymentSchema = z.object({
  */
 export const razorpayCreateOrder = asyncHandler(async (req: AuthRequest, res: Response) => {
   if (!req.user) throw ApiError.unauthorized();
-  const { tier, mode: requestedMode } = req.body as {
-    tier: string;
-    mode?: RazorpayMode;
-  };
+  const { tier } = req.body as { tier: string };
   const plan = await getPlan(tier);
   if (!plan || !plan.isActive || plan.priceInr <= 0) {
     throw ApiError.badRequest('Invalid paid tier');
   }
 
-  // Resolve which credential set to use. In production this is always 'live'
-  // regardless of what the client asks; in dev/staging it honors a debug
-  // build's request for 'test' if test keys are configured.
-  const mode = resolveRazorpayMode(requestedMode);
-
+  // The active runtime mode (test/live, picked by NODE_ENV at boot) decides
+  // which Mongo's RAZORPAY_KEY_ID/SECRET we end up using — no separate
+  // _TEST_ key names; same key, different DB.
   const order = await createRazorpayOrder({
     amountPaise: plan.priceInr * 100,
     currency: 'INR',
@@ -416,9 +406,7 @@ export const razorpayCreateOrder = asyncHandler(async (req: AuthRequest, res: Re
     notes: {
       userId: req.user.id,
       tier,
-      mode,
     },
-    mode,
   });
 
   res.status(201).json({
@@ -427,12 +415,9 @@ export const razorpayCreateOrder = asyncHandler(async (req: AuthRequest, res: Re
       orderId: order.id,
       amount: order.amount,
       currency: order.currency,
-      // Return the keyId for the resolved mode so the client opens the
-      // Razorpay native sheet with matching credentials.
-      keyId: getRazorpayKeyId(mode),
+      keyId: getRazorpayKeyId(),
       tier,
       planName: plan.name,
-      mode,
     },
   });
 });
@@ -458,33 +443,28 @@ export const razorpayVerifyPayment = asyncHandler(async (req: AuthRequest, res: 
     razorpay_order_id,
     razorpay_payment_id,
     razorpay_signature,
-    mode: requestedMode,
   } = req.body as {
     razorpay_order_id: string;
     razorpay_payment_id: string;
     razorpay_signature: string;
-    mode?: RazorpayMode;
   };
 
-  const mode = resolveRazorpayMode(requestedMode);
-
-  // 1. HMAC signature. Spoofing the mode here is self-defeating: the signature
-  //    Razorpay produced was HMAC'd with the *correct* mode's secret, so a
-  //    mismatched `mode` will fail verification.
+  // 1. HMAC signature. Keys come from the active-mode DB (set at boot by
+  //    NODE_ENV); the order was created under the same mode so the secret
+  //    matches.
   const ok = verifyPaymentSignature({
     orderId: razorpay_order_id,
     paymentId: razorpay_payment_id,
     signature: razorpay_signature,
-    mode,
   });
   if (!ok) {
-    logger.warn(`Razorpay signature mismatch for user ${req.user.id} order ${razorpay_order_id} mode=${mode}`);
+    logger.warn(`Razorpay signature mismatch for user ${req.user.id} order ${razorpay_order_id}`);
     throw ApiError.badRequest('Payment signature verification failed');
   }
 
   // 2. Re-fetch the order from Razorpay so tier/amount/userId come from the
   //    server-set notes, not the client request body.
-  const order = await fetchRazorpayOrder(razorpay_order_id, mode);
+  const order = await fetchRazorpayOrder(razorpay_order_id);
   const notes = order.notes ?? {};
   const orderUserId = notes.userId;
   const orderTier = notes.tier;
@@ -519,14 +499,18 @@ export const razorpayVerifyPayment = asyncHandler(async (req: AuthRequest, res: 
  * so we can verify the signature against the exact bytes Razorpay sent.
  */
 export const razorpayWebhook = asyncHandler(async (req: Request, res: Response) => {
-  // Try both webhook secrets. Whichever one verifies tells us which mode
-  // (test or live) sent this delivery — and that's the mode we must use
-  // when fetching the order/payment back. A single backend can serve both
-  // modes when test webhook is also configured in Razorpay dashboard.
-  const liveSecret = getAppConfig('RAZORPAY_WEBHOOK_SECRET');
-  const testSecret = getAppConfig('RAZORPAY_TEST_WEBHOOK_SECRET');
+  // The public webhook route has no X-Runtime-Mode header, so we resolve the
+  // mode by trying each DB's webhook secret in turn — whichever verifies the
+  // HMAC tells us which Mongo holds the keys that issued this payment, and
+  // we pin the rest of the handler to that mode via runWithMode.
+  const liveSecret = await runWithMode('live', async () =>
+    getAppConfig('RAZORPAY_WEBHOOK_SECRET'),
+  );
+  const testSecret = await runWithMode('test', async () =>
+    getAppConfig('RAZORPAY_WEBHOOK_SECRET'),
+  );
   if (!liveSecret && !testSecret) {
-    logger.error('No Razorpay webhook secrets configured (live or test); rejecting');
+    logger.error('No Razorpay webhook secret configured in either DB; rejecting');
     throw ApiError.internal('Webhook not configured');
   }
 
@@ -538,14 +522,14 @@ export const razorpayWebhook = asyncHandler(async (req: Request, res: Response) 
   // `req.body` is a Buffer here (raw body parser).
   const rawBody = Buffer.isBuffer(req.body) ? req.body.toString('utf8') : String(req.body);
 
-  let mode: RazorpayMode | null = null;
+  let mode: RuntimeMode | null = null;
   if (liveSecret && verifyWebhookSignature({ rawBody, signature, webhookSecret: liveSecret })) {
     mode = 'live';
   } else if (testSecret && verifyWebhookSignature({ rawBody, signature, webhookSecret: testSecret })) {
     mode = 'test';
   }
   if (!mode) {
-    logger.warn('Razorpay webhook signature mismatch (tried both live and test secrets)');
+    logger.warn('Razorpay webhook signature mismatch (tried both live and test DB secrets)');
     throw ApiError.badRequest('Invalid signature');
   }
 
@@ -615,7 +599,10 @@ export const razorpayWebhook = asyncHandler(async (req: Request, res: Response) 
       // Re-fetch the order so notes (userId/tier) come from Razorpay's
       // authoritative copy, not the webhook payload (which an attacker
       // could craft if they ever got the webhook secret — defense in depth).
-      const order = await fetchRazorpayOrder(payment.order_id, mode);
+      // Pin to the resolved mode so getAppConfig reads the right DB's keys.
+      const order = await runWithMode(mode, async () =>
+        fetchRazorpayOrder(payment.order_id),
+      );
       const notes = order.notes ?? {};
       const userId = notes.userId;
       const tier = notes.tier;
@@ -631,7 +618,9 @@ export const razorpayWebhook = asyncHandler(async (req: Request, res: Response) 
       // Confirm the payment is actually captured before activating. The
       // signature only proves the message came from Razorpay; the status
       // proves money was settled.
-      const fullPayment = await fetchRazorpayPayment(payment.id, mode);
+      const fullPayment = await runWithMode(mode, async () =>
+        fetchRazorpayPayment(payment.id),
+      );
       if (fullPayment.status !== 'captured') {
         logger.warn(
           `Webhook ${event} payment ${payment.id} status=${fullPayment.status}, not capturing yet`,

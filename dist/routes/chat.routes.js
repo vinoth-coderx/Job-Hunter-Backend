@@ -13,4 +13,5 @@ router.get('/:id', chat_controller_1.getConversation);
 router.get('/:id/messages', chat_controller_1.listMessages);
 router.post('/:id/messages', upload_1.uploadChatAttachment, (0, validate_1.validate)(chat_controller_1.sendMessageSchema), chat_controller_1.sendMessage);
 router.put('/:id/read', chat_controller_1.markRead);
+router.get('/:id/smart-replies', chat_controller_1.getSmartReplies);
 exports.default = router;

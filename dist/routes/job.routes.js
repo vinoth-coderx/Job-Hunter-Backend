@@ -15,7 +15,6 @@ router.get('/matched', auth_1.authenticateOrGuest, job_controller_1.matchedJobs)
 router.get('/saved', auth_1.authenticate, savedJobs_controller_1.listSavedJobs);
 router.get('/saved/ids', auth_1.authenticate, savedJobs_controller_1.listSavedJobIds);
 router.post('/ai-search', auth_1.authenticateOrGuest, rateLimiter_1.aiSearchLimiter, (0, validate_1.validate)(job_controller_1.aiSearchSchema), job_controller_1.aiSearchJobs);
-router.post('/admin/fetch', auth_1.authenticate, job_controller_1.triggerFetch);
 router.post('/:id/save', auth_1.authenticate, savedJobs_controller_1.saveJob);
 router.delete('/:id/save', auth_1.authenticate, savedJobs_controller_1.unsaveJob);
 router.post('/:id/view', auth_1.optionalAuth, jobView_controller_1.recordJobView);

@@ -36,16 +36,27 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.isFirebaseConfigured = exports.getFirebaseAdmin = void 0;
+exports.resetFirebaseAdmin = exports.isFirebaseConfigured = exports.getFirebaseAdmin = void 0;
 const node_fs_1 = __importDefault(require("node:fs"));
-const env_1 = require("../../config/env");
+const config_service_1 = require("../config/config.service");
 const logger_1 = require("../../utils/logger");
 let cached = null;
 let initAttempted = false;
 const loadServiceAccount = () => {
-    if (env_1.env.FIREBASE_SERVICE_ACCOUNT_PATH) {
+    const jsonBlob = (0, config_service_1.getAppConfig)('FIREBASE_SERVICE_ACCOUNT_JSON');
+    if (jsonBlob) {
         try {
-            const raw = node_fs_1.default.readFileSync(env_1.env.FIREBASE_SERVICE_ACCOUNT_PATH, 'utf8');
+            return JSON.parse(jsonBlob);
+        }
+        catch (err) {
+            logger_1.logger.error('firebase-admin: FIREBASE_SERVICE_ACCOUNT_JSON is not valid JSON', err);
+            return null;
+        }
+    }
+    const path = process.env.FIREBASE_SERVICE_ACCOUNT_PATH;
+    if (path) {
+        try {
+            const raw = node_fs_1.default.readFileSync(path, 'utf8');
             return JSON.parse(raw);
         }
         catch (err) {
@@ -71,7 +82,7 @@ const getFirebaseAdmin = async () => {
         if (admin.apps.length === 0) {
             admin.initializeApp({
                 credential: admin.credential.cert(credentials),
-                projectId: env_1.env.FIREBASE_PROJECT_ID,
+                projectId: (0, config_service_1.getAppConfig)('FIREBASE_PROJECT_ID') ?? undefined,
             });
             logger_1.logger.info('firebase-admin initialised');
         }
@@ -84,5 +95,19 @@ const getFirebaseAdmin = async () => {
     }
 };
 exports.getFirebaseAdmin = getFirebaseAdmin;
-const isFirebaseConfigured = () => Boolean(env_1.env.FIREBASE_SERVICE_ACCOUNT_PATH);
+const isFirebaseConfigured = () => Boolean((0, config_service_1.getAppConfig)('FIREBASE_SERVICE_ACCOUNT_JSON')) ||
+    Boolean(process.env.FIREBASE_SERVICE_ACCOUNT_PATH);
 exports.isFirebaseConfigured = isFirebaseConfigured;
+const resetFirebaseAdmin = async () => {
+    if (cached) {
+        try {
+            await Promise.all(cached.apps.map((app) => app?.delete()));
+        }
+        catch (err) {
+            logger_1.logger.warn('firebase-admin: app.delete() failed during reset', err);
+        }
+    }
+    cached = null;
+    initAttempted = false;
+};
+exports.resetFirebaseAdmin = resetFirebaseAdmin;

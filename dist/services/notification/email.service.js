@@ -3,23 +3,39 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.sendTeamInviteEmail = exports.sendJobAlertEmail = void 0;
+exports.sendTeamInviteEmail = exports.sendRecommendedJobEmail = exports.sendJobAlertEmail = exports.sendEmail = void 0;
 const nodemailer_1 = __importDefault(require("nodemailer"));
-const env_1 = require("../../config/env");
 const constants_1 = require("../../config/constants");
+const config_service_1 = require("../config/config.service");
 const logger_1 = require("../../utils/logger");
+const notificationCopy_service_1 = require("../ai/notificationCopy.service");
+const maybePolishSubject = async (subject, type, context) => {
+    if ((0, config_service_1.getAppConfig)('EMAIL_AI_REWRITE') !== '1')
+        return subject;
+    try {
+        return await (0, notificationCopy_service_1.polishEmailSubject)(subject, type, context);
+    }
+    catch (err) {
+        logger_1.logger.warn(`email subject polish skipped: ${err.message}`);
+        return subject;
+    }
+};
 let transporter = null;
+let configuredFor = null;
 const getTransporter = () => {
-    if (transporter)
-        return transporter;
-    if (!env_1.env.SMTP_USER || !env_1.env.SMTP_PASS)
+    const user = (0, config_service_1.getAppConfig)('SMTP_USER');
+    const pass = (0, config_service_1.getAppConfig)('SMTP_PASS');
+    if (!user || !pass)
         return null;
+    if (transporter && configuredFor === user)
+        return transporter;
     transporter = nodemailer_1.default.createTransport({
         host: constants_1.SMTP_HOST,
         port: constants_1.SMTP_PORT,
         secure: constants_1.SMTP_PORT === 465,
-        auth: { user: env_1.env.SMTP_USER, pass: env_1.env.SMTP_PASS },
+        auth: { user, pass },
     });
+    configuredFor = user;
     return transporter;
 };
 const escapeHtml = (s) => s
@@ -28,6 +44,22 @@ const escapeHtml = (s) => s
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&#39;');
+const sendEmail = async (params) => {
+    const t = getTransporter();
+    if (!t) {
+        logger_1.logger.warn(`[email] transporter unavailable; skipping send to ${params.to}`);
+        return;
+    }
+    const subject = await maybePolishSubject(params.subject, params.rewriteType ?? 'transactional');
+    await t.sendMail({
+        from: constants_1.EMAIL_FROM,
+        to: params.to,
+        subject,
+        text: params.text,
+        html: params.html,
+    });
+};
+exports.sendEmail = sendEmail;
 const renderJobAlertHtml = (params) => {
     const { fullName, jobs, alertName } = params;
     const heading = alertName
@@ -80,9 +112,12 @@ const sendJobAlertEmail = async (params) => {
     }
     if (params.jobs.length === 0)
         return;
-    const subject = params.jobs.length === 1
+    const subject = await maybePolishSubject(params.jobs.length === 1
         ? `New job: ${params.jobs[0].title} at ${params.jobs[0].company}`
-        : `${params.jobs.length} new jobs match your alert${params.alertName ? ` "${params.alertName}"` : ''}`;
+        : `${params.jobs.length} new jobs match your alert${params.alertName ? ` "${params.alertName}"` : ''}`, 'job_alert', {
+        count: params.jobs.length,
+        ...(params.alertName ? { alert: params.alertName } : {}),
+    });
     const html = renderJobAlertHtml({
         fullName: params.fullName,
         alertName: params.alertName,
@@ -106,6 +141,97 @@ const sendJobAlertEmail = async (params) => {
     }
 };
 exports.sendJobAlertEmail = sendJobAlertEmail;
+const RECOMMENDED_JOB_APP_HOST = 'https://jobhunter.app';
+const PLAY_STORE_URL = 'https://play.google.com/store/apps/details?id=com.example.job_hunter';
+const APP_STORE_URL = 'https://apps.apple.com/app/job-hunter/id000000000';
+const renderRecommendedJobHtml = (params) => {
+    const { fullName, job } = params;
+    const openInAppUrl = `${RECOMMENDED_JOB_APP_HOST}/job/${encodeURIComponent(job.id)}`;
+    const locationLine = [job.location, job.salaryText].filter(Boolean).join(' · ');
+    return `
+    <!DOCTYPE html>
+    <html><body style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Inter,sans-serif;background:#f7f9fc;padding:24px 0;margin:0;">
+      <table style="max-width:560px;margin:0 auto;background:#fff;border-radius:12px;padding:28px;">
+        <tr><td>
+          <div style="display:inline-block;background:#E6F0FF;color:#1857C2;padding:4px 10px;border-radius:999px;font-size:12px;font-weight:700;letter-spacing:0.2px;">
+            ${job.matchScore}% match
+          </div>
+          <h1 style="font-size:20px;color:#0a0a0a;margin:14px 0 6px 0;line-height:1.3;">
+            ${escapeHtml(job.title)}
+          </h1>
+          <p style="font-size:14px;color:#374151;margin:0 0 4px 0;font-weight:600;">
+            ${escapeHtml(job.company)}
+          </p>
+          ${locationLine
+        ? `<p style="font-size:13px;color:#6b7280;margin:0 0 18px 0;">
+                   ${escapeHtml(locationLine)}
+                 </p>`
+        : ''}
+          <p style="font-size:14px;color:#374151;margin:0 0 18px 0;line-height:1.5;">
+            Hi ${escapeHtml(fullName)}, this just landed and looks like a
+            strong fit for your profile.
+          </p>
+          <div style="margin:18px 0 8px 0;">
+            <a href="${escapeHtml(openInAppUrl)}"
+               style="background:#2D7BFF;color:#fff;padding:12px 18px;border-radius:10px;text-decoration:none;font-size:14px;font-weight:700;display:inline-block;">
+              Open in app
+            </a>
+          </div>
+          <p style="font-size:12px;color:#6b7280;margin:14px 0 6px 0;">
+            Don't have the app yet?
+          </p>
+          <table style="border-collapse:collapse;">
+            <tr>
+              <td style="padding-right:8px;">
+                <a href="${escapeHtml(PLAY_STORE_URL)}"
+                   style="display:inline-block;background:#0a0a0a;color:#fff;padding:8px 14px;border-radius:8px;text-decoration:none;font-size:12px;font-weight:600;">
+                  Get on Google Play
+                </a>
+              </td>
+              <td>
+                <a href="${escapeHtml(APP_STORE_URL)}"
+                   style="display:inline-block;background:#0a0a0a;color:#fff;padding:8px 14px;border-radius:8px;text-decoration:none;font-size:12px;font-weight:600;">
+                  Download on App Store
+                </a>
+              </td>
+            </tr>
+          </table>
+          <p style="font-size:11px;color:#9ca3af;margin-top:22px;">
+            You're getting this email because email recommendations are
+            on. Turn them off any time from
+            <em>Profile → Notification preferences</em>.
+          </p>
+        </td></tr>
+      </table>
+    </body></html>`;
+};
+const sendRecommendedJobEmail = async (params) => {
+    const t = getTransporter();
+    if (!t) {
+        logger_1.logger.debug('SMTP not configured — skipping recommended job email');
+        return;
+    }
+    const subject = await maybePolishSubject(`${params.job.matchScore}% match: ${params.job.title} at ${params.job.company}`, 'recommended_job', {
+        score: params.job.matchScore,
+        company: params.job.company,
+    });
+    const html = renderRecommendedJobHtml({
+        fullName: params.fullName,
+        job: params.job,
+    });
+    try {
+        await t.sendMail({
+            from: constants_1.EMAIL_FROM,
+            to: params.toEmail,
+            subject,
+            html,
+        });
+    }
+    catch (err) {
+        logger_1.logger.warn(`recommended job email failed: ${err.message}`);
+    }
+};
+exports.sendRecommendedJobEmail = sendRecommendedJobEmail;
 const renderTeamInviteHtml = (params) => {
     const { companyName, inviterName, role, token, expiresAt } = params;
     const expires = expiresAt.toLocaleDateString('en-IN', {
@@ -146,7 +272,7 @@ const sendTeamInviteEmail = async (params) => {
         logger_1.logger.debug('SMTP not configured — skipping team invite email');
         return;
     }
-    const subject = `You're invited to join ${params.companyName} on Job Hunter`;
+    const subject = await maybePolishSubject(`You're invited to join ${params.companyName} on Job Hunter`, 'team_invite', { company: params.companyName, role: params.role });
     const html = renderTeamInviteHtml(params);
     try {
         await t.sendMail({

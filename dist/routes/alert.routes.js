@@ -8,6 +8,7 @@ const router = (0, express_1.Router)();
 router.use(auth_1.authenticate);
 router.get('/', alert_controller_1.listAlerts);
 router.post('/', (0, validate_1.validate)(alert_controller_1.createAlertSchema), alert_controller_1.createAlert);
+router.post('/suggest-name', (0, validate_1.validate)(alert_controller_1.suggestAlertNameSchema), alert_controller_1.suggestAlertNamesEndpoint);
 router.patch('/:id', (0, validate_1.validate)(alert_controller_1.updateAlertSchema), alert_controller_1.updateAlert);
 router.delete('/:id', alert_controller_1.deleteAlert);
 exports.default = router;

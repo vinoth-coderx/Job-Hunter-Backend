@@ -1,21 +1,23 @@
 import mongoose from 'mongoose';
 import { env } from './env';
-import { readRuntimeMode } from './runtimeMode';
 import { logger } from '../utils/logger';
 
 mongoose.set('strictQuery', true);
 
 /**
- * The Mongo cluster the process connects to is driven by the persisted
- * runtime mode (file-backed in `secrets/.runtime-mode`), NOT by
- * `NODE_ENV`. This lets an operator flip between the test + live
- * clusters from the admin UI without touching deployment env.
+ * Single-connection bootstrap used by one-off CLI scripts. The HTTP
+ * server uses `dbConnections.ts` instead, which opens BOTH the test
+ * and live clusters simultaneously so admin requests can be served
+ * against either DB via the X-Runtime-Mode header.
  *
- * `MONGODB_URI` is the test/dev cluster (also the fallback if no live
- * URI is set). `MONGODB_URI_PROD` is the live cluster.
+ * Scripts pick which cluster they target via the `RUNTIME_MODE` env
+ * (defaults to `live` for safety). Examples:
+ *
+ *   RUNTIME_MODE=test npm run seed:admin -- --email=…
+ *   RUNTIME_MODE=live npm run fetch:jobs
  */
 const resolveMongoUri = (): { uri: string; label: 'live' | 'test' } => {
-  const mode = readRuntimeMode();
+  const mode = process.env.RUNTIME_MODE === 'test' ? 'test' : 'live';
   if (mode === 'live') {
     return {
       uri: env.MONGODB_URI_PROD ?? env.MONGODB_URI,

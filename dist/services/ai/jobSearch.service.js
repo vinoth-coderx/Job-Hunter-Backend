@@ -4,17 +4,14 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
 };
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.aiJobSearch = exports.extractSearchIntent = void 0;
-const sdk_1 = __importDefault(require("@anthropic-ai/sdk"));
 const crypto_1 = __importDefault(require("crypto"));
-const env_1 = require("../../config/env");
 const constants_1 = require("../../config/constants");
 const logger_1 = require("../../utils/logger");
 const redis_1 = require("../../config/redis");
 const Job_1 = require("../../models/Job");
-const client = env_1.env.ANTHROPIC_API_KEY
-    ? new sdk_1.default({ apiKey: env_1.env.ANTHROPIC_API_KEY })
-    : null;
-const MODEL = 'claude-haiku-4-5-20251001';
+const providers_1 = require("./providers");
+const jobFeed_service_1 = require("../jobFeed.service");
+const queryExpander_service_1 = require("./queryExpander.service");
 const normaliseQueryForCache = (q) => q
     .toLowerCase()
     .replace(/[^a-z0-9\s]/g, ' ')
@@ -96,26 +93,16 @@ const extractSearchIntent = async (query) => {
         catch {
         }
     }
-    if (!client) {
+    if (!(0, providers_1.isAiEnabled)()) {
         const intent = heuristicIntent(trimmed);
         await redis_1.redis.setex(cacheKeyForIntent(trimmed), 86400, JSON.stringify(intent));
         return intent;
     }
     try {
-        const response = await client.beta.messages.create({
-            model: MODEL,
-            max_tokens: 500,
-            system: [
-                {
-                    type: 'text',
-                    text: 'You parse a job seeker\'s natural-language query into structured filters. Identify role/title keywords, skills, target companies, location, job type, remote preference, experience range, and salary expectation. Return strict JSON only — no prose, no markdown.',
-                    cache_control: { type: 'ephemeral' },
-                },
-            ],
-            messages: [
-                {
-                    role: 'user',
-                    content: `Parse this job search query into structured filters.
+        const parsed = await (0, providers_1.generateJson)({
+            tier: 'lite',
+            system: "You parse a job seeker's natural-language query into structured filters. Identify role/title keywords, skills, target companies, location, job type, remote preference, experience range, and salary expectation. Return strict JSON only — no prose, no markdown.",
+            user: `Parse this job search query into structured filters.
 
 Query: "${trimmed}"
 
@@ -138,16 +125,11 @@ Examples:
 - "senior react dev in bangalore" → titleKeywords=["senior","react","developer"], skills=["react"], roleKeywords=["frontend developer"], location="bangalore"
 - "remote flutter jobs 15 LPA" → skills=["flutter"], remoteType="remote", salaryMinLpa=15
 - "full time data scientist with python at faang" → titleKeywords=["data","scientist"], skills=["python"], jobType="full-time", companyKeywords=["google","meta","amazon","apple","netflix"]`,
-                },
-            ],
+            maxTokens: 500,
+            temperature: 0.2,
         });
-        const text = response.content
-            .filter((b) => b.type === 'text')
-            .map((b) => b.text)
-            .join('')
-            .trim();
-        const jsonStr = text.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '');
-        const parsed = JSON.parse(jsonStr);
+        if (!parsed)
+            throw new Error('No JSON in response');
         const intent = {
             titleKeywords: cleanList(parsed.titleKeywords),
             skills: cleanList(parsed.skills),
@@ -165,6 +147,12 @@ Examples:
         return intent;
     }
     catch (err) {
+        if (err instanceof providers_1.AiProviderQuotaError) {
+            logger_1.logger.warn(`jobSearch LLM intent QUOTA EXCEEDED — falling back to heuristic for "${trimmed.slice(0, 80)}"`);
+            const intent = heuristicIntent(trimmed);
+            await redis_1.redis.setex(cacheKeyForIntent(trimmed), 3600, JSON.stringify(intent));
+            return intent;
+        }
         logger_1.logger.warn(`jobSearch LLM intent failed: ${err.message}`);
         const intent = heuristicIntent(trimmed);
         await redis_1.redis.setex(cacheKeyForIntent(trimmed), 86400, JSON.stringify(intent));
@@ -175,7 +163,7 @@ exports.extractSearchIntent = extractSearchIntent;
 const SEARCH_FRESHNESS_DAYS = Math.max(constants_1.JOB_FRESHNESS_DAYS, 60);
 const buildMongoFilter = (intent, excludeJobIds, opts = {}) => {
     const cutoff = new Date(Date.now() - SEARCH_FRESHNESS_DAYS * 24 * 60 * 60 * 1000);
-    const filter = {};
+    const filter = { isNative: true };
     if (!opts.dropActive)
         filter.isActive = true;
     if (!opts.dropFreshness)
@@ -278,53 +266,205 @@ const scoreJob = (job, intent) => {
     s += Math.max(0, (7 - Math.min(ageDays, 7)) / 7);
     return s;
 };
-const fetchAndRank = async (filter, intent, limit) => {
+const STOPWORDS = new Set([
+    'a',
+    'an',
+    'and',
+    'at',
+    'by',
+    'for',
+    'from',
+    'in',
+    'of',
+    'on',
+    'or',
+    'the',
+    'to',
+    'with',
+    'job',
+    'jobs',
+    'role',
+    'roles',
+    'work',
+]);
+const matchesRawQuery = (job, rawQuery) => {
+    const tokens = rawQuery
+        .toLowerCase()
+        .split(/[\s,/+&|()\-]+/)
+        .map((t) => t.trim())
+        .filter((t) => t.length >= 3 && !STOPWORDS.has(t));
+    if (tokens.length === 0)
+        return true;
+    const haystack = [
+        job.title,
+        (job.skills || []).join(' '),
+        (job.responsibilities || []).join(' '),
+        job.department || '',
+        job.description,
+    ]
+        .join(' ')
+        .toLowerCase();
+    return tokens.every((t) => haystack.includes(t));
+};
+const fetchNativeAndRank = async (filter, intent, limit) => {
     const candidatePool = Math.max(limit * 4, 60);
     const candidates = await Job_1.Job.find(filter)
         .sort({ postedAt: -1 })
         .limit(candidatePool)
         .lean();
     return candidates
+        .map(jobFeed_service_1.toFeedJobFromNative)
         .map((j) => ({ job: j, score: scoreJob(j, intent) }))
         .sort((a, b) => b.score - a.score)
         .slice(0, limit)
         .map((r) => r.job);
 };
-const aiJobSearch = async ({ query, limit = 30, excludeJobIds = [], }) => {
-    const intent = await (0, exports.extractSearchIntent)(query);
-    const primary = await fetchAndRank(buildMongoFilter(intent, excludeJobIds), intent, limit);
-    if (primary.length > 0) {
-        logger_1.logger.info(`aiJobSearch: "${query.slice(0, 60)}" → ${primary.length} (primary)`);
-        return { intent, jobs: primary, total: primary.length, scope: 'primary' };
+const queriesFromIntent = (intent) => {
+    const candidates = [
+        ...intent.roleKeywords,
+        ...intent.titleKeywords,
+        ...intent.skills,
+    ];
+    const out = [];
+    for (const c of candidates) {
+        const v = c.trim();
+        if (v.length === 0)
+            continue;
+        if (out.includes(v.toLowerCase()))
+            continue;
+        out.push(v.toLowerCase());
+        if (out.length === 3)
+            break;
     }
-    const extended = await fetchAndRank(buildMongoFilter(intent, excludeJobIds, { dropFreshness: true }), intent, limit);
-    if (extended.length > 0) {
-        logger_1.logger.info(`aiJobSearch: "${query.slice(0, 60)}" → ${extended.length} (extended, freshness dropped)`);
+    if (out.length === 0 && intent.freeText)
+        out.push(intent.freeText.trim());
+    return out;
+};
+const fetchExternalAndRank = async (intent, applied, limit) => {
+    const queries = queriesFromIntent(intent);
+    if (queries.length === 0)
+        return [];
+    const locations = intent.location ? [intent.location] : [];
+    const scraped = await (0, jobFeed_service_1.fetchExternalForProfile)(queries, locations);
+    let feed = scraped.map(jobFeed_service_1.toFeedJobFromScraped);
+    feed = (0, jobFeed_service_1.filterApplied)(feed, applied);
+    if (intent.jobType)
+        feed = feed.filter((j) => j.jobType === intent.jobType);
+    if (intent.remoteType) {
+        feed = feed.filter((j) => j.remoteType === intent.remoteType);
+    }
+    if (typeof intent.salaryMinLpa === 'number') {
+        const minRupees = intent.salaryMinLpa * 100000;
+        feed = feed.filter((j) => {
+            const top = j.salaryMax ?? j.salaryMin;
+            return top === undefined || top >= minRupees;
+        });
+    }
+    return feed
+        .map((j) => ({ job: j, score: scoreJob(j, intent) }))
+        .sort((a, b) => b.score - a.score)
+        .slice(0, limit)
+        .map((r) => r.job);
+};
+const aiJobSearch = async ({ query, limit = 30, excludeApplied, }) => {
+    const [intent, synonyms] = await Promise.all([
+        (0, exports.extractSearchIntent)(query),
+        (0, queryExpander_service_1.expandQuery)(query),
+    ]);
+    if (synonyms.length > 0) {
+        const seen = new Set(intent.titleKeywords.map((s) => s.toLowerCase()));
+        const seenSkills = new Set(intent.skills.map((s) => s.toLowerCase()));
+        const titleAdds = [];
+        const skillAdds = [];
+        for (const s of synonyms) {
+            const lc = s.toLowerCase();
+            if (!lc.includes(' ') && lc.length <= 30 && !seenSkills.has(lc)) {
+                skillAdds.push(s);
+                seenSkills.add(lc);
+            }
+            else if (!seen.has(lc)) {
+                titleAdds.push(s);
+                seen.add(lc);
+            }
+        }
+        intent.titleKeywords = [...intent.titleKeywords, ...titleAdds].slice(0, 12);
+        intent.skills = [...intent.skills, ...skillAdds].slice(0, 12);
+    }
+    const applied = excludeApplied ?? {
+        jobIds: new Set(),
+        externalKeys: new Set(),
+    };
+    const excludeJobIds = Array.from(applied.jobIds);
+    const externalPromise = fetchExternalAndRank(intent, applied, limit);
+    const primary = await fetchNativeAndRank(buildMongoFilter(intent, excludeJobIds), intent, limit);
+    let nativeJobs = primary;
+    let scope = 'primary';
+    if (nativeJobs.length === 0) {
+        const extended = await fetchNativeAndRank(buildMongoFilter(intent, excludeJobIds, { dropFreshness: true }), intent, limit);
+        if (extended.length > 0) {
+            nativeJobs = extended;
+            scope = 'extended';
+        }
+        else {
+            const archived = await fetchNativeAndRank(buildMongoFilter(intent, excludeJobIds, {
+                dropFreshness: true,
+                dropActive: true,
+            }), intent, limit);
+            if (archived.length > 0) {
+                nativeJobs = archived;
+                scope = 'archived';
+            }
+        }
+    }
+    const externalJobs = await externalPromise;
+    const candidates = [...nativeJobs, ...externalJobs].map((j) => ({
+        job: j,
+        score: scoreJob(j, intent),
+        strict: matchesRawQuery(j, query),
+    }));
+    const strictTier = candidates
+        .filter((r) => r.strict)
+        .sort((a, b) => b.score - a.score);
+    const relatedTier = candidates
+        .filter((r) => !r.strict)
+        .sort((a, b) => b.score - a.score);
+    if (strictTier.length === 1) {
+        strictTier[0].job = { ...strictTier[0].job, matchScore: 92 };
+    }
+    else if (strictTier.length > 1) {
+        const last = strictTier.length - 1;
+        strictTier.forEach((r, i) => {
+            const pct = (last - i) / last;
+            const score = Math.round(80 + pct * 15);
+            r.job = { ...r.job, matchScore: score };
+        });
+    }
+    const mergedScored = [...strictTier, ...relatedTier]
+        .slice(0, limit)
+        .map((r) => r.job);
+    if (mergedScored.length === 0) {
+        logger_1.logger.info(`aiJobSearch: "${query.slice(0, 60)}" → 0 (intent=${JSON.stringify({
+            titles: intent.titleKeywords,
+            skills: intent.skills,
+            roles: intent.roleKeywords,
+        })})`);
         return {
             intent,
-            jobs: extended,
-            total: extended.length,
-            scope: 'extended',
+            jobs: [],
+            total: 0,
+            scope: 'empty',
+            nativeCount: 0,
+            externalCount: 0,
         };
     }
-    const archived = await fetchAndRank(buildMongoFilter(intent, excludeJobIds, {
-        dropFreshness: true,
-        dropActive: true,
-    }), intent, limit);
-    if (archived.length > 0) {
-        logger_1.logger.info(`aiJobSearch: "${query.slice(0, 60)}" → ${archived.length} (archived, all gates dropped)`);
-        return {
-            intent,
-            jobs: archived,
-            total: archived.length,
-            scope: 'archived',
-        };
-    }
-    logger_1.logger.info(`aiJobSearch: "${query.slice(0, 60)}" → 0 (intent=${JSON.stringify({
-        titles: intent.titleKeywords,
-        skills: intent.skills,
-        roles: intent.roleKeywords,
-    })})`);
-    return { intent, jobs: [], total: 0, scope: 'empty' };
+    logger_1.logger.info(`aiJobSearch: "${query.slice(0, 60)}" → ${mergedScored.length} (${scope}; native=${nativeJobs.length}, external=${externalJobs.length})`);
+    return {
+        intent,
+        jobs: mergedScored,
+        total: mergedScored.length,
+        scope,
+        nativeCount: nativeJobs.length,
+        externalCount: externalJobs.length,
+    };
 };
 exports.aiJobSearch = aiJobSearch;

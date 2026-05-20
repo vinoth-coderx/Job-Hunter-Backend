@@ -36,14 +36,22 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.deleteResumeHandler = exports.parseResumeHandler = exports.resumeMetaHandler = exports.downloadResumeHandler = exports.uploadResumeHandler = void 0;
+exports.deleteResumeHandler = exports.downloadBrandedResumePdfHandler = exports.resumeOnboardHandler = exports.parseResumeHandler = exports.resumeMetaHandler = exports.downloadResumeHandler = exports.uploadResumeHandler = void 0;
 const node_crypto_1 = __importDefault(require("node:crypto"));
+const node_stream_1 = require("node:stream");
 const asyncHandler_1 = require("../utils/asyncHandler");
 const ApiError_1 = require("../utils/ApiError");
 const User_1 = require("../models/User");
 const logger_1 = require("../utils/logger");
 const resumeParser_service_1 = require("../services/ai/resumeParser.service");
+const resumeOnboarding_service_1 = require("../services/ai/combined/resumeOnboarding.service");
+const quota_service_1 = require("../services/ai/quota.service");
+const aiCreditWeights_1 = require("../config/aiCreditWeights");
+const coin_service_1 = require("../services/coins/coin.service");
+const Job_1 = require("../models/Job");
+const constants_1 = require("../config/constants");
 const cloudinary_1 = require("../config/cloudinary");
+const resumePdf_service_1 = require("../services/resume/resumePdf.service");
 const SIGNED_URL_TTL_SEC = 600;
 const extractTextFromBuffer = async (buffer, mime) => {
     try {
@@ -106,6 +114,10 @@ exports.uploadResumeHandler = (0, asyncHandler_1.asyncHandler)(async (req, res) 
         tags: ['resume', `user:${user._id.toString()}`],
         format: fmt,
     });
+    if (!result.publicId) {
+        logger_1.logger.error('Cloudinary upload returned empty publicId', { result });
+        throw ApiError_1.ApiError.internal('Resume storage misconfigured: upload returned no asset id');
+    }
     const resumeText = await extractTextFromBuffer(req.file.buffer, req.file.mimetype);
     user.profile.resumeFile = {
         publicId: result.publicId,
@@ -119,10 +131,22 @@ exports.uploadResumeHandler = (0, asyncHandler_1.asyncHandler)(async (req, res) 
     user.profile.resumeUrl = result.url;
     if (resumeText)
         user.profile.resumeText = resumeText;
+    user.markModified('profile.resumeFile');
     await user.save();
+    const reread = await User_1.User.findById(user._id).select('profile.resumeFile').lean();
+    const storedPublicId = reread?.profile?.resumeFile?.publicId;
+    if (!storedPublicId) {
+        logger_1.logger.error('Resume upload did not persist resumeFile', {
+            userId: user._id.toString(),
+            expectedPublicId: result.publicId,
+            stored: reread?.profile?.resumeFile ?? null,
+        });
+        throw ApiError_1.ApiError.internal('Resume upload didn\'t persist correctly. Please contact support.');
+    }
     if (oldPublicId && oldPublicId !== result.publicId) {
         await (0, cloudinary_1.destroyAsset)(oldPublicId, 'raw', 'authenticated');
     }
+    const completenessGrant = await (0, coin_service_1.maybeGrantProfileCompleteBonus)(user);
     res.status(201).json({
         success: true,
         message: 'Resume uploaded',
@@ -131,6 +155,8 @@ exports.uploadResumeHandler = (0, asyncHandler_1.asyncHandler)(async (req, res) 
             extractedTextLength: resumeText.length,
             downloadUrl: `/api/v1/users/resume`,
         },
+        coinsAwarded: completenessGrant?.amount ?? 0,
+        coinsBalance: completenessGrant?.balance ?? user.gamification?.coins ?? 0,
     });
 });
 exports.downloadResumeHandler = (0, asyncHandler_1.asyncHandler)(async (req, res) => {
@@ -148,7 +174,44 @@ exports.downloadResumeHandler = (0, asyncHandler_1.asyncHandler)(async (req, res
         expiresInSec: SIGNED_URL_TTL_SEC,
         attachmentFilename: file.originalName,
     });
-    res.redirect(302, signed);
+    try {
+        const upstream = await fetch(signed, {
+            redirect: 'follow',
+            headers: { Accept: file.mimeType || 'application/octet-stream' },
+        });
+        if (!upstream.ok || !upstream.body) {
+            logger_1.logger.warn('Resume proxy: upstream non-2xx', {
+                status: upstream.status,
+                publicId: file.publicId,
+            });
+            if (upstream.status === 404) {
+                await User_1.User.updateOne({ _id: user._id }, { $unset: { 'profile.resumeFile': '' } }).catch((e) => {
+                    logger_1.logger.warn('Resume proxy: failed to clear orphaned resumeFile', {
+                        err: e.message,
+                    });
+                });
+                throw ApiError_1.ApiError.gone('Your resume is no longer in storage. Please re-upload it.');
+            }
+            throw ApiError_1.ApiError.internal(`Resume storage returned ${upstream.status}. Please re-upload your resume.`);
+        }
+        res.setHeader('Content-Type', file.mimeType || 'application/octet-stream');
+        if (file.size)
+            res.setHeader('Content-Length', String(file.size));
+        res.setHeader('Content-Disposition', `inline; filename="${file.originalName || 'resume'}"`);
+        const nodeStream = node_stream_1.Readable.fromWeb(upstream.body);
+        nodeStream.pipe(res);
+        await new Promise((resolve, reject) => {
+            nodeStream.on('end', resolve);
+            nodeStream.on('error', reject);
+            res.on('close', resolve);
+        });
+    }
+    catch (err) {
+        if (err instanceof ApiError_1.ApiError)
+            throw err;
+        logger_1.logger.warn('Resume proxy fetch failed', { err });
+        throw ApiError_1.ApiError.internal('Could not load resume from storage');
+    }
 });
 exports.resumeMetaHandler = (0, asyncHandler_1.asyncHandler)(async (req, res) => {
     if (!req.user)
@@ -186,13 +249,86 @@ exports.parseResumeHandler = (0, asyncHandler_1.asyncHandler)(async (req, res) =
     const parsed = await (0, resumeParser_service_1.parseResumeText)(text);
     res.json({ success: true, data: parsed });
 });
+exports.resumeOnboardHandler = (0, asyncHandler_1.asyncHandler)(async (req, res) => {
+    if (!req.user)
+        throw ApiError_1.ApiError.unauthorized();
+    const userId = String(req.user._id);
+    const user = await User_1.User.findById(userId).select('profile.resumeText profile.fullName profile.skills');
+    if (!user)
+        throw ApiError_1.ApiError.notFound('User not found');
+    const text = user.profile.resumeText || '';
+    if (!text) {
+        res.json({
+            success: true,
+            message: 'No resume text available — upload a text-based PDF or DOCX first.',
+            data: null,
+        });
+        return;
+    }
+    const weight = (0, aiCreditWeights_1.getCreditWeight)('resume_onboarding');
+    const quota = await (0, quota_service_1.enforceQuota)(userId, weight);
+    const sinceMs = Date.now() - constants_1.JOB_FRESHNESS_DAYS * 24 * 60 * 60 * 1000;
+    const candidates = await Job_1.Job.find({
+        status: 'active',
+        postedAt: { $gte: new Date(sinceMs) },
+    })
+        .sort({ postedAt: -1 })
+        .limit(30)
+        .lean();
+    let result;
+    try {
+        result = await (0, resumeOnboarding_service_1.runResumeOnboarding)(text, candidates);
+    }
+    catch (err) {
+        await (0, quota_service_1.refundQuota)(userId, weight);
+        throw err;
+    }
+    if (!result) {
+        await (0, quota_service_1.refundQuota)(userId, weight);
+        res.json({
+            success: true,
+            message: 'Resume too short or AI unavailable',
+            data: null,
+            quota,
+        });
+        return;
+    }
+    res.json({ success: true, data: result, quota });
+});
+exports.downloadBrandedResumePdfHandler = (0, asyncHandler_1.asyncHandler)(async (req, res) => {
+    if (!req.user)
+        throw ApiError_1.ApiError.unauthorized();
+    const user = await User_1.User.findById(req.user._id);
+    if (!user)
+        throw ApiError_1.ApiError.notFound('User not found');
+    const p = user.profile;
+    const hasContent = Boolean(p.resumeProfile?.profileSummary) ||
+        (p.skills && p.skills.length > 0) ||
+        (p.resumeProfile?.employments && p.resumeProfile.employments.length > 0) ||
+        (p.resumeProfile?.educations && p.resumeProfile.educations.length > 0);
+    if (!hasContent) {
+        throw ApiError_1.ApiError.badRequest('Fill in at least your summary, skills, or experience before downloading the branded resume');
+    }
+    const { buffer, filename } = await (0, resumePdf_service_1.generateBrandedResumePdf)(user);
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    res.setHeader('Cache-Control', 'private, no-store');
+    res.end(buffer);
+});
 exports.deleteResumeHandler = (0, asyncHandler_1.asyncHandler)(async (req, res) => {
     if (!req.user)
         throw ApiError_1.ApiError.unauthorized();
     const user = await User_1.User.findById(req.user._id);
-    if (!user || !user.profile.resumeFile)
-        throw ApiError_1.ApiError.notFound('No resume to delete');
-    const publicId = user.profile.resumeFile.publicId;
+    if (!user)
+        throw ApiError_1.ApiError.notFound('User not found');
+    const hadAnything = Boolean(user.profile.resumeFile) ||
+        Boolean(user.profile.resumeText) ||
+        Boolean(user.profile.resumeUrl);
+    if (!hadAnything) {
+        res.json({ success: true, message: 'No resume to delete' });
+        return;
+    }
+    const publicId = user.profile.resumeFile?.publicId;
     user.profile.resumeFile = undefined;
     user.profile.resumeText = undefined;
     user.profile.resumeUrl = undefined;

@@ -1,8 +1,8 @@
 import { Response } from 'express';
-import mongoose from 'mongoose';
 import { AuthRequest } from '../types';
 import { asyncHandler } from '../utils/asyncHandler';
 import { redis } from '../config/redis';
+import { getConnectionForMode } from '../config/dbConnections';
 import { getAppConfig } from '../services/config/config.service';
 import { AiKey } from '../models/AiKey';
 import { env } from '../config/env';
@@ -19,10 +19,19 @@ interface Probe {
 const probeMongo = async (): Promise<Probe> => {
   const start = Date.now();
   try {
-    if (mongoose.connection.readyState !== 1) {
-      return { name: 'mongo', state: 'down', detail: `readyState=${mongoose.connection.readyState}` };
+    const test = getConnectionForMode('test');
+    const live = getConnectionForMode('live');
+    if (test.readyState !== 1 || live.readyState !== 1) {
+      return {
+        name: 'mongo',
+        state: 'down',
+        detail: `test=${test.readyState} live=${live.readyState}`,
+      };
     }
-    await mongoose.connection.db?.admin().ping();
+    await Promise.all([
+      test.db?.admin().ping(),
+      live.db?.admin().ping(),
+    ]);
     return { name: 'mongo', state: 'ok', latencyMs: Date.now() - start };
   } catch (err) {
     return {

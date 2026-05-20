@@ -1,21 +1,13 @@
 "use strict";
-var __importDefault = (this && this.__importDefault) || function (mod) {
-    return (mod && mod.__esModule) ? mod : { "default": mod };
-};
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.generateAssessment = void 0;
-const sdk_1 = __importDefault(require("@anthropic-ai/sdk"));
-const env_1 = require("../../config/env");
 const logger_1 = require("../../utils/logger");
-const client = env_1.env.ANTHROPIC_API_KEY
-    ? new sdk_1.default({ apiKey: env_1.env.ANTHROPIC_API_KEY })
-    : null;
-const MODEL = 'claude-haiku-4-5-20251001';
+const providers_1 = require("./providers");
 const generateAssessment = async (params) => {
     const skill = params.skill.toLowerCase().trim();
     const level = params.level ?? 'intermediate';
     const count = Math.min(20, Math.max(5, params.count ?? 8));
-    if (!client)
+    if (!(0, providers_1.isAiEnabled)())
         return fallbackQuestions(skill, level, count);
     const system = `You write short, fair multiple-choice technical assessments. Output strict JSON:
 {
@@ -38,17 +30,15 @@ Rules:
 - Difficulty: ${level}. Avoid questions that need a runtime to answer.`;
     const prompt = `Skill: ${skill}\nGenerate ${count} questions.`;
     try {
-        const res = await client.messages.create({
-            model: MODEL,
-            max_tokens: 3000,
+        const parsed = await (0, providers_1.generateJson)({
+            tier: 'lite',
             system,
-            messages: [{ role: 'user', content: prompt }],
+            user: prompt,
+            maxTokens: 3000,
+            temperature: 0.5,
         });
-        const block = res.content[0];
-        const raw = block && block.type === 'text' && typeof block.text === 'string'
-            ? block.text.trim()
-            : '';
-        const parsed = JSON.parse(raw);
+        if (!parsed)
+            return fallbackQuestions(skill, level, count);
         const arr = Array.isArray(parsed.questions) ? parsed.questions : [];
         const questions = arr
             .filter((x) => typeof x === 'object' && x !== null)

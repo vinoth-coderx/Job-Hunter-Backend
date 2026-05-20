@@ -1,6 +1,6 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.markRead = exports.sendMessage = exports.listMessages = exports.startConversation = exports.getConversation = exports.listConversations = exports.sendMessageSchema = exports.startConversationSchema = void 0;
+exports.getSmartReplies = exports.markRead = exports.sendMessage = exports.listMessages = exports.startConversation = exports.getConversation = exports.listConversations = exports.sendMessageSchema = exports.startConversationSchema = void 0;
 const zod_1 = require("zod");
 const Conversation_1 = require("../models/Conversation");
 const Message_1 = require("../models/Message");
@@ -8,8 +8,14 @@ const User_1 = require("../models/User");
 const asyncHandler_1 = require("../utils/asyncHandler");
 const ApiError_1 = require("../utils/ApiError");
 const socket_1 = require("../services/chat/socket");
+const notify_service_1 = require("../services/notification/notify.service");
 const cloudinary_1 = require("../config/cloudinary");
 const logger_1 = require("../utils/logger");
+const chatSafety_service_1 = require("../services/security/chatSafety.service");
+const audit_service_1 = require("../services/security/audit.service");
+const chatSmartReply_service_1 = require("../services/ai/chatSmartReply.service");
+const quota_service_1 = require("../services/ai/quota.service");
+const aiCreditWeights_1 = require("../config/aiCreditWeights");
 const isObjectId = (s) => /^[a-f0-9]{24}$/i.test(s);
 exports.startConversationSchema = zod_1.z.object({
     body: zod_1.z.object({
@@ -46,7 +52,7 @@ const jobLitePopulate = {
     select: 'title company companyLogoUrl hirerProfile postedBy',
     populate: {
         path: 'hirerProfile',
-        select: 'companyLogoUrl companyName',
+        select: 'companyLogoUrl companyName verification.isVerified',
     },
 };
 const appliedLitePopulate = {
@@ -87,6 +93,13 @@ const resolveCompanyName = (job) => {
     }
     return undefined;
 };
+const resolveCompanyVerified = (job) => {
+    const hp = job?.hirerProfile;
+    if (hp && typeof hp === 'object' && 'verification' in hp) {
+        return hp.verification?.isVerified === true;
+    }
+    return false;
+};
 exports.listConversations = (0, asyncHandler_1.asyncHandler)(async (req, res) => {
     if (!req.user)
         throw ApiError_1.ApiError.unauthorized();
@@ -121,6 +134,7 @@ exports.listConversations = (0, asyncHandler_1.asyncHandler)(async (req, res) =>
             jobTitle: populated?.title,
             companyName: resolveCompanyName(populated),
             companyLogo: resolveCompanyLogo(populated),
+            companyVerified: resolveCompanyVerified(populated),
             lastMessage: c.lastMessage,
             unreadCount: c.unreadCount?.[viewerId] ?? 0,
             updatedAt: c.updatedAt,
@@ -204,6 +218,7 @@ const enrichConversation = (raw, userId) => {
         jobTitle: populated?.title,
         companyName: resolveCompanyName(populated),
         companyLogo: resolveCompanyLogo(populated),
+        companyVerified: resolveCompanyVerified(populated),
         application: applicationRaw && typeof applicationRaw === 'object' && '_id' in applicationRaw
             ? applicationRaw._id.toString()
             : applicationRaw ?? null,
@@ -241,6 +256,27 @@ exports.sendMessage = (0, asyncHandler_1.asyncHandler)(async (req, res) => {
     const uploaded = req.file;
     if (!uploaded && content.length === 0) {
         throw ApiError_1.ApiError.badRequest('Message must have content or a file attachment.');
+    }
+    if (content.length > 0) {
+        const safety = (0, chatSafety_service_1.scanChatMessage)(content);
+        if (safety.severity !== 'low') {
+            await (0, audit_service_1.writeAudit)({
+                actor: { id: req.user._id, email: req.user.email },
+                actorType: 'user',
+                category: 'security',
+                action: `chat:blocked:${safety.severity}`,
+                target: { type: 'Conversation', id: conv._id },
+                metadata: {
+                    flags: safety.flags,
+                    matchedTerms: safety.matchedTerms,
+                },
+                req,
+            });
+            throw new ApiError_1.ApiError(422, safety.blockReason, {
+                flags: safety.flags,
+                severity: safety.severity,
+            });
+        }
     }
     let filePayload;
     if (uploaded) {
@@ -297,8 +333,52 @@ exports.sendMessage = (0, asyncHandler_1.asyncHandler)(async (req, res) => {
     }
     catch {
     }
+    if (receiver.toString() !== req.user.id) {
+        let receiverRole = 'seeker';
+        try {
+            const populated = await Conversation_1.Conversation.findById(conv._id)
+                .populate({ path: 'job', select: 'postedBy' })
+                .lean();
+            const jobDoc = populated?.job;
+            if (jobDoc?.postedBy) {
+                receiverRole =
+                    jobDoc.postedBy.toString() === receiver.toString()
+                        ? 'hirer'
+                        : 'seeker';
+            }
+        }
+        catch {
+        }
+        void pushChatMessage({
+            senderId: req.user.id,
+            receiverId: receiver.toString(),
+            receiverRole,
+            conversationId: conv._id.toString(),
+            preview: previewContent,
+        }).catch((err) => {
+            logger_1.logger.warn(`chat push failed: ${err.message}`);
+        });
+    }
     res.status(201).json({ success: true, data: message });
 });
+const pushChatMessage = async (params) => {
+    const sender = await User_1.User.findById(params.senderId)
+        .select('profile.fullName email')
+        .lean();
+    const senderName = sender?.profile?.fullName?.trim() || sender?.email || 'New message';
+    const body = params.preview.trim().length > 0 ? params.preview : 'sent a message';
+    await (0, notify_service_1.notifyUser)({
+        user: params.receiverId,
+        role: params.receiverRole,
+        type: 'new_message',
+        title: senderName,
+        body,
+        data: {
+            conversationId: params.conversationId,
+            senderId: params.senderId,
+        },
+    });
+};
 exports.markRead = (0, asyncHandler_1.asyncHandler)(async (req, res) => {
     if (!req.user)
         throw ApiError_1.ApiError.unauthorized();
@@ -318,4 +398,37 @@ exports.markRead = (0, asyncHandler_1.asyncHandler)(async (req, res) => {
     catch {
     }
     res.json({ success: true, data: { modified: result.modifiedCount } });
+});
+exports.getSmartReplies = (0, asyncHandler_1.asyncHandler)(async (req, res) => {
+    if (!req.user)
+        throw ApiError_1.ApiError.unauthorized();
+    const userId = String(req.user._id);
+    const conv = await ensureParticipant(req.user._id, String(req.params.id));
+    const recent = await Message_1.Message.find({ conversation: conv._id })
+        .sort({ sentAt: -1 })
+        .limit(8)
+        .lean();
+    const turns = recent
+        .reverse()
+        .filter((m) => typeof m.content === 'string' && m.content.trim().length > 0)
+        .map((m) => ({
+        role: m.sender.toString() === req.user._id.toString()
+            ? 'hirer'
+            : 'candidate',
+        text: m.content,
+    }));
+    const cached = await (0, chatSmartReply_service_1.suggestSmartReplies)({ turns, userId });
+    let quota = await (0, quota_service_1.getQuotaSnapshot)(userId);
+    if (cached.cached) {
+        res.json({ success: true, data: cached, quota });
+        return;
+    }
+    const weight = (0, aiCreditWeights_1.getCreditWeight)('chat_smart_reply');
+    if (weight > 0 && cached.usedAi && !cached.cached) {
+        quota = await (0, quota_service_1.enforceQuota)(userId, weight);
+    }
+    if (weight > 0 && !cached.usedAi) {
+        await (0, quota_service_1.refundQuota)(userId, 0);
+    }
+    res.json({ success: true, data: cached, quota });
 });

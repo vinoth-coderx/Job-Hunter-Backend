@@ -28,6 +28,9 @@ class ApiError extends Error {
     static conflict(message) {
         return new ApiError(409, message);
     }
+    static gone(message = 'Resource is no longer available') {
+        return new ApiError(410, message);
+    }
     static tooMany(message = 'Too many requests') {
         return new ApiError(429, message);
     }

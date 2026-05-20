@@ -201,47 +201,29 @@ export const CONFIG_REGISTRY: ConfigRegistryEntry[] = [
   },
 
   // ── Razorpay (subscriptions) ────────────────────────────────────────
+  // Same key names across test/live — the active runtime mode (test DB vs
+  // live DB) decides which value is read. Put test keys (rzp_test_...) into
+  // the test DB and live keys (rzp_live_...) into the live DB.
   {
     key: 'RAZORPAY_KEY_ID',
     category: 'payment',
     isSecret: false,
-    description: 'Razorpay live key_id (rzp_live_...). Sent to the client during checkout.',
+    description: 'Razorpay key_id. Test DB stores rzp_test_..., live DB stores rzp_live_... Sent to the client during checkout.',
     usedBy: 'services/razorpay.service.ts',
   },
   {
     key: 'RAZORPAY_KEY_SECRET',
     category: 'payment',
     isSecret: true,
-    description: 'Razorpay live key_secret. Used server-side to verify webhook signatures.',
+    description: 'Razorpay key_secret. Test DB stores the test secret, live DB stores the live one.',
     usedBy: 'services/razorpay.service.ts',
   },
   {
     key: 'RAZORPAY_WEBHOOK_SECRET',
     category: 'payment',
     isSecret: true,
-    description: 'Shared secret configured in the Razorpay dashboard webhook settings.',
-    usedBy: 'controllers/payment.controller.ts',
-  },
-  {
-    key: 'RAZORPAY_TEST_KEY_ID',
-    category: 'payment',
-    isSecret: false,
-    description: 'Razorpay test key_id. Only honoured for debug-build clients in non-prod envs.',
-    usedBy: 'services/razorpay.service.ts',
-  },
-  {
-    key: 'RAZORPAY_TEST_KEY_SECRET',
-    category: 'payment',
-    isSecret: true,
-    description: 'Razorpay test key_secret. Pairs with RAZORPAY_TEST_KEY_ID.',
-    usedBy: 'services/razorpay.service.ts',
-  },
-  {
-    key: 'RAZORPAY_TEST_WEBHOOK_SECRET',
-    category: 'payment',
-    isSecret: true,
-    description: 'Test webhook secret for the Razorpay test dashboard.',
-    usedBy: 'controllers/payment.controller.ts',
+    description: 'Shared secret configured in the Razorpay dashboard webhook settings. Each DB stores its own (test/live).',
+    usedBy: 'controllers/subscription.controller.ts',
   },
 
   // ── Email (Gmail SMTP) ──────────────────────────────────────────────

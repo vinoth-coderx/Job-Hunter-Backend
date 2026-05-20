@@ -64,6 +64,7 @@ class ArbeitnowScraper extends base_1.BaseScraper {
             })
                 .filter((j) => this.isWithinFreshness(j.postedAt));
             this.log(`Fetched ${jobs.length} fresh jobs (across ${pages} pages)`);
+            this.noteOk(jobs.length);
             return jobs;
         }
         catch (err) {

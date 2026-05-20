@@ -4,27 +4,37 @@ exports.cloudinary = exports.publicIdFromUrl = exports.signedDeliveryUrl = expor
 const cloudinary_1 = require("cloudinary");
 Object.defineProperty(exports, "cloudinary", { enumerable: true, get: function () { return cloudinary_1.v2; } });
 const node_stream_1 = require("node:stream");
-const env_1 = require("./env");
+const config_service_1 = require("../services/config/config.service");
 const logger_1 = require("../utils/logger");
-let configured = false;
+const KEY_CLOUD_NAME = 'CLOUDINARY_CLOUD_NAME';
+const KEY_API_KEY = 'CLOUDINARY_API_KEY';
+const KEY_API_SECRET = 'CLOUDINARY_API_SECRET';
+let configuredFor = null;
+const readCreds = () => ({
+    cloudName: (0, config_service_1.getAppConfig)(KEY_CLOUD_NAME),
+    apiKey: (0, config_service_1.getAppConfig)(KEY_API_KEY),
+    apiSecret: (0, config_service_1.getAppConfig)(KEY_API_SECRET),
+});
 const ensureConfigured = () => {
-    if (configured)
-        return true;
-    const { CLOUDINARY_CLOUD_NAME, CLOUDINARY_API_KEY, CLOUDINARY_API_SECRET } = env_1.env;
-    if (!CLOUDINARY_CLOUD_NAME || !CLOUDINARY_API_KEY || !CLOUDINARY_API_SECRET) {
+    const { cloudName, apiKey, apiSecret } = readCreds();
+    if (!cloudName || !apiKey || !apiSecret)
         return false;
-    }
+    if (configuredFor === cloudName)
+        return true;
     cloudinary_1.v2.config({
-        cloud_name: CLOUDINARY_CLOUD_NAME,
-        api_key: CLOUDINARY_API_KEY,
-        api_secret: CLOUDINARY_API_SECRET,
+        cloud_name: cloudName,
+        api_key: apiKey,
+        api_secret: apiSecret,
         secure: true,
     });
-    configured = true;
-    logger_1.logger.info(`Cloudinary configured (cloud_name=${CLOUDINARY_CLOUD_NAME})`);
+    configuredFor = cloudName;
+    logger_1.logger.info(`Cloudinary configured (cloud_name=${cloudName})`);
     return true;
 };
-const isCloudinaryConfigured = () => Boolean(env_1.env.CLOUDINARY_CLOUD_NAME && env_1.env.CLOUDINARY_API_KEY && env_1.env.CLOUDINARY_API_SECRET);
+const isCloudinaryConfigured = () => {
+    const { cloudName, apiKey, apiSecret } = readCreds();
+    return Boolean(cloudName && apiKey && apiSecret);
+};
 exports.isCloudinaryConfigured = isCloudinaryConfigured;
 exports.CLOUDINARY_FOLDERS = {
     AVATAR: 'job_hunter/avatars',

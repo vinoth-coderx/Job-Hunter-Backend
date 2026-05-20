@@ -1,66 +1,100 @@
 import Redis, { RedisOptions } from 'ioredis';
 import { env } from './env';
 import { REDIS_DB } from './constants';
-import { readRuntimeMode } from './runtimeMode';
+import { currentRuntimeMode, type RuntimeMode } from './dbConnections';
 import { logger } from '../utils/logger';
 
+/**
+ * Dual-mode Redis. The HTTP server is mode-aware via
+ * AsyncLocalStorage, so the exported `redis` symbol is a Proxy that
+ * dispatches to whichever client matches the active runtime mode.
+ *
+ * Isolation strategy (cheapest first):
+ *   1. If `REDIS_URL_{TEST,LIVE}` is set, use that per-mode URL —
+ *      fully separate Redis instances.
+ *   2. Otherwise share one instance but pick different logical DBs
+ *      (test → REDIS_DB, live → REDIS_DB + 1) so keys don't collide.
+ *
+ * Either way callers keep using `import { redis } from '../config/redis'`
+ * unchanged — no caller cares which mode they're in.
+ */
 const useTls = env.REDIS_TLS === 'true';
 
-/**
- * Build ioredis options for the active runtime mode. URL form is
- * preferred when set (`REDIS_URL_TEST` / `REDIS_URL_LIVE`) — ioredis
- * accepts these directly. Otherwise we fall back to the discrete
- * REDIS_* quintet (single Redis instance shared by both modes).
- */
-const buildRedisOptions = (): { url?: string; opts: RedisOptions } => {
-  const mode = readRuntimeMode();
-  const modeUrl =
-    mode === 'live' ? env.REDIS_URL_LIVE : env.REDIS_URL_TEST;
-  const sharedOpts: RedisOptions = {
-    db: REDIS_DB,
-    maxRetriesPerRequest: 3,
-    enableReadyCheck: true,
-    lazyConnect: true,
-    connectTimeout: 10000,
-    retryStrategy: (times) => Math.min(times * 200, 5000),
-  };
-  if (modeUrl) {
-    logger.info(`Redis: using URL from REDIS_URL_${mode.toUpperCase()}`);
-    return { url: modeUrl, opts: sharedOpts };
-  }
-  return {
-    opts: {
-      ...sharedOpts,
-      host: env.REDIS_HOST,
-      port: env.REDIS_PORT,
-      username: env.REDIS_USERNAME || undefined,
-      password: env.REDIS_PASSWORD || undefined,
-      ...(useTls ? { tls: { rejectUnauthorized: true } } : {}),
-    },
-  };
+const sharedOpts: RedisOptions = {
+  maxRetriesPerRequest: 3,
+  enableReadyCheck: true,
+  lazyConnect: true,
+  connectTimeout: 10000,
+  retryStrategy: (times) => Math.min(times * 200, 5000),
 };
 
-const built = buildRedisOptions();
-export const redis = built.url
-  ? new Redis(built.url, built.opts)
-  : new Redis(built.opts);
+const buildClient = (mode: RuntimeMode): Redis => {
+  const url = mode === 'live' ? env.REDIS_URL_LIVE : env.REDIS_URL_TEST;
+  if (url) {
+    logger.info(`Redis[${mode}]: using REDIS_URL_${mode.toUpperCase()}`);
+    return new Redis(url, sharedOpts);
+  }
+  // Fall back to the discrete REDIS_* quintet. Both modes connect to
+  // the same instance + same DB when separate URLs aren't configured —
+  // most managed Redis tiers (Redis Cloud free, Upstash) only expose
+  // a single logical DB so we can't auto-isolate. Operators wanting
+  // strict isolation should set REDIS_URL_TEST + REDIS_URL_LIVE.
+  return new Redis({
+    ...sharedOpts,
+    host: env.REDIS_HOST,
+    port: env.REDIS_PORT,
+    username: env.REDIS_USERNAME || undefined,
+    password: env.REDIS_PASSWORD || undefined,
+    db: REDIS_DB,
+    ...(useTls ? { tls: { rejectUnauthorized: true } } : {}),
+  });
+};
 
-redis.on('connect', () => logger.info('Redis connected'));
-redis.on('ready', () => logger.info('Redis ready'));
-redis.on('error', (err) => logger.error('Redis error:', err));
-redis.on('close', () => logger.warn('Redis connection closed'));
+const clients: Record<RuntimeMode, Redis> = {
+  test: buildClient('test'),
+  live: buildClient('live'),
+};
+
+(['test', 'live'] as const).forEach((mode) => {
+  const c = clients[mode];
+  c.on('connect', () => logger.info(`Redis[${mode}] connected`));
+  c.on('ready', () => logger.info(`Redis[${mode}] ready`));
+  c.on('error', (err) => logger.error(`Redis[${mode}] error:`, err));
+  c.on('close', () => logger.warn(`Redis[${mode}] connection closed`));
+});
+
+const resolveClient = (): Redis => clients[currentRuntimeMode()];
+
+const handler: ProxyHandler<Redis> = {
+  get(_target, prop) {
+    const c = resolveClient();
+    const value = Reflect.get(c, prop, c);
+    if (typeof value === 'function') return value.bind(c);
+    return value;
+  },
+  set(_target, prop, value) {
+    const c = resolveClient();
+    return Reflect.set(c, prop, value);
+  },
+  has(_target, prop) {
+    const c = resolveClient();
+    return Reflect.has(c, prop);
+  },
+};
+
+export const redis = new Proxy(clients.live, handler);
 
 export const connectRedis = async (): Promise<void> => {
-  try {
-    await redis.connect();
-  } catch (error) {
-    logger.error('Failed to connect to Redis:', error);
-    throw error;
-  }
+  await Promise.all([clients.test.connect(), clients.live.connect()]).catch(
+    (err) => {
+      logger.error('Failed to connect to one or more Redis clients:', err);
+      throw err;
+    },
+  );
 };
 
 export const disconnectRedis = async (): Promise<void> => {
-  await redis.quit();
+  await Promise.all([clients.test.quit(), clients.live.quit()]);
 };
 
 export const CACHE_KEYS = {

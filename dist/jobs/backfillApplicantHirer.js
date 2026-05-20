@@ -6,12 +6,13 @@ const Job_1 = require("../models/Job");
 const logger_1 = require("../utils/logger");
 const backfillApplicantHirerLinks = async () => {
     try {
-        const orphans = await AppliedJob_1.AppliedJob.find({
+        const orphans = (await AppliedJob_1.AppliedJob.find({
             $or: [{ hirerProfile: { $exists: false } }, { hirerProfile: null }],
+            job: { $exists: true },
         })
             .select('_id job')
             .limit(2000)
-            .lean();
+            .lean()).filter((a) => a.job);
         if (orphans.length === 0)
             return;
         const jobIds = [...new Set(orphans.map((a) => a.job.toString()))];

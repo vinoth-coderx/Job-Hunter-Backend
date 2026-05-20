@@ -6,23 +6,30 @@ const logger_1 = require("../utils/logger");
 const env_1 = require("../config/env");
 const zod_1 = require("zod");
 const mongoose_1 = require("mongoose");
+const providers_1 = require("../services/ai/providers");
 const errorHandler = (err, _req, res, _next) => {
     let statusCode = 500;
-    let message = 'Internal server error';
+    let message = "Internal server error";
     let details = undefined;
     if (err instanceof ApiError_1.ApiError) {
         statusCode = err.statusCode;
         message = err.message;
         details = err.details;
     }
+    else if (err instanceof providers_1.AiProviderQuotaError) {
+        statusCode = 429;
+        message =
+            "You’ve reached today’s free limit. Try again tomorrow or upgrade for more generations.";
+        details = { quota: null, reason: "global" };
+    }
     else if (err instanceof zod_1.ZodError) {
         statusCode = 400;
-        message = 'Validation error';
+        message = "Validation error";
         details = err.errors;
     }
     else if (err instanceof mongoose_1.Error.ValidationError) {
         statusCode = 400;
-        message = 'Validation failed';
+        message = "Validation failed";
         details = Object.values(err.errors).map((e) => e.message);
     }
     else if (err instanceof mongoose_1.Error.CastError) {
@@ -34,26 +41,30 @@ const errorHandler = (err, _req, res, _next) => {
         const field = Object.keys(err.keyValue || {})[0];
         message = `Duplicate value for field: ${field}`;
     }
-    else if (err.name === 'JsonWebTokenError') {
+    else if (err.name === "JsonWebTokenError") {
         statusCode = 401;
-        message = 'Invalid token';
+        message = "Invalid token";
     }
-    else if (err.name === 'TokenExpiredError') {
+    else if (err.name === "TokenExpiredError") {
         statusCode = 401;
-        message = 'Token expired';
+        message = "Token expired";
     }
     if (statusCode >= 500) {
-        logger_1.logger.error('Unhandled error', { message: err.message, stack: err.stack });
+        logger_1.logger.error("Unhandled error", { message: err.message, stack: err.stack });
     }
     else {
         logger_1.logger.warn(`${statusCode} ${message}`);
     }
-    const safeMessage = statusCode >= 500 && env_1.env.NODE_ENV === 'production' ? 'Internal server error' : message;
+    const safeMessage = statusCode >= 500 && env_1.env.NODE_ENV === "production"
+        ? "Internal server error"
+        : message;
     res.status(statusCode).json({
         success: false,
         message: safeMessage,
-        ...(details && env_1.env.NODE_ENV !== 'production' ? { details } : {}),
-        ...(env_1.env.NODE_ENV !== 'production' && statusCode >= 500 ? { stack: err.stack } : {}),
+        ...(details && env_1.env.NODE_ENV !== "production" ? { details } : {}),
+        ...(env_1.env.NODE_ENV !== "production" && statusCode >= 500
+            ? { stack: err.stack }
+            : {}),
     });
 };
 exports.errorHandler = errorHandler;

@@ -1,16 +1,8 @@
 "use strict";
-var __importDefault = (this && this.__importDefault) || function (mod) {
-    return (mod && mod.__esModule) ? mod : { "default": mod };
-};
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.summariseInterview = exports.nextInterviewerTurn = void 0;
-const sdk_1 = __importDefault(require("@anthropic-ai/sdk"));
-const env_1 = require("../../config/env");
 const logger_1 = require("../../utils/logger");
-const client = env_1.env.ANTHROPIC_API_KEY
-    ? new sdk_1.default({ apiKey: env_1.env.ANTHROPIC_API_KEY })
-    : null;
-const MODEL = 'claude-haiku-4-5-20251001';
+const providers_1 = require("./providers");
 const SYSTEM_BY_TYPE = {
     hr: 'You are conducting an HR / fit interview. Focus on motivation, communication, teamwork, and resilience. Avoid coding questions.',
     behavioural: 'You are conducting a behavioural interview using the STAR framework. Probe for specific past situations, never accept generic answers.',
@@ -44,7 +36,7 @@ const renderCandidateProfile = (p) => {
 const nextInterviewerTurn = async (params) => {
     const { role, interviewType, turns, questionsTarget, candidateProfile } = params;
     const questionsAsked = turns.filter((t) => t.role === 'interviewer').length;
-    if (!client) {
+    if (!(0, providers_1.isAiEnabled)()) {
         return fallbackTurn(role, interviewType, questionsAsked, questionsTarget);
     }
     const transcript = turns
@@ -79,17 +71,16 @@ Rules:
         ? 'Open the interview now.'
         : `Conversation so far:\n${transcript}\n\nGive the next interviewer turn.`;
     try {
-        const res = await client.messages.create({
-            model: MODEL,
-            max_tokens: 800,
+        const parsed = await (0, providers_1.generateJson)({
+            tier: 'smart',
             system,
-            messages: [{ role: 'user', content: prompt }],
+            user: prompt,
+            maxTokens: 800,
+            temperature: 0.6,
         });
-        const block = res.content[0];
-        const raw = block && block.type === 'text' && typeof block.text === 'string'
-            ? block.text.trim()
-            : '';
-        const parsed = JSON.parse(raw);
+        if (!parsed) {
+            return fallbackTurn(role, interviewType, questionsAsked, questionsTarget);
+        }
         const question = String(parsed.question ?? '').trim();
         if (!question) {
             return fallbackTurn(role, interviewType, questionsAsked, questionsTarget);
@@ -191,7 +182,7 @@ const summariseInterview = async (params) => {
                 'Focus next round on the dimension with the lowest score.',
         };
     };
-    if (!client)
+    if (!(0, providers_1.isAiEnabled)())
         return heuristic();
     const transcript = turns
         .map((t) => `${t.role === 'interviewer' ? 'Q' : 'A'}: ${t.text}`)
@@ -203,17 +194,15 @@ When scoring, weigh answers against the candidate's stated experience level — 
 Output strict JSON:
 {"finalScore": 0-100, "finalSummary": "3-5 sentences. Lead with biggest strength, then biggest gap, then concrete next step. No fluff."}`;
     try {
-        const res = await client.messages.create({
-            model: MODEL,
-            max_tokens: 600,
+        const parsed = await (0, providers_1.generateJson)({
+            tier: 'smart',
             system,
-            messages: [{ role: 'user', content: transcript }],
+            user: transcript,
+            maxTokens: 600,
+            temperature: 0.4,
         });
-        const block = res.content[0];
-        const raw = block && block.type === 'text' && typeof block.text === 'string'
-            ? block.text.trim()
-            : '';
-        const parsed = JSON.parse(raw);
+        if (!parsed)
+            return heuristic();
         const score = typeof parsed.finalScore === 'number'
             ? Math.max(0, Math.min(100, Math.round(parsed.finalScore)))
             : 0;

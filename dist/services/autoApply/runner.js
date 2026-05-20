@@ -45,22 +45,10 @@ const runAutoApplyForUser = async (user, options = {}) => {
     }
     const cutoff = new Date(Date.now() - 24 * 60 * 60 * 1000);
     const reapplyCutoff = new Date(Date.now() - settings.matchingRules.reapplyCooldownDays * 24 * 60 * 60 * 1000);
-    const sources = settings.preferences.sources?.length
-        ? settings.preferences.sources
-        : ['native'];
-    const orFilters = [];
-    if (sources.includes('native')) {
-        orFilters.push({ isNative: true, status: 'active' });
-    }
-    if (sources.includes('external')) {
-        orFilters.push({ isNative: false, isActive: true });
-    }
-    if (orFilters.length === 0) {
-        orFilters.push({ isNative: true, status: 'active' });
-    }
     const baseFilter = {
         postedAt: { $gte: cutoff },
-        $or: orFilters,
+        isNative: true,
+        status: 'active',
     };
     if (settings.preferences.locations?.length) {
         baseFilter.location = {
@@ -84,7 +72,7 @@ const runAutoApplyForUser = async (user, options = {}) => {
     })
         .select('job hirerProfile jobSnapshot.company')
         .lean();
-    const appliedJobIds = new Set(recentApplications.map((a) => a.job.toString()));
+    const appliedJobIds = new Set(recentApplications.filter((a) => a.job).map((a) => a.job.toString()));
     const cooldownCompanies = new Set(recentApplications.map((a) => (a.jobSnapshot.company || '').toLowerCase()));
     const blacklist = new Set((settings.matchingRules.blacklistedCompanies || []).map((c) => c.toLowerCase()));
     const includeKW = (settings.matchingRules.mustIncludeKeywords || []).map((k) => k.toLowerCase());
@@ -141,7 +129,7 @@ const runAutoApplyForUser = async (user, options = {}) => {
     }
     const applied = [];
     const coverLetterEnabled = settings.aiCoverLetter.enabled && tier === 'yearly';
-    if (!settings.reviewMode && !options.dryRun) {
+    if (!options.dryRun) {
         for (const cand of selected) {
             try {
                 let quickNote;
@@ -172,28 +160,16 @@ const runAutoApplyForUser = async (user, options = {}) => {
             }
         }
     }
-    const appliedForLog = settings.reviewMode
-        ? selected.map((cand) => ({
-            job: cand.job._id,
-            companyName: cand.job.company,
-            jobTitle: cand.job.title,
-            matchScore: cand.score,
-            source: cand.job.isNative ? 'native' : 'external',
-            appliedAt: new Date(),
-            coverLetterUsed: false,
-            status: 'pending_review',
-        }))
-        : applied;
     const log = await AutoApplyLog_1.AutoApplyLog.create({
         user: user._id,
         runDate: new Date(),
         jobsScanned: pool.length,
         jobsMatched: ranked.length,
-        jobsApplied: settings.reviewMode ? 0 : applied.length,
+        jobsApplied: applied.length,
         jobsSkipped: skipped.length,
-        appliedJobs: appliedForLog,
+        appliedJobs: applied,
         skippedJobs: skipped,
-        awaitingApproval: settings.reviewMode && selected.length > 0,
+        awaitingApproval: false,
         notificationSent: false,
         triggeredManually: !!options.manual,
     });
@@ -203,17 +179,13 @@ const runAutoApplyForUser = async (user, options = {}) => {
     }
     await settings.save();
     try {
-        if (applied.length > 0 || (settings.reviewMode && selected.length > 0)) {
+        if (applied.length > 0) {
             await Notification_1.Notification.create({
                 user: user._id,
                 role: 'seeker',
                 type: 'auto_apply_summary',
-                title: settings.reviewMode
-                    ? `${selected.length} matches ready to review`
-                    : `Applied to ${applied.length} jobs for you`,
-                body: settings.reviewMode
-                    ? 'Open Auto-Apply to approve or skip today\'s matches.'
-                    : `Best match: ${applied[0]?.jobTitle ?? '—'} @ ${applied[0]?.companyName ?? '—'}`,
+                title: `Applied to ${applied.length} jobs for you`,
+                body: `Best match: ${applied[0]?.jobTitle ?? '—'} @ ${applied[0]?.companyName ?? '—'}`,
                 data: { logId: log._id.toString() },
             });
             log.notificationSent = true;
@@ -229,7 +201,7 @@ const runAutoApplyForUser = async (user, options = {}) => {
         jobsMatched: ranked.length,
         jobsApplied: applied.length,
         jobsSkipped: skipped.length,
-        awaitingApproval: settings.reviewMode && selected.length > 0,
+        awaitingApproval: false,
         logId: log._id.toString(),
     };
 };
@@ -256,6 +228,17 @@ const submitNativeApplication = async (user, job, score, options = {}) => {
             company: job.company,
             location: job.location,
             url: job.url,
+            description: job.description,
+            salaryMin: job.salaryMin,
+            salaryMax: job.salaryMax,
+            currency: job.currency,
+            jobType: job.jobType,
+            remoteType: job.remoteType,
+            skills: job.skills,
+            companyLogo: job.companyLogoUrl,
+            postedAt: job.postedAt,
+            source: job.source,
+            externalId: job.externalId,
         },
         applyType: 'auto_apply',
         source: 'native',

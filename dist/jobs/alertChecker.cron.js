@@ -5,8 +5,9 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.stopAlertCheckerCron = exports.startAlertCheckerCron = exports.checkAlertsNow = void 0;
 const node_cron_1 = __importDefault(require("node-cron"));
-const env_1 = require("../config/env");
+const config_service_1 = require("../services/config/config.service");
 const constants_1 = require("../config/constants");
+const cronsEnabled = () => (0, config_service_1.getAppConfig)('CRON_ENABLED') !== 'false';
 const logger_1 = require("../utils/logger");
 const Alert_1 = require("../models/Alert");
 const DeviceToken_1 = require("../models/DeviceToken");
@@ -15,10 +16,12 @@ const User_1 = require("../models/User");
 const fcm_service_1 = require("../services/notification/fcm.service");
 const email_service_1 = require("../services/notification/email.service");
 const whatsapp_service_1 = require("../services/notification/whatsapp.service");
+const cronTracker_1 = require("../utils/cronTracker");
 let alertTask = null;
 let isRunning = false;
 const buildJobFilter = (alert, since) => {
     const filter = {
+        isNative: true,
         isActive: true,
         postedAt: { $gt: since },
     };
@@ -135,13 +138,14 @@ const checkAlertsNow = async () => {
 };
 exports.checkAlertsNow = checkAlertsNow;
 const startAlertCheckerCron = () => {
-    if (!env_1.env.CRON_ENABLED)
+    if (!cronsEnabled())
         return;
-    if (!node_cron_1.default.validate(constants_1.CRON_ALERT_SCHEDULE)) {
-        logger_1.logger.error(`Invalid alert cron expression: ${constants_1.CRON_ALERT_SCHEDULE}`);
+    const schedule = (0, cronTracker_1.getCronSchedule)('alertChecker');
+    if (!node_cron_1.default.validate(schedule)) {
+        logger_1.logger.error(`Invalid alert cron expression: ${schedule}`);
         return;
     }
-    alertTask = node_cron_1.default.schedule(constants_1.CRON_ALERT_SCHEDULE, async () => {
+    alertTask = node_cron_1.default.schedule(schedule, (0, cronTracker_1.trackedCron)('alertChecker', async () => {
         if (isRunning) {
             logger_1.logger.warn('Alerts: previous tick still running — skipping');
             return;
@@ -152,14 +156,11 @@ const startAlertCheckerCron = () => {
             await (0, exports.checkAlertsNow)();
             logger_1.logger.info(`Alerts: tick complete in ${Date.now() - start}ms`);
         }
-        catch (err) {
-            logger_1.logger.error('Alerts: cron tick failed', err);
-        }
         finally {
             isRunning = false;
         }
-    }, { timezone: 'Asia/Kolkata' });
-    logger_1.logger.info(`Alerts cron scheduled: "${constants_1.CRON_ALERT_SCHEDULE}"`);
+    }), { timezone: 'Asia/Kolkata' });
+    logger_1.logger.info(`Alerts cron scheduled: "${schedule}"`);
 };
 exports.startAlertCheckerCron = startAlertCheckerCron;
 const stopAlertCheckerCron = () => {

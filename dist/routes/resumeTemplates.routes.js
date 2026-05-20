@@ -1,0 +1,13 @@
+"use strict";
+Object.defineProperty(exports, "__esModule", { value: true });
+const express_1 = require("express");
+const auth_1 = require("../middleware/auth");
+const resumeTemplates_controller_1 = require("../controllers/resumeTemplates.controller");
+const router = (0, express_1.Router)();
+router.use(auth_1.authenticate);
+router.get('/', resumeTemplates_controller_1.listPublicTemplates);
+router.get('/quota', resumeTemplates_controller_1.getTemplateQuota);
+router.get('/:slug', resumeTemplates_controller_1.getPublicTemplate);
+router.get('/:slug/preview-sample.pdf', resumeTemplates_controller_1.previewSampleTemplate);
+router.post('/:slug/download', resumeTemplates_controller_1.downloadTemplate);
+exports.default = router;

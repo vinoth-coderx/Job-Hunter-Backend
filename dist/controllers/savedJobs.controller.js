@@ -38,7 +38,10 @@ exports.listSavedJobIds = (0, asyncHandler_1.asyncHandler)(async (req, res) => {
     if (!req.user)
         throw ApiError_1.ApiError.unauthorized();
     const items = await SavedJob_1.SavedJob.find({ user: req.user._id }).select('job').lean();
-    res.json({ success: true, data: items.map((s) => s.job.toString()) });
+    res.json({
+        success: true,
+        data: items.filter((s) => s.job).map((s) => s.job.toString()),
+    });
 });
 exports.saveJob = (0, asyncHandler_1.asyncHandler)(async (req, res) => {
     if (!req.user)
@@ -46,13 +49,32 @@ exports.saveJob = (0, asyncHandler_1.asyncHandler)(async (req, res) => {
     const id = String(req.params.id || '');
     if (!isObjectId(id))
         throw ApiError_1.ApiError.badRequest('Invalid job id');
-    const job = await Job_1.Job.findById(id).select('_id').lean();
+    const job = await Job_1.Job.findById(id).lean();
     if (!job)
         throw ApiError_1.ApiError.notFound('Job not found');
     try {
         await SavedJob_1.SavedJob.create({
             user: req.user._id,
             job: new mongoose_1.default.Types.ObjectId(id),
+            source: job.source,
+            externalId: job.externalId,
+            jobSnapshot: {
+                title: job.title,
+                company: job.company,
+                location: job.location,
+                url: job.url,
+                description: job.description,
+                salaryMin: job.salaryMin,
+                salaryMax: job.salaryMax,
+                currency: job.currency,
+                jobType: job.jobType,
+                remoteType: job.remoteType,
+                skills: job.skills,
+                companyLogo: job.companyLogoUrl,
+                postedAt: job.postedAt,
+                source: job.source,
+                externalId: job.externalId,
+            },
         });
     }
     catch (err) {

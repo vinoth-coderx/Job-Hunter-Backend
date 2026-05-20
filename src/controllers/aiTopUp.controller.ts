@@ -10,11 +10,10 @@ import {
   createRazorpayOrder,
   verifyPaymentSignature,
   fetchRazorpayOrder,
-  resolveRazorpayMode,
   getRazorpayKeyId,
-  RazorpayMode,
 } from '../services/razorpay.service';
 import { getAppConfig } from '../services/config/config.service';
+import { currentRuntimeMode } from '../config/dbConnections';
 
 /**
  * AI credit top-up packs. Catalog is server-authoritative — the client
@@ -89,7 +88,6 @@ export const listAiTopUpPacks = asyncHandler(
 export const createAiTopUpOrderSchema = z.object({
   body: z.object({
     packId: z.string().min(1).max(60),
-    mode: z.enum(['test', 'live']).optional(),
   }),
 });
 
@@ -102,14 +100,10 @@ export const createAiTopUpOrderSchema = z.object({
 export const createAiTopUpOrder = asyncHandler(
   async (req: AuthRequest, res: Response) => {
     if (!req.user) throw ApiError.unauthorized();
-    const { packId, mode: requestedMode } = req.body as {
-      packId: string;
-      mode?: RazorpayMode;
-    };
+    const { packId } = req.body as { packId: string };
     const pack = findPack(packId);
     if (!pack) throw ApiError.badRequest('Unknown top-up pack');
 
-    const mode = resolveRazorpayMode(requestedMode);
     const order = await createRazorpayOrder({
       amountPaise: pack.priceInr * 100,
       currency: 'INR',
@@ -119,9 +113,7 @@ export const createAiTopUpOrder = asyncHandler(
         kind: 'ai_topup',
         packId: pack.id,
         credits: String(pack.credits),
-        mode,
       },
-      mode,
     });
 
     res.status(201).json({
@@ -130,11 +122,10 @@ export const createAiTopUpOrder = asyncHandler(
         orderId: order.id,
         amount: order.amount,
         currency: order.currency,
-        keyId: getRazorpayKeyId(mode),
+        keyId: getRazorpayKeyId(),
         packId: pack.id,
         credits: pack.credits,
         priceInr: pack.priceInr,
-        mode,
       },
     });
   },
@@ -145,7 +136,6 @@ export const verifyAiTopUpSchema = z.object({
     razorpay_order_id: z.string().min(1),
     razorpay_payment_id: z.string().min(1),
     razorpay_signature: z.string().min(1),
-    mode: z.enum(['test', 'live']).optional(),
   }),
 });
 
@@ -166,20 +156,16 @@ export const verifyAiTopUpPayment = asyncHandler(
       razorpay_order_id,
       razorpay_payment_id,
       razorpay_signature,
-      mode: requestedMode,
     } = req.body as {
       razorpay_order_id: string;
       razorpay_payment_id: string;
       razorpay_signature: string;
-      mode?: RazorpayMode;
     };
 
-    const mode = resolveRazorpayMode(requestedMode);
     const ok = verifyPaymentSignature({
       orderId: razorpay_order_id,
       paymentId: razorpay_payment_id,
       signature: razorpay_signature,
-      mode,
     });
     if (!ok) {
       logger.warn(
@@ -188,7 +174,7 @@ export const verifyAiTopUpPayment = asyncHandler(
       throw ApiError.badRequest('Payment signature verification failed');
     }
 
-    const order = await fetchRazorpayOrder(razorpay_order_id, mode);
+    const order = await fetchRazorpayOrder(razorpay_order_id);
     const notes = order.notes ?? {};
     if (notes.kind !== 'ai_topup') {
       throw ApiError.badRequest('Order is not an AI top-up');
@@ -231,7 +217,7 @@ export const verifyAiTopUpPayment = asyncHandler(
         amountInr: pack.priceInr,
         paymentId: razorpay_payment_id,
         orderId: razorpay_order_id,
-        mode,
+        mode: currentRuntimeMode(),
       });
       granted = true;
     } catch (err) {

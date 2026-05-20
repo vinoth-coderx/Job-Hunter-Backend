@@ -60,10 +60,7 @@ export const syncProviderToAppConfig = async (
       key: configKey,
       category: 'ai',
       isSecret: true,
-      // AI keys are mode-agnostic — the same Gemini/Anthropic/Groq
-      // account serves both Test and Live. Park in the legacy slot so
-      // it's picked up regardless of the active runtime mode.
-      legacyValue: plain,
+      value: plain,
       notes: `Synced from AiKey "${winner.label}" (auto-managed; edit via /ai page)`,
     });
   } catch (err) {

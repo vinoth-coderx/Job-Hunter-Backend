@@ -6,11 +6,8 @@ import { ApiError } from '../utils/ApiError';
 import {
   deleteAppConfig,
   getAppConfig,
-  getRuntimeMode,
   listAppConfig,
   setAppConfig,
-  setRuntimeMode,
-  type RuntimeMode,
 } from '../services/config/config.service';
 import { CONFIG_REGISTRY } from '../services/config/configRegistry';
 import { AppConfig, type AppConfigCategory } from '../models/AppConfig';
@@ -48,11 +45,11 @@ const MANAGED_KEYS: Record<string, { surface: string; href: string }> = {
 };
 
 /**
- * Map the service's AppConfigSummary onto the shape the admin app
- * expects. The admin UI never sees plaintext for secrets — for each
- * slot (Test / Live / Legacy) the UI gets a `hasXValue` flag plus a
- * masked preview suitable for an "info" hint. Non-secret slots surface
- * the full value so the operator can confirm what's stored.
+ * Map the service's AppConfigSummary onto the shape the admin UI
+ * expects. Plaintext for non-secret rows; masked preview only for
+ * secrets. The mode is already encoded by the request — each admin
+ * request hits one mode's DB, so the returned rows are scoped to that
+ * mode automatically.
  */
 const toEntry = (
   row: Awaited<ReturnType<typeof listAppConfig>>[number],
@@ -61,15 +58,8 @@ const toEntry = (
   key: row.key,
   category: row.category,
   isSecret: row.isSecret,
-  hasTestValue: row.hasTestValue,
-  hasLiveValue: row.hasLiveValue,
-  hasLegacyValue: row.hasLegacyValue,
-  testValue: row.isSecret ? undefined : row.testPreview ?? undefined,
-  liveValue: row.isSecret ? undefined : row.livePreview ?? undefined,
-  legacyValue: row.isSecret ? undefined : row.legacyPreview ?? undefined,
-  testPreview: row.testPreview,
-  livePreview: row.livePreview,
-  legacyPreview: row.legacyPreview,
+  value: row.isSecret ? undefined : row.preview ?? undefined,
+  hasValue: row.hasValue,
   notes: row.notes,
   updatedAt: (row.updatedAt ?? updatedAtFallback ?? new Date()).toISOString(),
   managedBy: MANAGED_KEYS[row.key],
@@ -82,24 +72,9 @@ export const listConfig = asyncHandler(
   },
 );
 
-/**
- * Pull a per-slot value from the request body. Accepts:
- *   - `undefined` → slot untouched
- *   - `''`        → slot cleared
- *   - non-empty string → slot written
- * Rejects anything else (numbers, objects, …).
- */
-const readSlot = (raw: unknown, slotName: string): string | undefined => {
-  if (raw === undefined) return undefined;
-  if (typeof raw !== 'string') {
-    throw ApiError.badRequest(`${slotName} must be a string when provided`);
-  }
-  return raw;
-};
-
 export const upsertConfig = asyncHandler(
   async (req: AuthRequest, res: Response) => {
-    const { key, category, isSecret, notes } = req.body ?? {};
+    const { key, category, isSecret, value, notes } = req.body ?? {};
 
     if (typeof key !== 'string' || !KEY_REGEX.test(key)) {
       throw ApiError.badRequest(
@@ -115,43 +90,27 @@ export const upsertConfig = asyncHandler(
       throw ApiError.badRequest('isSecret must be a boolean');
     }
 
-    const testValue = readSlot(req.body?.testValue, 'testValue');
-    const liveValue = readSlot(req.body?.liveValue, 'liveValue');
-    const legacyValue = readSlot(req.body?.legacyValue, 'legacyValue');
-
     const existing = await AppConfig.findOne({ key }).lean();
 
-    // New entry: at least one slot must have a value. For mode-aware
-    // secrets the operator typically fills Live first; mode-agnostic
-    // keys (RUNTIME_MODE, CRON_ENABLED, …) write to legacyValue.
     if (!existing) {
-      const provided = [testValue, liveValue, legacyValue].filter(
-        (v) => typeof v === 'string' && v.length > 0,
-      );
-      if (provided.length === 0) {
-        throw ApiError.badRequest(
-          'At least one of testValue / liveValue / legacyValue is required for new entries.',
-        );
+      if (typeof value !== 'string' || value.length === 0) {
+        throw ApiError.badRequest('Value is required for new config entries.');
       }
     }
 
-    const hasAnySlotUpdate =
-      testValue !== undefined || liveValue !== undefined || legacyValue !== undefined;
+    const wantsValueWrite = typeof value === 'string' && value.length > 0;
 
-    if (hasAnySlotUpdate) {
+    if (wantsValueWrite || (!isSecret && existing)) {
       await setAppConfig({
         key,
         category,
         isSecret,
-        testValue,
-        liveValue,
-        legacyValue,
+        value: value ?? '',
         notes: typeof notes === 'string' ? notes : undefined,
         updatedBy: req.user?.id,
       });
     } else {
-      // Metadata-only edit (category/notes/isSecret flag). Update Mongo
-      // directly so the encrypted slots aren't rewritten.
+      // Metadata-only edit (category/notes/isSecret flag).
       await AppConfig.updateOne(
         { key },
         {
@@ -171,51 +130,6 @@ export const upsertConfig = asyncHandler(
     res.json(toEntry(saved));
   },
 );
-
-/**
- * Read the active runtime mode. The admin UI uses this to render the
- * "🧪 Test ↔ 🚀 Live" toggle in its current position.
- */
-export const getMode = asyncHandler(async (_req: AuthRequest, res: Response) => {
-  res.json({ mode: getRuntimeMode() });
-});
-
-/**
- * Flip the active runtime mode. Writes `secrets/.runtime-mode`,
- * responds to the caller, then schedules `process.exit(0)` so the
- * process manager (nodemon in dev, Render auto-deploy in prod, pm2,
- * docker `restart: always`, …) restarts the backend with the new mode.
- *
- * A restart is mandatory because both Mongo and Redis connections are
- * bound at boot (Mongoose models, the singleton ioredis client, and
- * ~25 importers of that client). Swapping them in-flight is
- * intrusive enough that an explicit ~5s downtime is the safer trade.
- *
- * Caveat: each side's session store is in the side's Mongo, so the
- * admin's own JWT will look up a user that doesn't exist in the new
- * DB until the cross-DB admin seed has been run. The UI handles this
- * by redirecting to /login on flip completion.
- */
-export const setMode = asyncHandler(async (req: AuthRequest, res: Response) => {
-  const raw = req.body?.mode;
-  if (raw !== 'test' && raw !== 'live') {
-    throw ApiError.badRequest("mode must be 'test' or 'live'");
-  }
-  const mode = raw as RuntimeMode;
-  if (mode === getRuntimeMode()) {
-    res.json({ mode, at: new Date().toISOString(), restarting: false });
-    return;
-  }
-  setRuntimeMode(mode);
-  logger.info(`Runtime mode flipped → ${mode} by ${req.user?.id ?? 'unknown'} — scheduling process restart`);
-  res.json({ mode, at: new Date().toISOString(), restarting: true });
-  // Give the response a moment to flush before tearing the process
-  // down. The process manager (nodemon / pm2 / Render) restarts us.
-  setTimeout(() => {
-    logger.warn('Exiting process for runtime-mode restart');
-    process.exit(0);
-  }, 500);
-});
 
 export const removeConfig = asyncHandler(
   async (req: AuthRequest, res: Response) => {
@@ -328,10 +242,8 @@ const PROBES: Record<string, () => Promise<ProbeResult>> = {
   CLOUDINARY_API_SECRET: async () => probeCloudinary(),
 
   // ── Razorpay: orders.list with count=1 (read-only) ──────────────────
-  RAZORPAY_KEY_ID: async () => probeRazorpay('live'),
-  RAZORPAY_KEY_SECRET: async () => probeRazorpay('live'),
-  RAZORPAY_TEST_KEY_ID: async () => probeRazorpay('test'),
-  RAZORPAY_TEST_KEY_SECRET: async () => probeRazorpay('test'),
+  RAZORPAY_KEY_ID: async () => probeRazorpay(),
+  RAZORPAY_KEY_SECRET: async () => probeRazorpay(),
 
   // ── SMTP: nodemailer verify ─────────────────────────────────────────
   SMTP_USER: async () => probeSmtp(),
@@ -396,13 +308,11 @@ const probeCloudinary = async (): Promise<ProbeResult> => {
     : { ok: false, detail: `cloudinary returned ${r.status}` };
 };
 
-const probeRazorpay = async (mode: 'live' | 'test'): Promise<ProbeResult> => {
-  const id = getAppConfig(mode === 'live' ? 'RAZORPAY_KEY_ID' : 'RAZORPAY_TEST_KEY_ID');
-  const secret = getAppConfig(
-    mode === 'live' ? 'RAZORPAY_KEY_SECRET' : 'RAZORPAY_TEST_KEY_SECRET',
-  );
+const probeRazorpay = async (): Promise<ProbeResult> => {
+  const id = getAppConfig('RAZORPAY_KEY_ID');
+  const secret = getAppConfig('RAZORPAY_KEY_SECRET');
   if (!id || !secret) {
-    return { ok: false, detail: `Razorpay ${mode} credentials incomplete` };
+    return { ok: false, detail: 'Razorpay credentials incomplete' };
   }
   const r = await axios.get('https://api.razorpay.com/v1/orders', {
     params: { count: 1 },
@@ -411,8 +321,8 @@ const probeRazorpay = async (mode: 'live' | 'test'): Promise<ProbeResult> => {
     validateStatus: () => true,
   });
   return r.status === 200
-    ? { ok: true, detail: `razorpay ${mode} auth ok` }
-    : { ok: false, detail: `razorpay ${mode} returned ${r.status}` };
+    ? { ok: true, detail: 'razorpay auth ok' }
+    : { ok: false, detail: `razorpay returned ${r.status}` };
 };
 
 const probeSmtp = async (): Promise<ProbeResult> => {
@@ -455,17 +365,11 @@ export const probeConfig = asyncHandler(
     const all = await listAppConfig();
     const row = all.find((r) => r.key === key);
     if (!row) throw ApiError.notFound(`Config "${key}" not found`);
-    // Probes use `getAppConfig` which respects the active runtime mode —
-    // so "value present" means *the active-mode side* is populated (or
-    // the legacy slot, which still backstops mode-agnostic keys).
-    const activeHasValue =
-      row.hasLegacyValue ||
-      (getRuntimeMode() === 'live' ? row.hasLiveValue : row.hasTestValue);
-    if (!activeHasValue) {
+    if (!row.hasValue) {
       res.json({
         ok: false,
         latencyMs: Date.now() - start,
-        detail: `No value stored for the active runtime mode (${getRuntimeMode()})`,
+        detail: 'No value stored',
       });
       return;
     }

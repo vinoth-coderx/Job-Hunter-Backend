@@ -8,8 +8,6 @@ import {
   removeConfig,
   probeConfig,
   listConfigRegistry,
-  getMode,
-  setMode,
 } from '../controllers/adminConfig.controller';
 
 import {
@@ -112,6 +110,9 @@ import { validate } from '../middleware/validate';
 
 const router = Router();
 
+// X-Runtime-Mode is read globally in app.ts so the auth lookup itself
+// already runs against the correct cluster.
+
 // Every endpoint requires a signed-in admin. authenticate populates
 // req.user; requireAdmin verifies isAdmin from the freshest User doc.
 router.use(authenticate, requireAdmin);
@@ -128,8 +129,6 @@ router.post('/users/:id/unban', unbanUser);
 // --- App Config -----------------------------------------------------------
 router.get('/config', listConfig);
 router.get('/config/registry', listConfigRegistry);
-router.get('/config/mode', getMode);
-router.put('/config/mode', setMode);
 router.put('/config', upsertConfig);
 router.delete('/config/:key', removeConfig);
 router.get('/config/:key/probe', probeConfig);

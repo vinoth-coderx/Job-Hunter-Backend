@@ -1,18 +1,31 @@
 "use strict";
-var __importDefault = (this && this.__importDefault) || function (mod) {
-    return (mod && mod.__esModule) ? mod : { "default": mod };
-};
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.matchJobsForUser = exports.aiMatch = exports.heuristicMatch = void 0;
-const sdk_1 = __importDefault(require("@anthropic-ai/sdk"));
-const env_1 = require("../../config/env");
+exports.matchJobsForUser = exports.aiMatch = exports.heuristicMatch = exports.toMatchable = void 0;
 const constants_1 = require("../../config/constants");
 const logger_1 = require("../../utils/logger");
 const redis_1 = require("../../config/redis");
-const client = env_1.env.ANTHROPIC_API_KEY
-    ? new sdk_1.default({ apiKey: env_1.env.ANTHROPIC_API_KEY })
-    : null;
-const MODEL = 'claude-haiku-4-5-20251001';
+const providers_1 = require("./providers");
+const completeness_service_1 = require("../profile/completeness.service");
+const toMatchable = (j) => ({
+    id: j._id.toString(),
+    title: j.title,
+    company: j.company,
+    description: j.description,
+    location: j.location,
+    skills: j.skills,
+    remoteType: j.remoteType,
+    jobType: j.jobType,
+    experienceMinYears: j.experienceMinYears,
+    experienceMaxYears: j.experienceMaxYears,
+    salaryMin: j.salaryMin,
+    salaryMax: j.salaryMax,
+});
+exports.toMatchable = toMatchable;
+const blendWithCompleteness = (rawScore, user) => {
+    const completeness = (0, completeness_service_1.completenessFromUser)(user);
+    const factor = 0.6 + 0.4 * (completeness / 100);
+    return Math.max(0, Math.min(100, Math.round(rawScore * factor)));
+};
 const cacheKey = (userId, jobId) => `match:${userId}:${jobId}`;
 const heuristicMatch = (user, job) => {
     const userSkills = (user.profile.skills || []).map((s) => s.toLowerCase());
@@ -49,7 +62,8 @@ const heuristicMatch = (user, job) => {
         }
     }
     const userLocs = (user.profile.preferredLocations || []).map((l) => l.toLowerCase());
-    if (userLocs.some((l) => job.location.toLowerCase().includes(l) || (l === 'remote' && job.remoteType === 'remote'))) {
+    if (userLocs.some((l) => job.location.toLowerCase().includes(l) ||
+        (l === 'remote' && job.remoteType === 'remote'))) {
         score += 10;
     }
     const expected = user.profile.expectedSalaryMin;
@@ -66,28 +80,30 @@ const heuristicMatch = (user, job) => {
         }
     }
     if (user.profile.preferredJobTypes?.length &&
+        job.jobType &&
         user.profile.preferredJobTypes.includes(job.jobType)) {
         score += 3;
     }
     if (user.profile.preferredRemote?.length &&
+        job.remoteType &&
         user.profile.preferredRemote.includes(job.remoteType)) {
         score += 2;
     }
     return {
-        jobId: job._id.toString(),
-        score: Math.min(100, Math.round(score)),
+        jobId: job.id,
+        score: blendWithCompleteness(score, user),
         matchedSkills: matched,
         missingSkills: missing.slice(0, 5),
     };
 };
 exports.heuristicMatch = heuristicMatch;
 const aiMatch = async (user, job) => {
-    const cached = await redis_1.redis.get(cacheKey(user._id.toString(), job._id.toString()));
+    const cached = await redis_1.redis.get(cacheKey(user._id.toString(), job.id));
     if (cached)
         return JSON.parse(cached);
-    if (!client) {
+    if (!(0, providers_1.isAiEnabled)()) {
         const heuristic = (0, exports.heuristicMatch)(user, job);
-        await redis_1.redis.setex(cacheKey(user._id.toString(), job._id.toString()), 86400, JSON.stringify(heuristic));
+        await redis_1.redis.setex(cacheKey(user._id.toString(), job.id), 86400, JSON.stringify(heuristic));
         return heuristic;
     }
     try {
@@ -109,20 +125,10 @@ Job Type: ${job.jobType}
 Required Skills: ${(job.skills || []).join(', ')}
 Description: ${job.description.slice(0, 2000)}
 `.trim();
-        const response = await client.beta.messages.create({
-            model: MODEL,
-            max_tokens: 400,
-            system: [
-                {
-                    type: 'text',
-                    text: 'You are a career matching expert. Score how well a candidate matches a job from 0-100 based on skills, experience, role fit, and location. Return strict JSON only.',
-                    cache_control: { type: 'ephemeral' },
-                },
-            ],
-            messages: [
-                {
-                    role: 'user',
-                    content: `Score the candidate-job match.
+        const parsed = await (0, providers_1.generateJson)({
+            tier: 'lite',
+            system: 'You are a career matching expert. Score how well a candidate matches a job from 0-100 based on skills, experience, role fit, and location. Return strict JSON only.',
+            user: `Score the candidate-job match.
 
 CANDIDATE PROFILE:
 ${profileText}
@@ -132,23 +138,20 @@ ${jobText}
 
 Return JSON only with this exact shape:
 {"score": <0-100>, "reasoning": "<one short sentence>", "matchedSkills": ["..."], "missingSkills": ["..."]}`,
-                },
-            ],
+            maxTokens: 400,
+            temperature: 0.2,
         });
-        const block = response.content[0];
-        const text = block.type === 'text' ? block.text : '';
-        const jsonMatch = text.match(/\{[\s\S]*\}/);
-        if (!jsonMatch)
+        if (!parsed)
             throw new Error('No JSON in response');
-        const parsed = JSON.parse(jsonMatch[0]);
+        const rawScore = Math.max(0, Math.min(100, Math.round(parsed.score)));
         const result = {
-            jobId: job._id.toString(),
-            score: Math.max(0, Math.min(100, Math.round(parsed.score))),
+            jobId: job.id,
+            score: blendWithCompleteness(rawScore, user),
             reasoning: parsed.reasoning,
             matchedSkills: parsed.matchedSkills || [],
             missingSkills: parsed.missingSkills || [],
         };
-        await redis_1.redis.setex(cacheKey(user._id.toString(), job._id.toString()), 86400, JSON.stringify(result));
+        await redis_1.redis.setex(cacheKey(user._id.toString(), job.id), 86400, JSON.stringify(result));
         return result;
     }
     catch (err) {
@@ -158,7 +161,9 @@ Return JSON only with this exact shape:
 };
 exports.aiMatch = aiMatch;
 const matchJobsForUser = async (user, jobs, threshold = constants_1.AI_MATCH_THRESHOLD, useAi = false) => {
-    const matcher = useAi && client ? exports.aiMatch : async (u, j) => (0, exports.heuristicMatch)(u, j);
+    const matcher = useAi && (0, providers_1.isAiEnabled)()
+        ? exports.aiMatch
+        : async (u, j) => (0, exports.heuristicMatch)(u, j);
     const matched = [];
     const concurrency = useAi ? 5 : 50;
     for (let i = 0; i < jobs.length; i += concurrency) {

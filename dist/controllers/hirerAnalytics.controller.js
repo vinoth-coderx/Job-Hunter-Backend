@@ -1,11 +1,15 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.getHirerAnalytics = void 0;
+exports.getHirerAttentionEndpoint = exports.getHirerDigestEndpoint = exports.getHirerAnalytics = void 0;
 const HirerProfile_1 = require("../models/HirerProfile");
 const Job_1 = require("../models/Job");
 const AppliedJob_1 = require("../models/AppliedJob");
 const asyncHandler_1 = require("../utils/asyncHandler");
 const ApiError_1 = require("../utils/ApiError");
+const hirerDigest_service_1 = require("../services/ai/hirerDigest.service");
+const quota_service_1 = require("../services/ai/quota.service");
+const aiCreditWeights_1 = require("../config/aiCreditWeights");
+const attention_service_1 = require("../services/hirer/attention.service");
 const requireHirerProfile = async (userId) => {
     const profile = await HirerProfile_1.HirerProfile.findOne({ user: userId });
     if (!profile)
@@ -137,4 +141,46 @@ exports.getHirerAnalytics = (0, asyncHandler_1.asyncHandler)(async (req, res) =>
             daily30,
         },
     });
+});
+exports.getHirerDigestEndpoint = (0, asyncHandler_1.asyncHandler)(async (req, res) => {
+    if (!req.user)
+        throw ApiError_1.ApiError.unauthorized();
+    const userId = String(req.user._id);
+    const profile = await requireHirerProfile(req.user.id);
+    const cached = await (0, hirerDigest_service_1.peekCachedDigest)(profile._id.toString());
+    let quota = await (0, quota_service_1.getQuotaSnapshot)(userId);
+    if (cached) {
+        res.json({
+            success: true,
+            data: { ...cached, cached: true },
+            quota,
+        });
+        return;
+    }
+    const weight = (0, aiCreditWeights_1.getCreditWeight)('hirer_digest');
+    if (weight > 0)
+        quota = await (0, quota_service_1.enforceQuota)(userId, weight);
+    let result;
+    try {
+        result = await (0, hirerDigest_service_1.generateHirerDigest)({
+            hirerProfileId: profile._id,
+            userId,
+        });
+    }
+    catch (err) {
+        if (weight > 0)
+            await (0, quota_service_1.refundQuota)(userId, weight);
+        throw err;
+    }
+    if (weight > 0 && !result.usedAi) {
+        await (0, quota_service_1.refundQuota)(userId, weight);
+    }
+    res.json({ success: true, data: result, quota });
+});
+exports.getHirerAttentionEndpoint = (0, asyncHandler_1.asyncHandler)(async (req, res) => {
+    if (!req.user)
+        throw ApiError_1.ApiError.unauthorized();
+    const profile = await requireHirerProfile(req.user.id);
+    const data = await (0, attention_service_1.buildHirerAttention)(profile._id);
+    res.json({ success: true, data });
 });

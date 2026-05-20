@@ -60,7 +60,7 @@ const statusHistorySchema = new mongoose_1.Schema({
 }, { _id: false });
 const appliedJobSchema = new mongoose_1.Schema({
     user: { type: mongoose_1.Schema.Types.ObjectId, ref: 'User', required: true, index: true },
-    job: { type: mongoose_1.Schema.Types.ObjectId, ref: 'Job', required: true, index: true },
+    job: { type: mongoose_1.Schema.Types.ObjectId, ref: 'Job', index: true, sparse: true },
     hirerProfile: {
         type: mongoose_1.Schema.Types.ObjectId,
         ref: 'HirerProfile',
@@ -72,6 +72,17 @@ const appliedJobSchema = new mongoose_1.Schema({
         company: { type: String, required: true },
         location: { type: String, required: true },
         url: { type: String, required: true },
+        description: String,
+        salaryMin: Number,
+        salaryMax: Number,
+        currency: String,
+        jobType: String,
+        remoteType: String,
+        skills: { type: [String], default: undefined },
+        companyLogo: String,
+        postedAt: Date,
+        source: { type: String, required: true, default: 'native' },
+        externalId: String,
     },
     applyType: {
         type: String,
@@ -103,13 +114,25 @@ const appliedJobSchema = new mongoose_1.Schema({
     },
     statusHistory: { type: [statusHistorySchema], default: [] },
     matchScore: { type: Number, min: 0, max: 100 },
+    aiRanking: {
+        type: new mongoose_1.Schema({
+            score: { type: Number, min: 0, max: 100, required: true },
+            rank: { type: Number, min: 0, required: true },
+            summary: { type: String, default: '', maxlength: 500 },
+            strengths: { type: [String], default: [] },
+            concerns: { type: [String], default: [] },
+            rankedAt: { type: Date, default: Date.now },
+        }, { _id: false }),
+        required: false,
+    },
     appliedAt: { type: Date, default: Date.now, index: true },
     notes: { type: String, maxlength: 2000 },
     hirerNotes: { type: String, maxlength: 4000 },
     rejectionReason: { type: String, maxlength: 1000 },
     followUpDate: Date,
 }, { timestamps: true });
-appliedJobSchema.index({ user: 1, job: 1 }, { unique: true });
+appliedJobSchema.index({ user: 1, job: 1 }, { unique: true, partialFilterExpression: { job: { $exists: true } } });
+appliedJobSchema.index({ user: 1, 'jobSnapshot.source': 1, 'jobSnapshot.externalId': 1 }, { unique: true, partialFilterExpression: { 'jobSnapshot.externalId': { $exists: true } } });
 appliedJobSchema.index({ user: 1, status: 1, appliedAt: -1 });
 appliedJobSchema.index({ hirerProfile: 1, status: 1, appliedAt: -1 });
 appliedJobSchema.index({ job: 1, status: 1, appliedAt: -1 });

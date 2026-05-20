@@ -6,28 +6,41 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.SerpApiScraper = void 0;
 const axios_1 = __importDefault(require("axios"));
 const base_1 = require("./base");
-const env_1 = require("../../config/env");
+const config_service_1 = require("../config/config.service");
 const constants_1 = require("../../config/constants");
 class SerpApiScraper extends base_1.BaseScraper {
     source = 'serpapi';
     baseUrl = 'https://serpapi.com/search.json';
+    mapDatePosted(days) {
+        if (days <= 1)
+            return 'today';
+        if (days <= 3)
+            return '3days';
+        if (days <= 7)
+            return 'week';
+        return 'month';
+    }
     async fetch(query, location = '') {
-        if (!env_1.env.SERPAPI_KEY)
+        const apiKey = (0, config_service_1.getAppConfig)('SERPAPI_KEY');
+        if (this.needsKey(apiKey, 'SERPAPI_KEY'))
             return [];
         if (await this.isCooldown())
             return [];
+        const days = this.freshnessDays();
+        const datePosted = this.mapDatePosted(days);
         try {
             const { data } = await axios_1.default.get(this.baseUrl, {
                 params: {
                     engine: 'google_jobs',
                     q: location ? `${query} ${location}` : query,
-                    api_key: env_1.env.SERPAPI_KEY,
-                    chips: 'date_posted:week',
+                    api_key: apiKey,
+                    chips: `date_posted:${datePosted}`,
                     hl: 'en',
                 },
                 timeout: constants_1.SCRAPER_TIMEOUT_MS,
             });
             const results = data.jobs_results || [];
+            const rawCount = results.length;
             const jobs = results
                 .map((j, idx) => {
                 const postedAt = this.parsePostedAt(j.detected_extensions?.posted_at);
@@ -51,7 +64,8 @@ class SerpApiScraper extends base_1.BaseScraper {
                 };
             })
                 .filter((j) => this.isWithinFreshness(j.postedAt));
-            this.log(`Fetched ${jobs.length} fresh jobs for "${query}"`);
+            this.log(`Fetched ${jobs.length} fresh jobs for "${query}" (${datePosted}/${days}d; raw=${rawCount})`);
+            this.noteOk(jobs.length);
             return jobs;
         }
         catch (err) {

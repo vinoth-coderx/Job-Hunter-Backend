@@ -1,6 +1,6 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.razorpayWebhook = exports.razorpayVerifyPayment = exports.razorpayCreateOrder = exports.verifyRazorpayPaymentSchema = exports.createRazorpayOrderSchema = exports.subscriptionHistory = exports.cancelSubscription = exports.subscribe = exports.currentSubscription = exports.listPlans = exports.subscribeSchema = void 0;
+exports.razorpayWebhook = exports.razorpayVerifyPayment = exports.razorpayCreateOrder = exports.verifyRazorpayPaymentSchema = exports.createRazorpayOrderSchema = exports.subscriptionHistory = exports.cancelSubscription = exports.subscribe = exports.currentSubscription = exports.redeemWithCoins = exports.redeemWithCoinsSchema = exports.listPlans = exports.subscribeSchema = void 0;
 const zod_1 = require("zod");
 const Subscription_1 = require("../models/Subscription");
 const User_1 = require("../models/User");
@@ -8,11 +8,14 @@ const WebhookEvent_1 = require("../models/WebhookEvent");
 const asyncHandler_1 = require("../utils/asyncHandler");
 const ApiError_1 = require("../utils/ApiError");
 const logger_1 = require("../utils/logger");
-const env_1 = require("../config/env");
+const config_service_1 = require("../services/config/config.service");
 const razorpay_service_1 = require("../services/razorpay.service");
+const dbConnections_1 = require("../config/dbConnections");
+const coin_service_1 = require("../services/coins/coin.service");
+const subscriptionPlans_service_1 = require("../services/subscriptionPlans.service");
 const activateSubscriptionAfterPayment = async (params) => {
     const { userId, tier, paymentId, orderId, amountPaise } = params;
-    const plan = Subscription_1.SUBSCRIPTION_PLANS[tier];
+    const plan = await (0, subscriptionPlans_service_1.getPlan)(tier);
     if (!plan || plan.priceInr <= 0) {
         throw ApiError_1.ApiError.badRequest(`Invalid paid tier: ${tier}`);
     }
@@ -64,14 +67,104 @@ const activateSubscriptionAfterPayment = async (params) => {
 };
 exports.subscribeSchema = zod_1.z.object({
     body: zod_1.z.object({
-        tier: zod_1.z.enum(['free', 'weekly', 'monthly', 'yearly']),
+        tier: zod_1.z.string().min(1).max(40),
         paymentMethod: zod_1.z.enum(['razorpay', 'stripe', 'manual']).optional(),
         paymentId: zod_1.z.string().optional(),
         orderId: zod_1.z.string().optional(),
     }),
 });
 exports.listPlans = (0, asyncHandler_1.asyncHandler)(async (_req, res) => {
-    res.json({ success: true, data: Object.values(Subscription_1.SUBSCRIPTION_PLANS) });
+    const plans = await (0, subscriptionPlans_service_1.getActivePlans)();
+    res.json({ success: true, data: plans });
+});
+exports.redeemWithCoinsSchema = zod_1.z.object({
+    body: zod_1.z.object({
+        tier: zod_1.z.string().min(1).max(40),
+    }),
+});
+const todayKey = () => {
+    const d = new Date();
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+};
+exports.redeemWithCoins = (0, asyncHandler_1.asyncHandler)(async (req, res) => {
+    if (!req.user)
+        throw ApiError_1.ApiError.unauthorized();
+    const { tier } = req.body;
+    const plan = await (0, subscriptionPlans_service_1.getPlan)(tier);
+    if (!plan)
+        throw ApiError_1.ApiError.badRequest('Invalid subscription tier');
+    const cost = plan.coinCost ?? 0;
+    if (!cost || cost <= 0) {
+        throw ApiError_1.ApiError.badRequest(`Tier '${tier}' is not redeemable with coins`);
+    }
+    const currentBalance = await (0, coin_service_1.getBalance)(req.user.id);
+    if (currentBalance < cost) {
+        throw ApiError_1.ApiError.badRequest(`Not enough coins. Need ${cost}, you have ${currentBalance}.`);
+    }
+    const idempotencyKey = `plan_redeem:${tier}:${todayKey()}`;
+    const deduction = await (0, coin_service_1.grantCoins)({
+        user: req.user.id,
+        amount: -cost,
+        source: 'plan_redeem',
+        idempotencyKey,
+        meta: { tier },
+    });
+    if (!deduction.granted) {
+        if (deduction.reason === 'duplicate') {
+            throw ApiError_1.ApiError.conflict(`This plan was already redeemed today. Try again tomorrow.`);
+        }
+        if (deduction.reason === 'invalid_amount') {
+            throw ApiError_1.ApiError.badRequest(`Not enough coins. Have ${deduction.balance}, need ${cost}.`);
+        }
+        throw ApiError_1.ApiError.internal('Could not deduct coins');
+    }
+    try {
+        const startDate = new Date();
+        const endDate = new Date(startDate.getTime() + plan.durationDays * 24 * 60 * 60 * 1000);
+        await Subscription_1.Subscription.updateMany({ user: req.user._id, status: 'active' }, { $set: { status: 'cancelled', cancelledAt: new Date() } });
+        const sub = await Subscription_1.Subscription.create({
+            user: req.user._id,
+            tier,
+            status: 'active',
+            startDate,
+            endDate,
+            amountPaid: 0,
+            currency: 'INR',
+            paymentMethod: 'coins',
+            paymentId: `coins:${cost}:${idempotencyKey}`,
+            autoRenew: false,
+        });
+        await User_1.User.findByIdAndUpdate(req.user._id, {
+            $set: {
+                'subscription.tier': tier,
+                'subscription.status': 'active',
+                'subscription.startDate': startDate,
+                'subscription.endDate': endDate,
+                'subscription.paymentId': sub.paymentId,
+            },
+        });
+        logger_1.logger.info(`Coin redemption: user=${req.user.id} tier=${tier} cost=${cost}`);
+        res.status(201).json({
+            success: true,
+            message: 'Plan activated with coins',
+            data: sub,
+            coinsSpent: cost,
+            coinsBalance: deduction.balance,
+        });
+    }
+    catch (err) {
+        logger_1.logger.error(`Coin redemption rollback for user=${req.user.id}: ${err instanceof Error ? err.message : err}`);
+        await (0, coin_service_1.grantCoins)({
+            user: req.user.id,
+            amount: cost,
+            source: 'admin_adjust',
+            idempotencyKey: `${idempotencyKey}:refund`,
+            meta: { reason: 'subscription_activation_failed', tier },
+        }).catch((refundErr) => {
+            logger_1.logger.error('Refund failed — manual intervention needed', refundErr);
+        });
+        throw err;
+    }
 });
 exports.currentSubscription = (0, asyncHandler_1.asyncHandler)(async (req, res) => {
     if (!req.user)
@@ -82,13 +175,14 @@ exports.currentSubscription = (0, asyncHandler_1.asyncHandler)(async (req, res) 
         endDate: { $gt: new Date() },
     }).sort({ endDate: -1 });
     const user = await User_1.User.findById(req.user._id);
+    const tier = user?.subscription.tier || 'free';
     res.json({
         success: true,
         data: {
-            tier: user?.subscription.tier || 'free',
+            tier,
             status: user?.subscription.status || 'active',
             activeSubscription: active,
-            plan: Subscription_1.SUBSCRIPTION_PLANS[user?.subscription.tier || 'free'],
+            plan: await (0, subscriptionPlans_service_1.getPlan)(tier),
         },
     });
 });
@@ -96,7 +190,7 @@ exports.subscribe = (0, asyncHandler_1.asyncHandler)(async (req, res) => {
     if (!req.user)
         throw ApiError_1.ApiError.unauthorized();
     const { tier, paymentMethod, paymentId, orderId } = req.body;
-    const plan = Subscription_1.SUBSCRIPTION_PLANS[tier];
+    const plan = await (0, subscriptionPlans_service_1.getPlan)(tier);
     if (!plan)
         throw ApiError_1.ApiError.badRequest('Invalid subscription tier');
     if (tier !== 'free' && !paymentId) {
@@ -149,8 +243,7 @@ exports.subscriptionHistory = (0, asyncHandler_1.asyncHandler)(async (req, res) 
 });
 exports.createRazorpayOrderSchema = zod_1.z.object({
     body: zod_1.z.object({
-        tier: zod_1.z.enum(['weekly', 'monthly', 'yearly']),
-        mode: zod_1.z.enum(['test', 'live']).optional(),
+        tier: zod_1.z.string().min(1).max(40),
     }),
 });
 exports.verifyRazorpayPaymentSchema = zod_1.z.object({
@@ -158,17 +251,16 @@ exports.verifyRazorpayPaymentSchema = zod_1.z.object({
         razorpay_order_id: zod_1.z.string().min(1),
         razorpay_payment_id: zod_1.z.string().min(1),
         razorpay_signature: zod_1.z.string().min(1),
-        mode: zod_1.z.enum(['test', 'live']).optional(),
     }),
 });
 exports.razorpayCreateOrder = (0, asyncHandler_1.asyncHandler)(async (req, res) => {
     if (!req.user)
         throw ApiError_1.ApiError.unauthorized();
-    const { tier, mode: requestedMode } = req.body;
-    const plan = Subscription_1.SUBSCRIPTION_PLANS[tier];
-    if (!plan || plan.priceInr <= 0)
+    const { tier } = req.body;
+    const plan = await (0, subscriptionPlans_service_1.getPlan)(tier);
+    if (!plan || !plan.isActive || plan.priceInr <= 0) {
         throw ApiError_1.ApiError.badRequest('Invalid paid tier');
-    const mode = (0, razorpay_service_1.resolveRazorpayMode)(requestedMode);
+    }
     const order = await (0, razorpay_service_1.createRazorpayOrder)({
         amountPaise: plan.priceInr * 100,
         currency: 'INR',
@@ -176,9 +268,7 @@ exports.razorpayCreateOrder = (0, asyncHandler_1.asyncHandler)(async (req, res) 
         notes: {
             userId: req.user.id,
             tier,
-            mode,
         },
-        mode,
     });
     res.status(201).json({
         success: true,
@@ -186,29 +276,26 @@ exports.razorpayCreateOrder = (0, asyncHandler_1.asyncHandler)(async (req, res) 
             orderId: order.id,
             amount: order.amount,
             currency: order.currency,
-            keyId: (0, razorpay_service_1.getRazorpayKeyId)(mode),
+            keyId: (0, razorpay_service_1.getRazorpayKeyId)(),
             tier,
             planName: plan.name,
-            mode,
         },
     });
 });
 exports.razorpayVerifyPayment = (0, asyncHandler_1.asyncHandler)(async (req, res) => {
     if (!req.user)
         throw ApiError_1.ApiError.unauthorized();
-    const { razorpay_order_id, razorpay_payment_id, razorpay_signature, mode: requestedMode, } = req.body;
-    const mode = (0, razorpay_service_1.resolveRazorpayMode)(requestedMode);
+    const { razorpay_order_id, razorpay_payment_id, razorpay_signature, } = req.body;
     const ok = (0, razorpay_service_1.verifyPaymentSignature)({
         orderId: razorpay_order_id,
         paymentId: razorpay_payment_id,
         signature: razorpay_signature,
-        mode,
     });
     if (!ok) {
-        logger_1.logger.warn(`Razorpay signature mismatch for user ${req.user.id} order ${razorpay_order_id} mode=${mode}`);
+        logger_1.logger.warn(`Razorpay signature mismatch for user ${req.user.id} order ${razorpay_order_id}`);
         throw ApiError_1.ApiError.badRequest('Payment signature verification failed');
     }
-    const order = await (0, razorpay_service_1.fetchRazorpayOrder)(razorpay_order_id, mode);
+    const order = await (0, razorpay_service_1.fetchRazorpayOrder)(razorpay_order_id);
     const notes = order.notes ?? {};
     const orderUserId = notes.userId;
     const orderTier = notes.tier;
@@ -216,7 +303,7 @@ exports.razorpayVerifyPayment = (0, asyncHandler_1.asyncHandler)(async (req, res
         logger_1.logger.warn(`Order ownership mismatch: order.notes.userId=${orderUserId} req.user.id=${req.user.id}`);
         throw ApiError_1.ApiError.forbidden('Order does not belong to this user');
     }
-    if (!orderTier || !Subscription_1.SUBSCRIPTION_PLANS[orderTier]) {
+    if (!orderTier || !(await (0, subscriptionPlans_service_1.getPlan)(orderTier))) {
         throw ApiError_1.ApiError.badRequest('Order is missing a valid tier');
     }
     const sub = await activateSubscriptionAfterPayment({
@@ -229,10 +316,10 @@ exports.razorpayVerifyPayment = (0, asyncHandler_1.asyncHandler)(async (req, res
     res.status(201).json({ success: true, data: sub });
 });
 exports.razorpayWebhook = (0, asyncHandler_1.asyncHandler)(async (req, res) => {
-    const liveSecret = env_1.env.RAZORPAY_WEBHOOK_SECRET;
-    const testSecret = env_1.env.RAZORPAY_TEST_WEBHOOK_SECRET;
+    const liveSecret = await (0, dbConnections_1.runWithMode)('live', async () => (0, config_service_1.getAppConfig)('RAZORPAY_WEBHOOK_SECRET'));
+    const testSecret = await (0, dbConnections_1.runWithMode)('test', async () => (0, config_service_1.getAppConfig)('RAZORPAY_WEBHOOK_SECRET'));
     if (!liveSecret && !testSecret) {
-        logger_1.logger.error('No Razorpay webhook secrets configured (live or test); rejecting');
+        logger_1.logger.error('No Razorpay webhook secret configured in either DB; rejecting');
         throw ApiError_1.ApiError.internal('Webhook not configured');
     }
     const signature = req.headers['x-razorpay-signature'];
@@ -248,7 +335,7 @@ exports.razorpayWebhook = (0, asyncHandler_1.asyncHandler)(async (req, res) => {
         mode = 'test';
     }
     if (!mode) {
-        logger_1.logger.warn('Razorpay webhook signature mismatch (tried both live and test secrets)');
+        logger_1.logger.warn('Razorpay webhook signature mismatch (tried both live and test DB secrets)');
         throw ApiError_1.ApiError.badRequest('Invalid signature');
     }
     let payload;
@@ -283,16 +370,16 @@ exports.razorpayWebhook = (0, asyncHandler_1.asyncHandler)(async (req, res) => {
                 res.json({ success: true });
                 return;
             }
-            const order = await (0, razorpay_service_1.fetchRazorpayOrder)(payment.order_id, mode);
+            const order = await (0, dbConnections_1.runWithMode)(mode, async () => (0, razorpay_service_1.fetchRazorpayOrder)(payment.order_id));
             const notes = order.notes ?? {};
             const userId = notes.userId;
             const tier = notes.tier;
-            if (!userId || !tier || !Subscription_1.SUBSCRIPTION_PLANS[tier]) {
+            if (!userId || !tier || !(await (0, subscriptionPlans_service_1.getPlan)(tier))) {
                 logger_1.logger.warn(`Webhook ${event} for order ${payment.order_id}: missing/invalid notes (userId=${userId} tier=${tier}). Ignoring.`);
                 res.json({ success: true });
                 return;
             }
-            const fullPayment = await (0, razorpay_service_1.fetchRazorpayPayment)(payment.id, mode);
+            const fullPayment = await (0, dbConnections_1.runWithMode)(mode, async () => (0, razorpay_service_1.fetchRazorpayPayment)(payment.id));
             if (fullPayment.status !== 'captured') {
                 logger_1.logger.warn(`Webhook ${event} payment ${payment.id} status=${fullPayment.status}, not capturing yet`);
                 res.json({ success: true });

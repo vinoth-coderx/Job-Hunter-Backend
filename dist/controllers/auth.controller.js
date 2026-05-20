@@ -9,6 +9,10 @@ const crypto_1 = require("crypto");
 const asyncHandler_1 = require("../utils/asyncHandler");
 const logger_1 = require("../utils/logger");
 const crypto_2 = require("../utils/crypto");
+const session_service_1 = require("../services/security/session.service");
+const audit_service_1 = require("../services/security/audit.service");
+const UserSession_1 = require("../models/UserSession");
+const crypto_3 = require("../utils/crypto");
 const security_1 = require("../middleware/security");
 const admin_service_1 = require("../services/firebase/admin.service");
 const strongPassword = zod_1.z
@@ -60,10 +64,20 @@ exports.register = (0, asyncHandler_1.asyncHandler)(async (req, res) => {
     const tokens = (0, jwt_1.generateTokenPair)({
         userId: user._id.toString(),
         email: user.email,
-        role: user.role,
+        role: 'user',
     });
     user.refreshTokens = [tokens.refreshToken];
+    user.security.registrationIp = req.ip;
+    user.security.registrationUserAgent = req.headers['user-agent'];
     await user.save();
+    await (0, session_service_1.createSession)({ userId: user._id, refreshToken: tokens.refreshToken, req });
+    await (0, audit_service_1.writeAudit)({
+        actor: { id: user._id, email: user.email },
+        actorType: 'user',
+        category: 'auth',
+        action: 'register',
+        req,
+    });
     logger_1.logger.info(`New user registered: ${email}`);
     res.status(201).json({
         success: true,
@@ -73,7 +87,7 @@ exports.register = (0, asyncHandler_1.asyncHandler)(async (req, res) => {
                 id: user._id,
                 email: user.email,
                 fullName: user.profile.fullName,
-                role: user.role,
+                role: 'user',
                 subscription: user.subscription,
             },
             ...tokens,
@@ -106,11 +120,19 @@ exports.login = (0, asyncHandler_1.asyncHandler)(async (req, res) => {
     const tokens = (0, jwt_1.generateTokenPair)({
         userId: user._id.toString(),
         email: user.email,
-        role: user.role,
+        role: 'user',
     });
     user.refreshTokens = [...(user.refreshTokens || []).slice(-4), tokens.refreshToken];
     user.lastLogin = new Date();
     await user.save();
+    await (0, session_service_1.createSession)({ userId: user._id, refreshToken: tokens.refreshToken, req });
+    await (0, audit_service_1.writeAudit)({
+        actor: { id: user._id, email: user.email },
+        actorType: 'user',
+        category: 'auth',
+        action: 'login:password',
+        req,
+    });
     res.json({
         success: true,
         message: 'Logged in successfully',
@@ -119,7 +141,7 @@ exports.login = (0, asyncHandler_1.asyncHandler)(async (req, res) => {
                 id: user._id,
                 email: user.email,
                 fullName: user.profile.fullName,
-                role: user.role,
+                role: 'user',
                 subscription: user.subscription,
             },
             ...tokens,
@@ -140,13 +162,21 @@ exports.refreshToken = (0, asyncHandler_1.asyncHandler)(async (req, res) => {
     const tokens = (0, jwt_1.generateTokenPair)({
         userId: user._id.toString(),
         email: user.email,
-        role: user.role,
+        role: 'user',
     });
     user.refreshTokens = [
         ...user.refreshTokens.filter((t) => t !== token),
         tokens.refreshToken,
     ].slice(-5);
     await user.save();
+    const oldHash = (0, crypto_3.hash)(token);
+    const oldSession = await UserSession_1.UserSession.findOne({ refreshTokenHash: oldHash });
+    if (oldSession) {
+        oldSession.revokedAt = new Date();
+        oldSession.revokedReason = 'rotated';
+        await oldSession.save();
+    }
+    await (0, session_service_1.createSession)({ userId: user._id, refreshToken: tokens.refreshToken, req });
     res.json({ success: true, data: tokens });
 });
 exports.logout = (0, asyncHandler_1.asyncHandler)(async (req, res) => {
@@ -157,7 +187,19 @@ exports.logout = (0, asyncHandler_1.asyncHandler)(async (req, res) => {
     if (user && token) {
         user.refreshTokens = (user.refreshTokens || []).filter((t) => t !== token);
         await user.save();
+        const tokenHash = (0, crypto_3.hash)(token);
+        const session = await UserSession_1.UserSession.findOne({ refreshTokenHash: tokenHash });
+        if (session && req.user._id) {
+            await (0, session_service_1.revokeSession)(req.user._id, session._id.toString(), 'logout');
+        }
     }
+    await (0, audit_service_1.writeAudit)({
+        actor: { id: req.user._id, email: req.user.email },
+        actorType: 'user',
+        category: 'auth',
+        action: 'logout',
+        req,
+    });
     res.json({ success: true, message: 'Logged out' });
 });
 exports.me = (0, asyncHandler_1.asyncHandler)(async (req, res) => {
@@ -171,7 +213,7 @@ exports.me = (0, asyncHandler_1.asyncHandler)(async (req, res) => {
         data: {
             id: user._id,
             email: user.email,
-            role: user.role,
+            role: 'user',
             activeRole: user.activeRole,
             profile: user.profile,
             subscription: user.subscription,
@@ -241,7 +283,7 @@ exports.firebaseLogin = (0, asyncHandler_1.asyncHandler)(async (req, res) => {
     if (!admin) {
         throw ApiError_1.ApiError.internal('Firebase Auth is not configured on the server (set FIREBASE_SERVICE_ACCOUNT_PATH)');
     }
-    const { idToken, fullName, phone } = req.body;
+    const { idToken, fullName, phone, role } = req.body;
     let decoded;
     try {
         decoded = await admin.auth().verifyIdToken(idToken, true);
@@ -258,11 +300,14 @@ exports.firebaseLogin = (0, asyncHandler_1.asyncHandler)(async (req, res) => {
     let user = await User_1.User.findOne({
         $or: [{ firebaseUid }, { email }],
     }).select('+refreshTokens');
+    let isNewUser = false;
+    const requestedRole = role === 'hirer' ? 'hirer' : 'seeker';
     if (!user) {
         user = await User_1.User.create({
             email,
             firebaseUid,
             authProvider: 'firebase',
+            activeRole: requestedRole,
             isEmailVerified: decoded.email_verified ?? false,
             profile: {
                 fullName: fullName?.trim() || decoded.name || email.split('@')[0],
@@ -277,7 +322,8 @@ exports.firebaseLogin = (0, asyncHandler_1.asyncHandler)(async (req, res) => {
             },
             subscription: { tier: 'free', status: 'active' },
         });
-        logger_1.logger.info(`New user via Firebase Auth: ${email}`);
+        isNewUser = true;
+        logger_1.logger.info(`New user via Firebase Auth: ${email} (activeRole=${requestedRole})`);
     }
     else if (!user.firebaseUid) {
         user.firebaseUid = firebaseUid;
@@ -293,11 +339,19 @@ exports.firebaseLogin = (0, asyncHandler_1.asyncHandler)(async (req, res) => {
     const tokens = (0, jwt_1.generateTokenPair)({
         userId: user._id.toString(),
         email: user.email,
-        role: user.role,
+        role: 'user',
     });
     user.refreshTokens = [...(user.refreshTokens || []).slice(-4), tokens.refreshToken];
     user.lastLogin = new Date();
     await user.save();
+    await (0, session_service_1.createSession)({ userId: user._id, refreshToken: tokens.refreshToken, req });
+    await (0, audit_service_1.writeAudit)({
+        actor: { id: user._id, email: user.email },
+        actorType: 'user',
+        category: 'auth',
+        action: 'login:firebase',
+        req,
+    });
     res.json({
         success: true,
         message: 'Firebase login successful',
@@ -307,9 +361,12 @@ exports.firebaseLogin = (0, asyncHandler_1.asyncHandler)(async (req, res) => {
                 email: user.email,
                 fullName: user.profile.fullName,
                 avatar: user.profile.avatar,
-                role: user.role,
+                role: 'user',
+                activeRole: user.activeRole,
                 subscription: user.subscription,
+                isEmailVerified: user.isEmailVerified,
             },
+            isNewUser,
             ...tokens,
         },
     });

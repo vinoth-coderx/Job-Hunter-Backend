@@ -91,9 +91,13 @@ const slowDownAfterFailures = async (req, _res, next) => {
     }
 };
 exports.slowDownAfterFailures = slowDownAfterFailures;
+const BODY_SCAN_BYPASS_PREFIXES = [
+    '/api/v1/admin/resume-templates',
+];
 const detectSuspiciousActivity = (req, _res, next) => {
     const ua = req.headers['user-agent'] || '';
     const url = req.originalUrl;
+    const decodedUrl = decodeURIComponent(url);
     const suspicious = [
         /\.\.\//,
         /(union\s+select|or\s+1=1|--\s|\/\*)/i,
@@ -101,7 +105,9 @@ const detectSuspiciousActivity = (req, _res, next) => {
         /(eval|exec|system)\s*\(/i,
         /\$where|\$ne|\$gt|\$regex/,
     ];
-    if (suspicious.some((re) => re.test(decodeURIComponent(url)) || re.test(JSON.stringify(req.body || {})))) {
+    const scanBody = !BODY_SCAN_BYPASS_PREFIXES.some((p) => decodedUrl.startsWith(p));
+    const body = scanBody ? JSON.stringify(req.body || {}) : '';
+    if (suspicious.some((re) => re.test(decodedUrl) || (scanBody && re.test(body)))) {
         logger_1.logger.warn(`Suspicious request blocked from ${req.ip} ua="${ua}" url="${url}"`);
         return next(ApiError_1.ApiError.badRequest('Request blocked'));
     }

@@ -1,9 +1,18 @@
+// MUST be the first import — monkey-patches mongoose.model so every
+// model file registers via multiConnModel rather than on the default
+// mongoose connection. See bootstrap/patchMongoose.ts for details.
+import './bootstrap/patchMongoose';
+
 import 'dotenv/config';
 import http from 'http';
 import { createApp } from './app';
 import { env } from './config/env';
 import { API_VERSION } from './config/constants';
-import { connectDatabase, disconnectDatabase } from './config/database';
+import {
+  connectAllDatabases,
+  disconnectAllDatabases,
+} from './config/dbConnections';
+import { bindAllRegisteredModels } from './utils/multiConnModel';
 import { connectRedis, disconnectRedis } from './config/redis';
 import { preloadAppConfig } from './services/config/config.service';
 import { syncAllProvidersToAppConfig } from './services/ai/aiKeySync.service';
@@ -37,7 +46,10 @@ let server: http.Server;
 
 const start = async (): Promise<void> => {
   try {
-    await connectDatabase();
+    await connectAllDatabases();
+    // After both clusters are open, pre-register every model on each
+    // so mongoose populate/discriminator lookups work in either mode.
+    bindAllRegisteredModels();
     await connectRedis();
     // Pull DB-backed runtime config (Cloudinary creds, Razorpay keys, …)
     // into the in-memory cache so feature services don't pay a Mongo
@@ -118,7 +130,7 @@ const shutdown = async (signal: string): Promise<void> => {
   );
 
   await disconnectRedis().catch((e) => logger.warn('Redis disconnect failed', e));
-  await disconnectDatabase().catch((e) => logger.warn('DB disconnect failed', e));
+  await disconnectAllDatabases().catch((e) => logger.warn('DB disconnect failed', e));
 
   logger.info('Shutdown complete');
   process.exit(0);

@@ -5,11 +5,13 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.stopAutoApplyCron = exports.startAutoApplyCron = exports.runAutoApplyTickNow = void 0;
 const node_cron_1 = __importDefault(require("node-cron"));
-const env_1 = require("../config/env");
+const config_service_1 = require("../services/config/config.service");
 const logger_1 = require("../utils/logger");
+const cronsEnabled = () => (0, config_service_1.getAppConfig)('CRON_ENABLED') !== 'false';
 const AutoApplySettings_1 = require("../models/AutoApplySettings");
 const User_1 = require("../models/User");
 const runner_1 = require("../services/autoApply/runner");
+const cronTracker_1 = require("../utils/cronTracker");
 let task = null;
 let isRunning = false;
 const dayKeys = [
@@ -85,14 +87,14 @@ const runAutoApplyTickNow = async () => {
 };
 exports.runAutoApplyTickNow = runAutoApplyTickNow;
 const startAutoApplyCron = () => {
-    if (!env_1.env.CRON_ENABLED)
+    if (!cronsEnabled())
         return;
-    const expr = '*/15 * * * *';
+    const expr = (0, cronTracker_1.getCronSchedule)('autoApply');
     if (!node_cron_1.default.validate(expr)) {
         logger_1.logger.error(`Invalid auto-apply cron: ${expr}`);
         return;
     }
-    task = node_cron_1.default.schedule(expr, async () => {
+    task = node_cron_1.default.schedule(expr, (0, cronTracker_1.trackedCron)('autoApply', async () => {
         if (isRunning) {
             logger_1.logger.warn('[autoApply] previous tick still running — skipping');
             return;
@@ -103,13 +105,10 @@ const startAutoApplyCron = () => {
             await (0, exports.runAutoApplyTickNow)();
             logger_1.logger.info(`[autoApply] tick complete in ${Date.now() - start}ms`);
         }
-        catch (err) {
-            logger_1.logger.error('[autoApply] tick failed', err);
-        }
         finally {
             isRunning = false;
         }
-    }, { timezone: 'Asia/Kolkata' });
+    }), { timezone: 'Asia/Kolkata' });
     logger_1.logger.info(`Auto-Apply cron scheduled: "${expr}" (Asia/Kolkata)`);
 };
 exports.startAutoApplyCron = startAutoApplyCron;

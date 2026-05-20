@@ -35,11 +35,32 @@ var __importStar = (this && this.__importStar) || (function () {
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.SavedJob = void 0;
 const mongoose_1 = __importStar(require("mongoose"));
+const savedJobSnapshotSchema = new mongoose_1.Schema({
+    title: { type: String, required: true },
+    company: { type: String, required: true },
+    location: { type: String, required: true },
+    url: { type: String, required: true },
+    description: String,
+    salaryMin: Number,
+    salaryMax: Number,
+    currency: String,
+    jobType: String,
+    remoteType: String,
+    skills: { type: [String], default: undefined },
+    companyLogo: String,
+    postedAt: Date,
+    source: { type: String, required: true },
+    externalId: String,
+}, { _id: false });
 const savedJobSchema = new mongoose_1.Schema({
     user: { type: mongoose_1.Schema.Types.ObjectId, ref: 'User', required: true, index: true },
-    job: { type: mongoose_1.Schema.Types.ObjectId, ref: 'Job', required: true, index: true },
+    job: { type: mongoose_1.Schema.Types.ObjectId, ref: 'Job', index: true, sparse: true },
+    source: { type: String, required: true, index: true },
+    externalId: { type: String, index: true, sparse: true },
+    jobSnapshot: { type: savedJobSnapshotSchema, required: true },
     savedAt: { type: Date, default: Date.now, index: true },
 }, { timestamps: true });
-savedJobSchema.index({ user: 1, job: 1 }, { unique: true });
+savedJobSchema.index({ user: 1, job: 1 }, { unique: true, partialFilterExpression: { job: { $exists: true } } });
+savedJobSchema.index({ user: 1, source: 1, externalId: 1 }, { unique: true, partialFilterExpression: { externalId: { $exists: true } } });
 savedJobSchema.index({ user: 1, savedAt: -1 });
 exports.SavedJob = mongoose_1.default.model('SavedJob', savedJobSchema);

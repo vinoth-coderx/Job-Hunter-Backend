@@ -1,18 +1,10 @@
 "use strict";
-var __importDefault = (this && this.__importDefault) || function (mod) {
-    return (mod && mod.__esModule) ? mod : { "default": mod };
-};
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.analyseSkillGap = void 0;
-const sdk_1 = __importDefault(require("@anthropic-ai/sdk"));
-const env_1 = require("../../config/env");
 const logger_1 = require("../../utils/logger");
 const Job_1 = require("../../models/Job");
 const redis_1 = require("../../config/redis");
-const client = env_1.env.ANTHROPIC_API_KEY
-    ? new sdk_1.default({ apiKey: env_1.env.ANTHROPIC_API_KEY })
-    : null;
-const MODEL = 'claude-haiku-4-5-20251001';
+const providers_1 = require("./providers");
 const cacheKey = (userId, role, city) => `skill-gap:${userId}:${role.toLowerCase()}:${(city ?? '').toLowerCase()}`;
 const analyseSkillGap = async (user, role, city) => {
     const id = user._id.toString();
@@ -66,7 +58,7 @@ const analyseSkillGap = async (user, role, city) => {
     const readinessScore = totalDemand > 0 ? Math.round((matchedDemand / totalDemand) * 100) : 0;
     let resources = [];
     let usedAi = false;
-    if (client && missing.length > 0) {
+    if ((0, providers_1.isAiEnabled)() && missing.length > 0) {
         try {
             const top = missing.slice(0, 6).map((m) => m.skill);
             const system = `Suggest concise learning resources to fill skill gaps for a Job seeker. Output strict JSON:
@@ -75,18 +67,14 @@ const analyseSkillGap = async (user, role, city) => {
 ]}
 Rules: ONLY JSON, no prose. Up to 2 resources per skill, max 12 total. Prefer free / well-known options. URLs must be real (skip if unsure).`;
             const userPrompt = `Skills to fill: ${top.join(', ')}\nTarget role: ${role}\nCandidate experience: ${user.profile.experienceYears} years.`;
-            const res = await client.messages.create({
-                model: MODEL,
-                max_tokens: 900,
+            const parsed = await (0, providers_1.generateJson)({
+                tier: 'lite',
                 system,
-                messages: [{ role: 'user', content: userPrompt }],
+                user: userPrompt,
+                maxTokens: 900,
+                temperature: 0.4,
             });
-            const block = res.content[0];
-            const raw = block && block.type === 'text' && typeof block.text === 'string'
-                ? block.text.trim()
-                : '';
-            try {
-                const parsed = JSON.parse(raw);
+            if (parsed) {
                 const arr = Array.isArray(parsed.resources) ? parsed.resources : [];
                 resources = arr
                     .filter((x) => typeof x === 'object' && x !== null)
@@ -104,9 +92,6 @@ Rules: ONLY JSON, no prose. Up to 2 resources per skill, max 12 total. Prefer fr
                 }))
                     .filter((r) => r.skill.length > 0 && r.title.length > 2);
                 usedAi = true;
-            }
-            catch (e) {
-                logger_1.logger.warn(`skillGap JSON parse failed: ${e.message}`);
             }
         }
         catch (err) {

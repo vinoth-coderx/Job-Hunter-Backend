@@ -9,6 +9,7 @@ import { API_VERSION } from './config/constants';
 import routes from './routes';
 import { errorHandler, notFoundHandler } from './middleware/errorHandler';
 import { createGeneralLimiter } from './middleware/rateLimiter';
+import { runtimeModeFromHeader } from './middleware/runtimeMode';
 import { sanitizeRequest } from './middleware/sanitize';
 import {
   securityHeaders,
@@ -88,7 +89,9 @@ export const createApp = (): Application => {
         'X-Signature',
         'X-Timestamp',
         'X-Nonce',
+        'X-Runtime-Mode',
       ],
+      exposedHeaders: ['X-Runtime-Mode'],
       maxAge: 86400,
     }),
   );
@@ -114,6 +117,11 @@ export const createApp = (): Application => {
       }),
     );
   }
+
+  // Per-request runtime-mode binding (AsyncLocalStorage). Reads the
+  // X-Runtime-Mode header — admin UI sets it, Flutter doesn't, so
+  // Flutter traffic safely defaults to `live`.
+  app.use(runtimeModeFromHeader);
 
   app.use(createGeneralLimiter());
 

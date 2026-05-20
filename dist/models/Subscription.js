@@ -81,7 +81,6 @@ const subscriptionSchema = new mongoose_1.Schema({
     user: { type: mongoose_1.Schema.Types.ObjectId, ref: 'User', required: true, index: true },
     tier: {
         type: String,
-        enum: ['free', 'weekly', 'monthly', 'yearly'],
         required: true,
     },
     status: {
@@ -94,7 +93,7 @@ const subscriptionSchema = new mongoose_1.Schema({
     endDate: { type: Date, required: true, index: true },
     amountPaid: { type: Number, required: true, min: 0 },
     currency: { type: String, default: 'INR' },
-    paymentMethod: { type: String, enum: ['razorpay', 'stripe', 'manual'] },
+    paymentMethod: { type: String, enum: ['razorpay', 'stripe', 'manual', 'coins'] },
     paymentId: String,
     orderId: String,
     invoiceUrl: String,

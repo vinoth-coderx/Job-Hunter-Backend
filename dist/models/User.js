@@ -57,13 +57,63 @@ const userSchema = new mongoose_1.Schema({
     googleId: { type: String, sparse: true, unique: true },
     firebaseUid: { type: String, sparse: true, unique: true },
     authProvider: { type: String, enum: ['local', 'google', 'firebase'], default: 'local' },
-    role: { type: String, enum: ['user', 'admin'], default: 'user' },
     activeRole: { type: String, enum: ['seeker', 'hirer'], default: 'seeker', index: true },
+    isAdmin: { type: Boolean, default: false, index: true },
+    isBanned: { type: Boolean, default: false, index: true },
+    bannedAt: Date,
+    banReason: String,
     isEmailVerified: { type: Boolean, default: false },
+    isPhoneVerified: { type: Boolean, default: false },
     emailVerificationToken: String,
     passwordResetToken: String,
     passwordResetExpires: Date,
     refreshTokens: { type: [String], default: [], select: false },
+    twoFactor: {
+        enabled: { type: Boolean, default: false, index: true },
+        method: {
+            type: String,
+            enum: ['totp', 'email_otp', 'phone_otp'],
+            default: 'totp',
+        },
+        secretEnc: { type: String, select: false },
+        backupCodes: { type: [String], default: [], select: false },
+        enrolledAt: Date,
+        lastVerifiedAt: Date,
+    },
+    privacy: {
+        openToWork: { type: Boolean, default: false, index: true },
+        hideFromCurrentEmployer: { type: Boolean, default: false },
+        hidePersonalDetails: { type: Boolean, default: false },
+        hideContactUntilShortlisted: { type: Boolean, default: true },
+        resumeVisibility: {
+            type: String,
+            enum: ['public', 'applied_only', 'private'],
+            default: 'applied_only',
+        },
+        searchableInResumeDatabase: { type: Boolean, default: true },
+        allowResumeDownload: { type: Boolean, default: true },
+    },
+    security: {
+        registrationIp: String,
+        registrationUserAgent: String,
+        knownDeviceFingerprints: { type: [String], default: [], select: false },
+        knownIps: { type: [String], default: [], select: false },
+        lastSeenIp: String,
+        failedLoginCount: { type: Number, default: 0 },
+        lockedUntil: Date,
+        passwordChangedAt: Date,
+        requirePasswordReset: { type: Boolean, default: false },
+        trustScore: { type: Number, default: 50, min: 0, max: 100, index: true },
+    },
+    lastActivityAt: Date,
+    referralCode: {
+        type: String,
+        unique: true,
+        sparse: true,
+        uppercase: true,
+        trim: true,
+        maxlength: 12,
+    },
     profile: {
         fullName: { type: String, required: true, trim: true },
         avatar: String,
@@ -104,11 +154,108 @@ const userSchema = new mongoose_1.Schema({
             size: Number,
             uploadedAt: Date,
         },
+        resumeProfile: {
+            profileSummary: String,
+            employments: {
+                type: [
+                    {
+                        _id: false,
+                        designation: { type: String, default: '' },
+                        company: { type: String, default: '' },
+                        period: { type: String, default: '' },
+                        current: { type: Boolean, default: false },
+                    },
+                ],
+                default: [],
+            },
+            educations: {
+                type: [
+                    {
+                        _id: false,
+                        degree: { type: String, default: '' },
+                        institute: { type: String, default: '' },
+                        period: { type: String, default: '' },
+                        type: { type: String, default: 'Full Time' },
+                        projects: { type: [String], default: [] },
+                    },
+                ],
+                default: [],
+            },
+            itSkills: {
+                type: [
+                    {
+                        _id: false,
+                        skill: { type: String, default: '' },
+                        version: { type: String, default: '-' },
+                        lastUsed: { type: String, default: '' },
+                        experience: { type: String, default: '' },
+                    },
+                ],
+                default: [],
+            },
+            projects: {
+                type: [
+                    {
+                        _id: false,
+                        title: { type: String, default: '' },
+                        company: { type: String, default: '' },
+                        type: { type: String, default: 'Full Time' },
+                        period: { type: String, default: '' },
+                        description: { type: String, default: '' },
+                    },
+                ],
+                default: [],
+            },
+            languages: {
+                type: [
+                    {
+                        _id: false,
+                        language: { type: String, default: '' },
+                        proficiency: { type: String, default: 'Intermediate' },
+                        read: { type: Boolean, default: true },
+                        write: { type: Boolean, default: true },
+                        speak: { type: Boolean, default: true },
+                    },
+                ],
+                default: [],
+            },
+            accomplishments: {
+                type: [
+                    {
+                        _id: false,
+                        type: { type: String, default: '' },
+                        label: { type: String, default: '' },
+                        value: { type: String, default: '' },
+                    },
+                ],
+                default: [],
+            },
+            careerProfile: {
+                currentIndustry: { type: String, default: '' },
+                department: { type: String, default: '' },
+                roleCategory: { type: String, default: '' },
+                jobRole: { type: String, default: '' },
+                desiredJobType: { type: String, default: '' },
+                desiredEmploymentType: { type: String, default: '' },
+                preferredShift: { type: String, default: '' },
+                preferredLocation: { type: String, default: '' },
+                expectedSalary: { type: String, default: '' },
+            },
+            personalDetails: {
+                gender: { type: String, default: '' },
+                maritalStatus: { type: String, default: '' },
+                dob: { type: String, default: '' },
+                category: { type: String, default: '' },
+                workPermit: { type: String, default: '' },
+                address: { type: String, default: '' },
+            },
+            diversityNote: { type: String, default: '' },
+            updatedAt: Date,
+        },
     },
     subscription: {
         tier: {
             type: String,
-            enum: ['free', 'weekly', 'monthly', 'yearly'],
             default: 'free',
         },
         status: {
@@ -121,6 +268,10 @@ const userSchema = new mongoose_1.Schema({
         paymentId: String,
         trialActivatedAt: Date,
         trialUsed: { type: Boolean, default: false },
+    },
+    templateDownloads: {
+        count: { type: Number, default: 0, min: 0 },
+        periodStart: { type: Date, default: null },
     },
     notificationPreferences: {
         push: { type: Boolean, default: true },
@@ -146,8 +297,11 @@ const userSchema = new mongoose_1.Schema({
             ],
             default: [],
         },
+        coins: { type: Number, default: 0, min: 0 },
     },
+    aiTopUpCredits: { type: Number, default: 0, min: 0 },
     lastLogin: Date,
+    lastRecommendedPushAt: Date,
 }, { timestamps: true });
 userSchema.pre('save', async function (next) {
     if (!this.isModified('password') || !this.password)

@@ -1,6 +1,5 @@
 import axios from 'axios';
 import crypto from 'crypto';
-import { env } from '../config/env';
 import { getAppConfig } from './config/config.service';
 import { ApiError } from '../utils/ApiError';
 import { logger } from '../utils/logger';
@@ -13,47 +12,27 @@ import { logger } from '../utils/logger';
  * Order creation:    POST /v1/orders     (Basic auth: key_id:key_secret)
  * Signature verify:  HMAC-SHA256(orderId|paymentId, key_secret) === signature
  * Webhook verify:    HMAC-SHA256(rawBody, webhook_secret)         === signature
+ *
+ * Test vs live is selected by the active Mongo (test DB vs live DB), not by
+ * a separate key name. Each DB stores its own `RAZORPAY_KEY_ID` /
+ * `RAZORPAY_KEY_SECRET`; `getAppConfig` resolves against whichever DB the
+ * current request is bound to via the runtime-mode AsyncLocalStorage.
  */
 
 const BASE = 'https://api.razorpay.com';
 
-export type RazorpayMode = 'test' | 'live';
-
-/**
- * Resolve which Razorpay credential set to use. The hard rule:
- *   - In `NODE_ENV=production`, we ALWAYS use live, regardless of what the
- *     client asks for. A release-build user cannot self-downgrade into test
- *     mode by spoofing a request — debug-mode bypass only works against a
- *     non-production backend (local/staging).
- *   - Otherwise (dev/staging), honor the requested mode if its keys are
- *     configured; fall back to live with a warning if not.
- */
-export const resolveRazorpayMode = (requested: RazorpayMode | undefined): RazorpayMode => {
-  if (env.NODE_ENV === 'production') return 'live';
-  if (
-    requested === 'test' &&
-    getAppConfig('RAZORPAY_TEST_KEY_ID') &&
-    getAppConfig('RAZORPAY_TEST_KEY_SECRET')
-  ) {
-    return 'test';
-  }
-  return 'live';
-};
-
-const requireKeys = (mode: RazorpayMode): { keyId: string; keySecret: string } => {
-  const keyId = getAppConfig(mode === 'test' ? 'RAZORPAY_TEST_KEY_ID' : 'RAZORPAY_KEY_ID');
-  const keySecret = getAppConfig(
-    mode === 'test' ? 'RAZORPAY_TEST_KEY_SECRET' : 'RAZORPAY_KEY_SECRET',
-  );
+const requireKeys = (): { keyId: string; keySecret: string } => {
+  const keyId = getAppConfig('RAZORPAY_KEY_ID');
+  const keySecret = getAppConfig('RAZORPAY_KEY_SECRET');
   if (!keyId || !keySecret) {
     throw ApiError.internal(
-      `Razorpay ${mode} keys not configured (set RAZORPAY_${mode === 'test' ? 'TEST_' : ''}KEY_ID, RAZORPAY_${mode === 'test' ? 'TEST_' : ''}KEY_SECRET in admin panel or .env)`,
+      'Razorpay keys not configured (set RAZORPAY_KEY_ID, RAZORPAY_KEY_SECRET in admin panel or .env)',
     );
   }
   return { keyId, keySecret };
 };
 
-export const getRazorpayKeyId = (mode: RazorpayMode): string => requireKeys(mode).keyId;
+export const getRazorpayKeyId = (): string => requireKeys().keyId;
 
 export interface RazorpayOrder {
   id: string;
@@ -72,9 +51,8 @@ export const createRazorpayOrder = async (params: {
   currency?: string;
   receipt?: string;
   notes?: Record<string, string>;
-  mode: RazorpayMode;
 }): Promise<RazorpayOrder> => {
-  const { keyId, keySecret } = requireKeys(params.mode);
+  const { keyId, keySecret } = requireKeys();
   const { amountPaise, currency = 'INR', receipt, notes } = params;
 
   if (amountPaise < 100) {
@@ -119,9 +97,8 @@ export const createRazorpayOrder = async (params: {
  */
 export const fetchRazorpayOrder = async (
   orderId: string,
-  mode: RazorpayMode,
 ): Promise<RazorpayOrder & { notes?: Record<string, string> }> => {
-  const { keyId, keySecret } = requireKeys(mode);
+  const { keyId, keySecret } = requireKeys();
   try {
     const res = await axios.get(`${BASE}/v1/orders/${orderId}`, {
       auth: { username: keyId, password: keySecret },
@@ -158,9 +135,8 @@ export interface RazorpayPayment {
  */
 export const fetchRazorpayPayment = async (
   paymentId: string,
-  mode: RazorpayMode,
 ): Promise<RazorpayPayment> => {
-  const { keyId, keySecret } = requireKeys(mode);
+  const { keyId, keySecret } = requireKeys();
   try {
     const res = await axios.get<RazorpayPayment>(`${BASE}/v1/payments/${paymentId}`, {
       auth: { username: keyId, password: keySecret },
@@ -184,9 +160,8 @@ export const verifyPaymentSignature = (params: {
   orderId: string;
   paymentId: string;
   signature: string;
-  mode: RazorpayMode;
 }): boolean => {
-  const { keySecret } = requireKeys(params.mode);
+  const { keySecret } = requireKeys();
   const expected = crypto
     .createHmac('sha256', keySecret)
     .update(`${params.orderId}|${params.paymentId}`)

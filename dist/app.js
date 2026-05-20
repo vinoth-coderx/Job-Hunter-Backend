@@ -15,6 +15,7 @@ const constants_1 = require("./config/constants");
 const routes_1 = __importDefault(require("./routes"));
 const errorHandler_1 = require("./middleware/errorHandler");
 const rateLimiter_1 = require("./middleware/rateLimiter");
+const runtimeMode_1 = require("./middleware/runtimeMode");
 const sanitize_1 = require("./middleware/sanitize");
 const security_1 = require("./middleware/security");
 const logger_1 = require("./utils/logger");
@@ -45,27 +46,38 @@ const createApp = () => {
         frameguard: { action: 'deny' },
     }));
     app.use(security_1.securityHeaders);
-    const allowedOrigins = env_1.env.CLIENT_URL.split(',').map((s) => s.trim());
+    const allowedOrigins = env_1.env.CLIENT_URL.split(',')
+        .map((s) => s.trim().replace(/\/$/, ''))
+        .filter((s) => s.length > 0);
+    const isDevOrigin = (origin) => /^https?:\/\/(localhost|127\.0\.0\.1|0\.0\.0\.0|10\.0\.2\.2|192\.168\.\d+\.\d+|172\.\d+\.\d+\.\d+)(:\d+)?$/.test(origin);
     app.use((0, cors_1.default)({
         origin: (origin, cb) => {
-            if (!origin || allowedOrigins.includes(origin))
+            if (!origin)
                 return cb(null, true);
-            return cb(new Error('CORS: origin not allowed'));
+            const normalized = origin.replace(/\/$/, '');
+            if (allowedOrigins.includes(normalized))
+                return cb(null, true);
+            if (isDevOrigin(normalized))
+                return cb(null, true);
+            logger_1.logger.warn(`CORS blocked: "${origin}" not in allowed list [${allowedOrigins.join(', ')}] (NODE_ENV=${env_1.env.NODE_ENV})`);
+            return cb(new Error(`CORS: origin "${origin}" not allowed`));
         },
         credentials: true,
-        methods: ['GET', 'POST', 'PATCH', 'PUT', 'DELETE'],
+        methods: ['GET', 'POST', 'PATCH', 'PUT', 'DELETE', 'OPTIONS'],
         allowedHeaders: [
             'Content-Type',
             'Authorization',
             'X-Signature',
             'X-Timestamp',
             'X-Nonce',
+            'X-Runtime-Mode',
         ],
+        exposedHeaders: ['X-Runtime-Mode'],
         maxAge: 86400,
     }));
     app.use((0, compression_1.default)());
-    app.use(express_1.default.json({ limit: '100kb', strict: true }));
-    app.use(express_1.default.urlencoded({ extended: false, limit: '100kb', parameterLimit: 50 }));
+    app.use(express_1.default.json({ limit: '300kb', strict: true }));
+    app.use(express_1.default.urlencoded({ extended: false, limit: '300kb', parameterLimit: 50 }));
     app.use((0, cookie_parser_1.default)(env_1.env.JWT_SECRET));
     app.use(sanitize_1.sanitizeRequest);
     app.use(security_1.detectSuspiciousActivity);
@@ -76,7 +88,8 @@ const createApp = () => {
             skip: (req) => req.url === '/' || req.url.endsWith('/health'),
         }));
     }
-    app.use(rateLimiter_1.generalLimiter);
+    app.use(runtimeMode_1.runtimeModeFromHeader);
+    app.use((0, rateLimiter_1.createGeneralLimiter)());
     app.get('/', (_req, res) => {
         res.json({
             success: true,

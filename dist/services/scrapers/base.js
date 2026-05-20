@@ -3,24 +3,63 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.BaseScraper = void 0;
+exports.BaseScraper = exports.getFreshnessDaysForSource = void 0;
 const axios_1 = __importDefault(require("axios"));
 const logger_1 = require("../../utils/logger");
 const constants_1 = require("../../config/constants");
 const redis_1 = require("../../config/redis");
+const config_service_1 = require("../config/config.service");
+const getFreshnessDaysForSource = (source) => {
+    const raw = (0, config_service_1.getAppConfig)(`JOB_FRESHNESS_DAYS_${source.toUpperCase()}`);
+    const n = raw ? Number(raw) : NaN;
+    if (Number.isFinite(n) && n > 0) {
+        return Math.min(365, Math.max(1, Math.round(n)));
+    }
+    return constants_1.JOB_FRESHNESS_DAYS;
+};
+exports.getFreshnessDaysForSource = getFreshnessDaysForSource;
+const STATUS_PRIORITY = {
+    unknown: 0,
+    ok: 1,
+    empty_query: 2,
+    no_key: 3,
+    cooldown: 4,
+    network_error: 5,
+    rate_limited: 6,
+    parse_error: 7,
+    auth_error: 8,
+};
 class BaseScraper {
     runFailureCount = 0;
     static MAX_FAILURES_PER_RUN = 2;
+    _lastStatus = 'unknown';
+    _lastStatusDetail;
     resetForNewRun() {
         this.runFailureCount = 0;
+        this._lastStatus = 'unknown';
+        this._lastStatusDetail = undefined;
+    }
+    noteStatus(status, detail) {
+        if (STATUS_PRIORITY[status] >= STATUS_PRIORITY[this._lastStatus]) {
+            this._lastStatus = status;
+            this._lastStatusDetail = detail;
+        }
+    }
+    get lastRunStatus() {
+        return { status: this._lastStatus, detail: this._lastStatusDetail };
     }
     async isCooldown() {
         const v = await redis_1.redis.get(`scraper:cooldown:${this.source}`);
         if (v) {
             logger_1.logger.debug(`[${this.source}] in cooldown — skipping (${v})`);
+            this.noteStatus('cooldown', v);
             return true;
         }
-        return this.runFailureCount >= BaseScraper.MAX_FAILURES_PER_RUN;
+        if (this.runFailureCount >= BaseScraper.MAX_FAILURES_PER_RUN) {
+            this.noteStatus('cooldown', 'failure threshold reached');
+            return true;
+        }
+        return false;
     }
     async setCooldown(reason, seconds) {
         await redis_1.redis.setex(`scraper:cooldown:${this.source}`, seconds, reason);
@@ -39,27 +78,45 @@ class BaseScraper {
                     : ae.message;
             logger_1.logger.warn(`[${this.source}] ${context} → ${status || 'NETWORK'}: ${apiMsg}`);
             if (status === 401 || status === 403) {
+                this.noteStatus('auth_error', `HTTP ${status}: ${apiMsg.slice(0, 80)}`);
                 await this.setCooldown(`auth/quota error ${status}`, 60 * 60);
                 return;
             }
             if (status === 429) {
+                this.noteStatus('rate_limited', apiMsg.slice(0, 80));
                 await this.setCooldown('rate limited', 15 * 60);
                 return;
             }
             if (!status && (ae.code === 'ECONNABORTED' || ae.code === 'ETIMEDOUT')) {
+                this.noteStatus('network_error', 'timeout');
                 await this.setCooldown('timeout', 5 * 60);
                 return;
             }
+            this.noteStatus('network_error', `HTTP ${status ?? '?'}: ${apiMsg.slice(0, 80)}`);
             return;
         }
         logger_1.logger.warn(`[${this.source}] ${context} → ${err.message}`);
+        this.noteStatus('network_error', err.message.slice(0, 80));
+    }
+    freshnessDays() {
+        return (0, exports.getFreshnessDaysForSource)(this.source);
     }
     isWithinFreshness(date) {
-        const cutoff = new Date(Date.now() - constants_1.JOB_FRESHNESS_DAYS * 24 * 60 * 60 * 1000);
+        const cutoff = new Date(Date.now() - this.freshnessDays() * 24 * 60 * 60 * 1000);
         return date >= cutoff;
     }
     log(msg, meta) {
         logger_1.logger.info(`[${this.source}] ${msg}`, meta);
+    }
+    needsKey(value, keyName) {
+        if (value && value.trim().length > 0)
+            return false;
+        this.noteStatus('no_key', `missing AppConfig key: ${keyName}`);
+        logger_1.logger.warn(`[${this.source}] skipped — AppConfig key '${keyName}' is not set`);
+        return true;
+    }
+    noteOk(count) {
+        this.noteStatus('ok', `returned ${count}`);
     }
     logError(msg, err) {
         logger_1.logger.error(`[${this.source}] ${msg}`, err);

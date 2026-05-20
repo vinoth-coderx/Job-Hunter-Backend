@@ -1,5 +1,5 @@
 import { Router, Request, Response } from 'express';
-import mongoose from 'mongoose';
+import { getConnectionForMode } from '../config/dbConnections';
 import { redis } from '../config/redis';
 import { Job } from '../models/Job';
 import { env } from '../config/env';
@@ -13,10 +13,21 @@ const formatBytes = (bytes: number): string => `${(bytes / 1024 / 1024).toFixed(
 const checkMongo = async (): Promise<{ status: string; latencyMs?: number; error?: string }> => {
   const start = Date.now();
   try {
-    if (mongoose.connection.readyState !== 1) {
-      return { status: 'down', error: `readyState=${mongoose.connection.readyState}` };
+    // The server now maintains two Mongo connections (test + live).
+    // Health-ready when BOTH are up; either side down means a request
+    // routed to that mode would fail.
+    const test = getConnectionForMode('test');
+    const live = getConnectionForMode('live');
+    if (test.readyState !== 1 || live.readyState !== 1) {
+      return {
+        status: 'down',
+        error: `test=${test.readyState} live=${live.readyState}`,
+      };
     }
-    await mongoose.connection.db?.admin().ping();
+    await Promise.all([
+      test.db?.admin().ping(),
+      live.db?.admin().ping(),
+    ]);
     return { status: 'up', latencyMs: Date.now() - start };
   } catch (err) {
     return { status: 'down', error: (err as Error).message };

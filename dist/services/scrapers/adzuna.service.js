@@ -6,31 +6,37 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.AdzunaScraper = void 0;
 const axios_1 = __importDefault(require("axios"));
 const base_1 = require("./base");
-const env_1 = require("../../config/env");
+const config_service_1 = require("../config/config.service");
 const constants_1 = require("../../config/constants");
 class AdzunaScraper extends base_1.BaseScraper {
     source = 'adzuna';
     baseUrl = 'https://api.adzuna.com/v1/api/jobs';
     async fetch(query, location = '') {
-        if (!env_1.env.ADZUNA_APP_ID || !env_1.env.ADZUNA_APP_KEY)
+        const appId = (0, config_service_1.getAppConfig)('ADZUNA_APP_ID');
+        const appKey = (0, config_service_1.getAppConfig)('ADZUNA_APP_KEY');
+        if (this.needsKey(appId, 'ADZUNA_APP_ID'))
+            return [];
+        if (this.needsKey(appKey, 'ADZUNA_APP_KEY'))
             return [];
         if (await this.isCooldown())
             return [];
+        const days = this.freshnessDays();
         try {
             const url = `${this.baseUrl}/${constants_1.ADZUNA_COUNTRY}/search/1`;
             const { data } = await axios_1.default.get(url, {
                 params: {
-                    app_id: env_1.env.ADZUNA_APP_ID,
-                    app_key: env_1.env.ADZUNA_APP_KEY,
+                    app_id: appId,
+                    app_key: appKey,
                     results_per_page: 50,
                     what: query,
                     where: location,
-                    max_days_old: constants_1.JOB_FRESHNESS_DAYS,
+                    max_days_old: days,
                     sort_by: 'date',
                     'content-type': 'application/json',
                 },
                 timeout: constants_1.SCRAPER_TIMEOUT_MS,
             });
+            const rawCount = (data.results || []).length;
             const jobs = (data.results || [])
                 .map((j) => {
                 const postedAt = new Date(j.created);
@@ -53,7 +59,8 @@ class AdzunaScraper extends base_1.BaseScraper {
                 };
             })
                 .filter((j) => this.isWithinFreshness(j.postedAt));
-            this.log(`Fetched ${jobs.length} fresh jobs for "${query}"`);
+            this.log(`Fetched ${jobs.length} fresh jobs for "${query}" (${days}d window; raw=${rawCount})`);
+            this.noteOk(jobs.length);
             return jobs;
         }
         catch (err) {

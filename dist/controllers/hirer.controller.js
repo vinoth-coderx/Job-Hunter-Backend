@@ -1,12 +1,15 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.getHirerStats = exports.getPublicCompanyProfile = exports.deleteOfficePhoto = exports.uploadOfficePhotos = exports.uploadHirerLogo = exports.updateHirerProfile = exports.createHirerProfile = exports.getMyHirerProfile = exports.updateHirerProfileSchema = exports.createHirerProfileSchema = void 0;
+exports.generateCompanyDescriptionEndpoint = exports.generateCompanyDescriptionSchema = exports.getHirerStats = exports.getPublicCompanyProfile = exports.deleteOfficePhoto = exports.uploadOfficePhotos = exports.uploadHirerLogo = exports.updateHirerProfile = exports.createHirerProfile = exports.getMyHirerProfile = exports.updateHirerProfileSchema = exports.createHirerProfileSchema = void 0;
 const zod_1 = require("zod");
 const HirerProfile_1 = require("../models/HirerProfile");
 const Job_1 = require("../models/Job");
 const asyncHandler_1 = require("../utils/asyncHandler");
 const ApiError_1 = require("../utils/ApiError");
 const cloudinary_1 = require("../config/cloudinary");
+const companyDescription_service_1 = require("../services/ai/companyDescription.service");
+const quota_service_1 = require("../services/ai/quota.service");
+const aiCreditWeights_1 = require("../config/aiCreditWeights");
 const otherLocationSchema = zod_1.z.object({
     city: zod_1.z.string().min(1).max(100),
     state: zod_1.z.string().max(100).optional(),
@@ -62,6 +65,9 @@ const sanitiseProfile = (p) => ({
     rating: p.rating,
     followersCount: p.followersCount,
     hirerSubscription: p.hirerSubscription,
+    approvalStatus: p.approvalStatus,
+    trustScore: p.trustScore,
+    dailyPostLimit: p.dailyPostLimit,
     createdAt: p.createdAt,
     updatedAt: p.updatedAt,
 });
@@ -256,5 +262,56 @@ exports.getHirerStats = (0, asyncHandler_1.asyncHandler)(async (req, res) => {
             totalApplications: agg[0]?.totalApplications ?? 0,
             totalShortlisted: agg[0]?.totalShortlisted ?? 0,
         },
+    });
+});
+exports.generateCompanyDescriptionSchema = zod_1.z.object({
+    body: zod_1.z.object({
+        companyName: zod_1.z.string().min(2).max(200).optional(),
+        industry: zod_1.z.string().max(120).optional(),
+        sizeBand: zod_1.z.string().max(60).optional(),
+        hqLocation: zod_1.z.string().max(120).optional(),
+        whatYouDo: zod_1.z.string().max(2000).optional(),
+        toneHint: zod_1.z.enum(['professional', 'casual', 'startup']).optional(),
+    }),
+});
+exports.generateCompanyDescriptionEndpoint = (0, asyncHandler_1.asyncHandler)(async (req, res) => {
+    if (!req.user)
+        throw ApiError_1.ApiError.unauthorized();
+    const userId = String(req.user._id);
+    const body = req.body;
+    let companyName = (body.companyName || '').trim();
+    if (!companyName) {
+        const profile = await HirerProfile_1.HirerProfile.findOne({ user: userId })
+            .select('companyName')
+            .lean();
+        companyName = profile?.companyName?.trim() || '';
+    }
+    if (companyName.length < 2) {
+        throw ApiError_1.ApiError.badRequest('Company name is required to generate a description');
+    }
+    const weight = (0, aiCreditWeights_1.getCreditWeight)('company_description');
+    const quota = await (0, quota_service_1.enforceQuota)(userId, weight);
+    let result;
+    try {
+        result = await (0, companyDescription_service_1.generateCompanyDescription)({
+            companyName,
+            industry: body.industry,
+            sizeBand: body.sizeBand,
+            hqLocation: body.hqLocation,
+            whatYouDo: body.whatYouDo,
+            toneHint: body.toneHint,
+        }, { userId });
+    }
+    catch (err) {
+        await (0, quota_service_1.refundQuota)(userId, weight);
+        throw err;
+    }
+    if (!result.usedAi) {
+        await (0, quota_service_1.refundQuota)(userId, weight);
+    }
+    res.json({
+        success: true,
+        data: result,
+        quota,
     });
 });

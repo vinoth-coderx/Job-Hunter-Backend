@@ -1,0 +1,11 @@
+"use strict";
+Object.defineProperty(exports, "__esModule", { value: true });
+const express_1 = require("express");
+const auth_1 = require("../middleware/auth");
+const validate_1 = require("../middleware/validate");
+const reports_controller_1 = require("../controllers/reports.controller");
+const router = (0, express_1.Router)();
+router.use(auth_1.authenticate);
+router.post('/', (0, validate_1.validate)(reports_controller_1.createReportSchema), reports_controller_1.createReport);
+router.get('/mine', reports_controller_1.listMyReports);
+exports.default = router;

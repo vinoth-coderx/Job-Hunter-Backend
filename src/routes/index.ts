@@ -25,7 +25,6 @@ import securityRoutes from './security.routes';
 import reportsRoutes from './reports.routes';
 import verificationRoutes from './verification.routes';
 import resumeTemplateRoutes from './resumeTemplates.routes';
-import runtimeModeRoutes from './runtimeMode.routes';
 
 const router = Router();
 
@@ -55,6 +54,5 @@ router.use('/reports', reportsRoutes);
 router.use('/hirer/verification', verificationRoutes);
 router.use('/resume-templates', resumeTemplateRoutes);
 router.use('/admin', adminRoutes);
-router.use('/runtime-mode', runtimeModeRoutes);
 
 export default router;

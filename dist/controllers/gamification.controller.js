@@ -1,12 +1,22 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.getStreak = exports.checkInStreak = exports.listBadges = void 0;
+exports.getStreak = exports.getCoins = exports.checkInStreak = exports.listBadges = void 0;
 const User_1 = require("../models/User");
 const AppliedJob_1 = require("../models/AppliedJob");
 const SavedJob_1 = require("../models/SavedJob");
 const SkillAssessment_1 = require("../models/SkillAssessment");
 const asyncHandler_1 = require("../utils/asyncHandler");
 const ApiError_1 = require("../utils/ApiError");
+const completeness_service_1 = require("../services/profile/completeness.service");
+const coin_service_1 = require("../services/coins/coin.service");
+const CHECKIN_COIN_BASE = 10;
+const CHECKIN_COIN_PER_STREAK_DAY = 5;
+const CHECKIN_COIN_CAP = 30;
+const computeCheckinReward = (streakCount) => {
+    const reward = CHECKIN_COIN_BASE + (streakCount - 1) * CHECKIN_COIN_PER_STREAK_DAY;
+    return Math.max(CHECKIN_COIN_BASE, Math.min(CHECKIN_COIN_CAP, reward));
+};
+const dateKey = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 const BADGES = [
     {
         id: 'first_app',
@@ -79,33 +89,6 @@ const BADGES = [
         evaluate: (c) => c.passedAssessments >= 1,
     },
 ];
-const completenessFromUser = (user) => {
-    const p = user.profile;
-    let s = 0;
-    if (p.fullName)
-        s += 5;
-    if (p.headline && p.headline.length >= 10)
-        s += 10;
-    if (p.experienceYears > 0)
-        s += 5;
-    if (p.skills?.length >= 5)
-        s += 20;
-    else if (p.skills?.length >= 1)
-        s += 10;
-    if (p.preferredRoles?.length > 0)
-        s += 10;
-    if (p.preferredLocations?.length > 0)
-        s += 10;
-    if (p.preferredJobTypes?.length > 0)
-        s += 5;
-    if (p.expectedSalaryMin && p.expectedSalaryMin > 0)
-        s += 5;
-    if (p.resumeUrl || p.resumeFile)
-        s += 20;
-    if (p.resumeText && p.resumeText.length > 200)
-        s += 10;
-    return Math.max(0, Math.min(100, s));
-};
 const buildContext = async (userId) => {
     const user = await User_1.User.findById(userId).lean();
     if (!user)
@@ -119,7 +102,7 @@ const buildContext = async (userId) => {
         appliedCount,
         savedCount,
         skillCount: user.profile?.skills?.length ?? 0,
-        completion: completenessFromUser(user),
+        completion: (0, completeness_service_1.completenessFromUser)(user),
         streakCount: user.gamification?.streakCount ?? 0,
         passedAssessments,
     };
@@ -194,6 +177,20 @@ exports.checkInStreak = (0, asyncHandler_1.asyncHandler)(async (req, res) => {
     }
     user.gamification.lastCheckinDate = today;
     await user.save();
+    let coinsAwarded = 0;
+    let coinsBalance = user.gamification.coins ?? 0;
+    if (streakChanged) {
+        const reward = computeCheckinReward(user.gamification.streakCount);
+        const grant = await (0, coin_service_1.grantCoins)({
+            user: user._id,
+            amount: reward,
+            source: 'checkin',
+            idempotencyKey: `checkin:${dateKey(today)}`,
+            meta: { streakCount: user.gamification.streakCount },
+        });
+        coinsAwarded = grant.amount;
+        coinsBalance = grant.balance;
+    }
     res.json({
         success: true,
         data: {
@@ -201,6 +198,23 @@ exports.checkInStreak = (0, asyncHandler_1.asyncHandler)(async (req, res) => {
             longestStreak: user.gamification.longestStreak,
             lastCheckinDate: user.gamification.lastCheckinDate,
             streakChanged,
+            coinsAwarded,
+            coinsBalance,
+        },
+    });
+});
+exports.getCoins = (0, asyncHandler_1.asyncHandler)(async (req, res) => {
+    if (!req.user)
+        throw ApiError_1.ApiError.unauthorized();
+    const user = await User_1.User.findById(req.user._id)
+        .select('gamification.coins')
+        .lean();
+    if (!user)
+        throw ApiError_1.ApiError.notFound('User not found');
+    res.json({
+        success: true,
+        data: {
+            balance: user.gamification?.coins ?? 0,
         },
     });
 });

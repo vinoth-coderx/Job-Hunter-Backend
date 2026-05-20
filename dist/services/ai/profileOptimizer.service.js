@@ -1,18 +1,14 @@
 "use strict";
-var __importDefault = (this && this.__importDefault) || function (mod) {
-    return (mod && mod.__esModule) ? mod : { "default": mod };
-};
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.optimizeProfile = void 0;
-const sdk_1 = __importDefault(require("@anthropic-ai/sdk"));
-const env_1 = require("../../config/env");
+exports.optimizeProfile = exports.invalidateProfileOptimizerCache = void 0;
 const logger_1 = require("../../utils/logger");
 const redis_1 = require("../../config/redis");
-const client = env_1.env.ANTHROPIC_API_KEY
-    ? new sdk_1.default({ apiKey: env_1.env.ANTHROPIC_API_KEY })
-    : null;
-const MODEL = 'claude-haiku-4-5-20251001';
+const providers_1 = require("./providers");
 const cacheKey = (userId) => `profile-opt:${userId}`;
+const invalidateProfileOptimizerCache = async (userId) => {
+    await redis_1.redis.del(cacheKey(userId));
+};
+exports.invalidateProfileOptimizerCache = invalidateProfileOptimizerCache;
 const profileBlock = (user) => {
     const p = user.profile;
     return [
@@ -114,19 +110,21 @@ const heuristicSuggestions = (user) => {
     }
     return out;
 };
-const optimizeProfile = async (user) => {
+const optimizeProfile = async (user, opts = {}) => {
     const id = user._id.toString();
-    const cached = await redis_1.redis.get(cacheKey(id));
-    if (cached) {
-        try {
-            return JSON.parse(cached);
-        }
-        catch {
+    if (!opts.forceRefresh) {
+        const cached = await redis_1.redis.get(cacheKey(id));
+        if (cached) {
+            try {
+                return JSON.parse(cached);
+            }
+            catch {
+            }
         }
     }
     const completenessScore = computeCompletenessScore(user);
     const heuristics = heuristicSuggestions(user);
-    if (!client) {
+    if (!(0, providers_1.isAiEnabled)()) {
         const result = {
             completenessScore,
             suggestions: heuristics,
@@ -160,19 +158,17 @@ ${profileBlock(user)}
 
 Generate suggestions now.`;
     try {
-        const res = await client.messages.create({
-            model: MODEL,
-            max_tokens: 900,
-            system,
-            messages: [{ role: 'user', content: prompt }],
+        const parsed = await (0, providers_1.generateJson)({
+            tier: 'lite',
+            system: opts.forceRefresh
+                ? `${system}\n\nIMPORTANT: This is a re-analysis. Surface ANGLES and SPECIFIC SUGGESTIONS that differ from a typical first pass — pick less-obvious gaps, novel phrasings, or sections you'd usually mention second.`
+                : system,
+            user: prompt,
+            maxTokens: 900,
+            temperature: opts.forceRefresh ? 0.85 : 0.4,
         });
-        const block = res.content[0];
-        const raw = block && block.type === 'text' && typeof block.text === 'string'
-            ? block.text.trim()
-            : '';
         let suggestions = [];
-        try {
-            const parsed = JSON.parse(raw);
+        if (parsed) {
             const arr = Array.isArray(parsed.suggestions) ? parsed.suggestions : [];
             suggestions = arr
                 .filter((x) => typeof x === 'object' && x !== null)
@@ -202,9 +198,6 @@ Generate suggestions now.`;
                         : undefined,
             }))
                 .filter((s) => s.title.length >= 3);
-        }
-        catch (e) {
-            logger_1.logger.warn(`profileOptimizer JSON parse failed: ${e.message}`);
         }
         if (suggestions.length === 0)
             suggestions = heuristics;

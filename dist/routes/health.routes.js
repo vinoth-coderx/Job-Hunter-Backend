@@ -1,10 +1,7 @@
 "use strict";
-var __importDefault = (this && this.__importDefault) || function (mod) {
-    return (mod && mod.__esModule) ? mod : { "default": mod };
-};
 Object.defineProperty(exports, "__esModule", { value: true });
 const express_1 = require("express");
-const mongoose_1 = __importDefault(require("mongoose"));
+const dbConnections_1 = require("../config/dbConnections");
 const redis_1 = require("../config/redis");
 const Job_1 = require("../models/Job");
 const env_1 = require("../config/env");
@@ -15,10 +12,18 @@ const formatBytes = (bytes) => `${(bytes / 1024 / 1024).toFixed(2)} MB`;
 const checkMongo = async () => {
     const start = Date.now();
     try {
-        if (mongoose_1.default.connection.readyState !== 1) {
-            return { status: 'down', error: `readyState=${mongoose_1.default.connection.readyState}` };
+        const test = (0, dbConnections_1.getConnectionForMode)('test');
+        const live = (0, dbConnections_1.getConnectionForMode)('live');
+        if (test.readyState !== 1 || live.readyState !== 1) {
+            return {
+                status: 'down',
+                error: `test=${test.readyState} live=${live.readyState}`,
+            };
         }
-        await mongoose_1.default.connection.db?.admin().ping();
+        await Promise.all([
+            test.db?.admin().ping(),
+            live.db?.admin().ping(),
+        ]);
         return { status: 'up', latencyMs: Date.now() - start };
     }
     catch (err) {

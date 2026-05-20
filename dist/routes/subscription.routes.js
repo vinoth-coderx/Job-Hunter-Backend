@@ -18,4 +18,5 @@ router.post('/subscribe', (0, validate_1.validate)(subscription_controller_1.sub
 router.post('/cancel', subscription_controller_1.cancelSubscription);
 router.post('/razorpay/order', (0, validate_1.validate)(subscription_controller_1.createRazorpayOrderSchema), subscription_controller_1.razorpayCreateOrder);
 router.post('/razorpay/verify', (0, validate_1.validate)(subscription_controller_1.verifyRazorpayPaymentSchema), subscription_controller_1.razorpayVerifyPayment);
+router.post('/redeem-with-coins', (0, validate_1.validate)(subscription_controller_1.redeemWithCoinsSchema), subscription_controller_1.redeemWithCoins);
 exports.default = router;

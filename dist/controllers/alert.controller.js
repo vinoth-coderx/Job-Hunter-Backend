@@ -1,10 +1,11 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.deleteAlert = exports.updateAlert = exports.listAlerts = exports.createAlert = exports.updateAlertSchema = exports.createAlertSchema = void 0;
+exports.suggestAlertNamesEndpoint = exports.suggestAlertNameSchema = exports.deleteAlert = exports.updateAlert = exports.listAlerts = exports.createAlert = exports.updateAlertSchema = exports.createAlertSchema = void 0;
 const zod_1 = require("zod");
 const Alert_1 = require("../models/Alert");
 const asyncHandler_1 = require("../utils/asyncHandler");
 const ApiError_1 = require("../utils/ApiError");
+const alertNamer_service_1 = require("../services/ai/alertNamer.service");
 exports.createAlertSchema = zod_1.z.object({
     body: zod_1.z.object({
         label: zod_1.z.string().max(120).optional(),
@@ -78,4 +79,18 @@ exports.deleteAlert = (0, asyncHandler_1.asyncHandler)(async (req, res) => {
     if (!removed)
         throw ApiError_1.ApiError.notFound('Alert not found');
     res.json({ success: true, message: 'Alert deleted' });
+});
+exports.suggestAlertNameSchema = zod_1.z.object({
+    body: zod_1.z.object({
+        query: zod_1.z.string().max(200).default(''),
+        filters: zod_1.z.array(zod_1.z.string().max(80)).max(20).default([]),
+        location: zod_1.z.string().max(120).optional(),
+    }),
+});
+exports.suggestAlertNamesEndpoint = (0, asyncHandler_1.asyncHandler)(async (req, res) => {
+    if (!req.user)
+        throw ApiError_1.ApiError.unauthorized();
+    const { query, filters, location } = req.body;
+    const names = await (0, alertNamer_service_1.suggestAlertNames)({ query, filters, location }, { userId: String(req.user._id) });
+    res.json({ success: true, data: { names } });
 });

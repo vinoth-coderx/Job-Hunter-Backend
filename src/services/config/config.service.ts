@@ -2,43 +2,30 @@ import { AppConfig, type AppConfigCategory } from '../../models/AppConfig';
 import { decryptSecret, encryptSecret } from '../../utils/aesCrypto';
 import { logger } from '../../utils/logger';
 import {
-  readRuntimeMode,
-  writeRuntimeMode,
+  getConnectionForMode,
+  currentRuntimeMode,
   type RuntimeMode,
-} from '../../config/runtimeMode';
+} from '../../config/dbConnections';
 
 export type { RuntimeMode };
 
 /**
- * In-memory cache of DB-backed runtime config. Boot does one `preload()`
- * pass so reads from hot paths (per-request Cloudinary signing, per-job
- * Adzuna fetch, etc.) never touch Mongo. Admin writes invalidate the
- * cached entry, so the next read picks up the new value.
+ * In-memory cache of AppConfig keyed by runtime mode. Each mode keeps
+ * its own Map<key, value | null> populated from that mode's Mongo at
+ * boot (and refreshed on admin writes). The cache lookup is mode-aware
+ * via `currentRuntimeMode()`, which itself is bound by per-request
+ * AsyncLocalStorage from the X-Runtime-Mode middleware.
  *
- * Reads fall back to `process.env[KEY]` when a key is missing from the
- * cache — this keeps the codebase usable while we migrate, and on a
- * fresh install (empty DB) the backend still boots from `.env`.
- *
- * Each cache row holds three slots: `test`, `live`, and `legacy`. The
- * active runtime mode (driven by the `RUNTIME_MODE` AppConfig row)
- * selects which slot `getAppConfig` returns first; the legacy slot is
- * the fallback for mode-agnostic keys (e.g. RUNTIME_MODE itself,
- * CRON_ENABLED, RATE_LIMIT_*) and for pre-migration data.
+ * AppConfig is single-slot per row now — the old test/live/legacy slot
+ * dichotomy is redundant since each mode has its own DB. Reads fall
+ * through legacy slots for migration safety, but writes only ever touch
+ * `value` / `valueEncrypted`.
  */
-interface CacheRow {
-  test: string | null;
-  live: string | null;
-  legacy: string | null;
-}
-
-const cache = new Map<string, CacheRow>();
-let preloaded = false;
-
-const emptyRow = (): CacheRow => ({ test: null, live: null, legacy: null });
-
-const setRow = (key: string, row: CacheRow): void => {
-  cache.set(key, row);
+const caches: Record<RuntimeMode, Map<string, string | null>> = {
+  test: new Map(),
+  live: new Map(),
 };
+const preloaded: Record<RuntimeMode, boolean> = { test: false, live: false };
 
 const resolveFromEnv = (key: string): string | null => {
   const fromEnv = process.env[key];
@@ -50,64 +37,74 @@ const decryptOrNull = (key: string, blob?: string | null): string | null => {
   try {
     return decryptSecret(blob);
   } catch (err) {
-    logger.warn(
-      `AppConfig: failed to decrypt slot for "${key}" — falling back`,
-      err,
-    );
+    logger.warn(`AppConfig: decrypt failed for "${key}"`, err);
     return null;
   }
 };
 
-export const preloadAppConfig = async (): Promise<void> => {
-  const rows = await AppConfig.find({})
+/**
+ * Pick whichever slot has a value, in this preference order:
+ *   value (canonical) → liveValue / testValue (migrated rows)
+ * Used when a row exists in legacy split-slot form.
+ */
+const pickSlot = (row: {
+  isSecret: boolean;
+  value?: string;
+  valueEncrypted?: string;
+  liveValue?: string;
+  liveValueEncrypted?: string;
+  testValue?: string;
+  testValueEncrypted?: string;
+}, key: string): string | null => {
+  if (row.isSecret) {
+    return (
+      decryptOrNull(key, row.valueEncrypted) ??
+      decryptOrNull(key, row.liveValueEncrypted) ??
+      decryptOrNull(key, row.testValueEncrypted)
+    );
+  }
+  return row.value ?? row.liveValue ?? row.testValue ?? null;
+};
+
+const preloadMode = async (mode: RuntimeMode): Promise<void> => {
+  const conn = getConnectionForMode(mode);
+  const Model = conn.models.AppConfig ?? conn.model('AppConfig', AppConfig.schema);
+  const rows = (await Model.find({})
     .select('+valueEncrypted +testValueEncrypted +liveValueEncrypted')
-    .lean();
+    .lean()) as unknown as Array<{
+    key: string;
+    isSecret: boolean;
+    value?: string;
+    valueEncrypted?: string;
+    testValue?: string;
+    testValueEncrypted?: string;
+    liveValue?: string;
+    liveValueEncrypted?: string;
+  }>;
+  const cache = caches[mode];
   cache.clear();
   for (const row of rows) {
-    const next = emptyRow();
-    if (row.isSecret) {
-      next.test = decryptOrNull(row.key, row.testValueEncrypted);
-      next.live = decryptOrNull(row.key, row.liveValueEncrypted);
-      next.legacy = decryptOrNull(row.key, row.valueEncrypted);
-    } else {
-      next.test = row.testValue ?? null;
-      next.live = row.liveValue ?? null;
-      next.legacy = row.value ?? null;
-    }
-    setRow(row.key, next);
+    cache.set(row.key, pickSlot(row, row.key));
   }
-  preloaded = true;
-  logger.info(
-    `AppConfig: preloaded ${cache.size} key(s) — runtime mode = ${readRuntimeMode()}`,
-  );
+  preloaded[mode] = true;
+  logger.info(`AppConfig[${mode}]: preloaded ${cache.size} key(s)`);
+};
+
+export const preloadAppConfig = async (): Promise<void> => {
+  // Preload both DBs in parallel at boot. Failure in one mode is
+  // non-fatal — services fall back to env on cache miss.
+  await Promise.allSettled([preloadMode('test'), preloadMode('live')]);
 };
 
 /**
- * Returns the active-mode value if present, else the legacy slot, else
- * the env fallback. Returns null when no source has the key. The
- * "active mode" is read fresh on every call so the test/live split
- * stays consistent if a flip happens mid-process (rare — flips are
- * usually followed by a restart).
+ * Returns the active-mode value if present, else the env fallback.
+ * Active mode is read fresh on every call via AsyncLocalStorage.
  */
 export const getAppConfig = (key: string): string | null => {
-  const row = cache.get(key);
-  if (row) {
-    const modeValue = row[readRuntimeMode()];
-    if (modeValue) return modeValue;
-    if (row.legacy) return row.legacy;
-  }
+  const mode = currentRuntimeMode();
+  const cache = caches[mode];
+  if (cache.has(key)) return cache.get(key) ?? null;
   return resolveFromEnv(key);
-};
-
-/**
- * Read a specific slot directly without applying mode fallback. Useful
- * for admin surfaces that need to show / edit a single side.
- */
-export const getAppConfigSlot = (
-  key: string,
-  slot: RuntimeMode | 'legacy',
-): string | null => {
-  return cache.get(key)?.[slot] ?? null;
 };
 
 export const requireAppConfig = (key: string): string => {
@@ -120,100 +117,63 @@ export const requireAppConfig = (key: string): string => {
   return v;
 };
 
-export const isAppConfigPreloaded = (): boolean => preloaded;
+export const isAppConfigPreloaded = (): boolean =>
+  preloaded.test || preloaded.live;
 
-export const getRuntimeMode = (): RuntimeMode => readRuntimeMode();
+export const getRuntimeMode = (): RuntimeMode => currentRuntimeMode();
 
 export interface SetAppConfigArgs {
   key: string;
   category: AppConfigCategory;
+  value: string;
   isSecret: boolean;
-  /** Update the Test slot. Pass `undefined` to leave untouched, `''` to clear. */
-  testValue?: string;
-  /** Update the Live slot. Pass `undefined` to leave untouched, `''` to clear. */
-  liveValue?: string;
-  /** Update the mode-agnostic legacy slot (used by RUNTIME_MODE, CRON_ENABLED, etc). */
-  legacyValue?: string;
   notes?: string;
   updatedBy?: string;
 }
 
-const buildSlotUpdate = (
-  isSecret: boolean,
-  raw: string | undefined,
-  plainField: 'testValue' | 'liveValue' | 'value',
-  cipherField: 'testValueEncrypted' | 'liveValueEncrypted' | 'valueEncrypted',
-  update: Record<string, unknown>,
-  unset: Record<string, ''>,
-): void => {
-  if (raw === undefined) return; // leave slot untouched
-  if (raw === '') {
-    // Clear both sides of the slot
-    unset[plainField] = '';
-    unset[cipherField] = '';
-    return;
-  }
-  if (isSecret) {
-    update[cipherField] = encryptSecret(raw);
-    unset[plainField] = '';
-  } else {
-    update[plainField] = raw;
-    unset[cipherField] = '';
-  }
-};
-
+/**
+ * Persist a config value to the ACTIVE runtime mode's DB. Test-mode
+ * requests write into the test Mongo's `app_configs`; live-mode
+ * requests write into the live Mongo's. Operators see exactly the rows
+ * that exist in the mode they're currently viewing.
+ */
 export const setAppConfig = async (args: SetAppConfigArgs): Promise<void> => {
-  const set: Record<string, unknown> = {
+  const update: Record<string, unknown> = {
     category: args.category,
     isSecret: args.isSecret,
     notes: args.notes,
     updatedBy: args.updatedBy,
   };
-  const unset: Record<string, ''> = {};
-
-  buildSlotUpdate(args.isSecret, args.testValue, 'testValue', 'testValueEncrypted', set, unset);
-  buildSlotUpdate(args.isSecret, args.liveValue, 'liveValue', 'liveValueEncrypted', set, unset);
-  buildSlotUpdate(args.isSecret, args.legacyValue, 'value', 'valueEncrypted', set, unset);
-
-  const op: Record<string, unknown> = { $set: set };
-  if (Object.keys(unset).length > 0) op.$unset = unset;
-
-  await AppConfig.findOneAndUpdate({ key: args.key }, op, {
-    upsert: true,
-    new: true,
-    setDefaultsOnInsert: true,
-  });
-
-  // Sync cache for this key in-memory so the next read sees the change
-  // without waiting for the next preload.
-  const row = cache.get(args.key) ?? emptyRow();
-  if (args.testValue !== undefined) row.test = args.testValue === '' ? null : args.testValue;
-  if (args.liveValue !== undefined) row.live = args.liveValue === '' ? null : args.liveValue;
-  if (args.legacyValue !== undefined) row.legacy = args.legacyValue === '' ? null : args.legacyValue;
-  setRow(args.key, row);
-
-};
-
-/**
- * Persist a runtime-mode change to disk. The caller MUST trigger a
- * process restart afterwards — Mongo + Redis connections are bound at
- * boot and cannot safely be swapped in-flight. See
- * `flipModeAndScheduleRestart` in the admin controller for the full
- * write → respond → exit sequence.
- */
-export const setRuntimeMode = (mode: RuntimeMode): void => {
-  writeRuntimeMode(mode);
+  if (args.isSecret) {
+    update.valueEncrypted = encryptSecret(args.value);
+    update.value = undefined;
+  } else {
+    update.value = args.value;
+    update.valueEncrypted = undefined;
+  }
+  // Clear any legacy split-slot fields when overwriting so the row
+  // collapses back to single-slot form.
+  const unset = {
+    testValue: '' as const,
+    testValueEncrypted: '' as const,
+    liveValue: '' as const,
+    liveValueEncrypted: '' as const,
+  };
+  await AppConfig.findOneAndUpdate(
+    { key: args.key },
+    { $set: update, $unset: unset },
+    { upsert: true, new: true, setDefaultsOnInsert: true },
+  );
+  const mode = currentRuntimeMode();
+  caches[mode].set(args.key, args.value);
 };
 
 export const deleteAppConfig = async (key: string): Promise<void> => {
   await AppConfig.deleteOne({ key });
-  cache.delete(key);
+  const mode = currentRuntimeMode();
+  caches[mode].delete(key);
 };
 
-/**
- * Drop the entire in-memory cache and re-load from Mongo. Useful after
- * a bulk import or when an operator suspects drift.
- */
 export const clearAppConfigCache = async (): Promise<void> => {
   await preloadAppConfig();
 };
@@ -224,48 +184,33 @@ const previewOf = (raw: string | null, isSecret: boolean): string | null => {
   return raw.length <= 4 ? '*'.repeat(raw.length) : `••••${raw.slice(-4)}`;
 };
 
-/**
- * Lists all keys with their metadata. Secrets are NEVER decrypted to the
- * caller — only masked previews and `hasValue` flags per slot.
- */
 export interface AppConfigSummary {
   key: string;
   category: AppConfigCategory;
   isSecret: boolean;
-  hasTestValue: boolean;
-  hasLiveValue: boolean;
-  hasLegacyValue: boolean;
-  testPreview: string | null;
-  livePreview: string | null;
-  legacyPreview: string | null;
+  hasValue: boolean;
+  preview: string | null;
   notes?: string;
   updatedAt: Date;
 }
 
+/**
+ * Lists all keys for the ACTIVE mode. Secrets are never decrypted
+ * outside the cache — `preview` carries a masked hint built from the
+ * stored plaintext (cache resident) when present.
+ */
 export const listAppConfig = async (): Promise<AppConfigSummary[]> => {
   const rows = await AppConfig.find({})
     .select('+valueEncrypted +testValueEncrypted +liveValueEncrypted')
     .lean();
   return rows.map((row) => {
-    const testPlain = row.isSecret
-      ? decryptOrNull(row.key, row.testValueEncrypted)
-      : row.testValue ?? null;
-    const livePlain = row.isSecret
-      ? decryptOrNull(row.key, row.liveValueEncrypted)
-      : row.liveValue ?? null;
-    const legacyPlain = row.isSecret
-      ? decryptOrNull(row.key, row.valueEncrypted)
-      : row.value ?? null;
+    const plain = pickSlot(row as Parameters<typeof pickSlot>[0], row.key);
     return {
       key: row.key,
       category: row.category,
       isSecret: row.isSecret,
-      hasTestValue: Boolean(testPlain),
-      hasLiveValue: Boolean(livePlain),
-      hasLegacyValue: Boolean(legacyPlain),
-      testPreview: previewOf(testPlain, row.isSecret),
-      livePreview: previewOf(livePlain, row.isSecret),
-      legacyPreview: previewOf(legacyPlain, row.isSecret),
+      hasValue: Boolean(plain),
+      preview: previewOf(plain, row.isSecret),
       notes: row.notes,
       updatedAt: row.updatedAt,
     };

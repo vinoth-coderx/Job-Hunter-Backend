@@ -5,11 +5,12 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.sendJobAlertWhatsApp = void 0;
 const axios_1 = __importDefault(require("axios"));
+const config_service_1 = require("../config/config.service");
 const logger_1 = require("../../utils/logger");
 const TEMPLATE_PARAMS = 3;
-const isConfigured = () => !!process.env.MSG91_AUTH_KEY &&
-    !!process.env.MSG91_WHATSAPP_NUMBER &&
-    !!process.env.MSG91_WHATSAPP_TEMPLATE;
+const isConfigured = () => !!(0, config_service_1.getAppConfig)('MSG91_AUTH_KEY') &&
+    !!(0, config_service_1.getAppConfig)('MSG91_WHATSAPP_NUMBER') &&
+    !!(0, config_service_1.getAppConfig)('MSG91_WHATSAPP_TEMPLATE');
 const sendJobAlertWhatsApp = async (params) => {
     if (!isConfigured()) {
         logger_1.logger.debug('MSG91 not configured — skipping WhatsApp alert');
@@ -24,15 +25,15 @@ const sendJobAlertWhatsApp = async (params) => {
         return;
     const top = params.jobs[0];
     const body = {
-        integrated_number: process.env.MSG91_WHATSAPP_NUMBER,
+        integrated_number: (0, config_service_1.getAppConfig)('MSG91_WHATSAPP_NUMBER'),
         content_type: 'template',
         payload: {
             messaging_product: 'whatsapp',
             type: 'template',
             template: {
-                name: process.env.MSG91_WHATSAPP_TEMPLATE,
+                name: (0, config_service_1.getAppConfig)('MSG91_WHATSAPP_TEMPLATE'),
                 language: { code: 'en_US', policy: 'deterministic' },
-                namespace: process.env.MSG91_WHATSAPP_NAMESPACE,
+                namespace: (0, config_service_1.getAppConfig)('MSG91_WHATSAPP_NAMESPACE') ?? undefined,
                 to_and_components: [
                     {
                         to: [phone],
@@ -64,7 +65,7 @@ const sendJobAlertWhatsApp = async (params) => {
         await axios_1.default.post('https://control.msg91.com/api/v5/whatsapp/whatsapp-outbound-message/bulk/', body, {
             timeout: 12_000,
             headers: {
-                authkey: process.env.MSG91_AUTH_KEY,
+                authkey: (0, config_service_1.getAppConfig)('MSG91_AUTH_KEY') ?? '',
                 'Content-Type': 'application/json',
             },
         });

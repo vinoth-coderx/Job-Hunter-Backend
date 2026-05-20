@@ -1,0 +1,15 @@
+"use strict";
+Object.defineProperty(exports, "__esModule", { value: true });
+const express_1 = require("express");
+const auth_1 = require("../middleware/auth");
+const validate_1 = require("../middleware/validate");
+const verification_controller_1 = require("../controllers/verification.controller");
+const router = (0, express_1.Router)();
+router.use(auth_1.authenticate);
+router.get('/status', verification_controller_1.myVerificationStatus);
+router.post('/gst', (0, validate_1.validate)(verification_controller_1.submitGstSchema), verification_controller_1.submitGst);
+router.post('/domain-email', (0, validate_1.validate)(verification_controller_1.submitDomainEmailSchema), verification_controller_1.submitDomainEmail);
+router.post('/domain-email/confirm', (0, validate_1.validate)(verification_controller_1.confirmDomainEmailSchema), verification_controller_1.confirmDomainEmail);
+router.post('/website', (0, validate_1.validate)(verification_controller_1.submitWebsiteSchema), verification_controller_1.submitWebsite);
+router.post('/linkedin', (0, validate_1.validate)(verification_controller_1.submitLinkedinSchema), verification_controller_1.submitLinkedin);
+exports.default = router;

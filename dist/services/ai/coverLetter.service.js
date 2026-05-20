@@ -1,18 +1,15 @@
 "use strict";
-var __importDefault = (this && this.__importDefault) || function (mod) {
-    return (mod && mod.__esModule) ? mod : { "default": mod };
-};
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.generateCoverLetter = void 0;
-const sdk_1 = __importDefault(require("@anthropic-ai/sdk"));
-const env_1 = require("../../config/env");
+exports.generateCoverLetter = exports.hasCoverLetterCached = void 0;
 const logger_1 = require("../../utils/logger");
 const redis_1 = require("../../config/redis");
-const client = env_1.env.ANTHROPIC_API_KEY
-    ? new sdk_1.default({ apiKey: env_1.env.ANTHROPIC_API_KEY })
-    : null;
-const MODEL = 'claude-haiku-4-5-20251001';
+const providers_1 = require("./providers");
 const cacheKey = (userId, jobId, tone) => `coverletter:${userId}:${jobId}:${tone}`;
+const hasCoverLetterCached = async (params) => {
+    const exists = await redis_1.redis.exists(cacheKey(params.userId, params.jobId, params.tone));
+    return exists === 1;
+};
+exports.hasCoverLetterCached = hasCoverLetterCached;
 const profileBlock = (user) => {
     const p = user.profile;
     const lines = [
@@ -65,7 +62,7 @@ const generateCoverLetter = async (params) => {
     const cached = await redis_1.redis.get(key);
     if (cached)
         return { letter: cached, usedAi: true };
-    if (!client) {
+    if (!(0, providers_1.isAiEnabled)()) {
         return { letter: fallback(params.user, params.job), usedAi: false };
     }
     const system = `You write concise, sincere cover letters for job applications. Constraints:
@@ -84,16 +81,14 @@ ${params.baseTemplate ? `User-supplied base template (treat as guidance, do not 
 
 Write the cover letter now.`;
     try {
-        const res = await client.messages.create({
-            model: MODEL,
-            max_tokens: 600,
+        const res = await (0, providers_1.generate)({
+            tier: 'lite',
             system,
-            messages: [{ role: 'user', content: user }],
+            user,
+            maxTokens: 600,
+            temperature: 0.5,
         });
-        const block = res.content[0];
-        const text = block && block.type === 'text' && typeof block.text === 'string'
-            ? block.text.trim()
-            : '';
+        const text = res.text.trim();
         if (!text) {
             return { letter: fallback(params.user, params.job), usedAi: false };
         }
