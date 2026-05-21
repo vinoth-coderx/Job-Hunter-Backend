@@ -124,8 +124,7 @@ export const suggestSmartReplies = async (
     : undefined;
   if (
     !preferred &&
-    !isProviderEnabled('gemini') &&
-    !isProviderEnabled('claude')
+    !isProviderEnabled('gemini')
   ) {
     return { suggestions: heuristic(), usedAi: false, cached: false };
   }

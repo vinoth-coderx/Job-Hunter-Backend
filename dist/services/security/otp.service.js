@@ -9,7 +9,6 @@ const bcryptjs_1 = __importDefault(require("bcryptjs"));
 const Otp_1 = require("../../models/Otp");
 const ApiError_1 = require("../../utils/ApiError");
 const email_service_1 = require("../notification/email.service");
-const sms_service_1 = require("../notification/sms.service");
 const logger_1 = require("../../utils/logger");
 const mongoose_1 = __importDefault(require("mongoose"));
 const OTP_TTL_MS = 10 * 60 * 1000;
@@ -54,7 +53,7 @@ const issueOtp = async (input) => {
         }).catch((e) => logger_1.logger.warn(`[otp] email send failed: ${e.message}`));
     }
     else if (input.channel === 'phone') {
-        (0, sms_service_1.sendOtpSms)(ident, code).catch((e) => logger_1.logger.warn(`[otp] sms send failed: ${e.message}`));
+        logger_1.logger.warn(`[otp] phone channel requested but no SMS gateway configured; code persisted only for ${ident}`);
     }
     return { code };
 };

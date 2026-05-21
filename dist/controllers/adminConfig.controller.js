@@ -25,7 +25,6 @@ const VALID_CATEGORIES = [
 const KEY_REGEX = /^[A-Z][A-Z0-9_]{0,79}$/;
 const MANAGED_KEYS = {
     GEMINI_API_KEY: { surface: '/ai page (AiKey routing)', href: '/ai' },
-    ANTHROPIC_API_KEY: { surface: '/ai page (AiKey routing)', href: '/ai' },
     GROQ_API_KEY: { surface: '/ai page (AiKey routing)', href: '/ai' },
 };
 const toEntry = (row, updatedAtFallback) => ({
@@ -137,30 +136,6 @@ const PROBES = {
         return r.status === 200
             ? { ok: true, detail: `gemini ok (${(r.data?.models?.length ?? 0)} models)` }
             : { ok: false, detail: `gemini returned ${r.status}` };
-    },
-    ANTHROPIC_API_KEY: async () => {
-        const key = (0, config_service_1.getAppConfig)('ANTHROPIC_API_KEY');
-        if (!key)
-            return { ok: false, detail: 'ANTHROPIC_API_KEY not set' };
-        if (!key.startsWith('sk-ant-')) {
-            return { ok: false, detail: 'key does not look like an Anthropic key (sk-ant-…)' };
-        }
-        const r = await axios_1.default.post('https://api.anthropic.com/v1/messages', {
-            model: 'claude-haiku-4-5-20251001',
-            max_tokens: 1,
-            messages: [{ role: 'user', content: 'ping' }],
-        }, {
-            headers: {
-                'x-api-key': key,
-                'anthropic-version': '2023-06-01',
-                'content-type': 'application/json',
-            },
-            timeout: 10000,
-            validateStatus: () => true,
-        });
-        return r.status === 200
-            ? { ok: true, detail: 'anthropic auth ok' }
-            : { ok: false, detail: `anthropic returned ${r.status}: ${truncate(r.data?.error?.message)}` };
     },
     CLOUDINARY_CLOUD_NAME: async () => probeCloudinary(),
     CLOUDINARY_API_KEY: async () => probeCloudinary(),

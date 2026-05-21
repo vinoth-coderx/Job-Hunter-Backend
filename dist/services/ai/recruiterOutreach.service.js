@@ -90,8 +90,7 @@ const draftRecruiterOutreach = async (args) => {
         ? 'groq'
         : undefined;
     if (!preferred &&
-        !(0, providers_1.isProviderEnabled)('gemini') &&
-        !(0, providers_1.isProviderEnabled)('claude')) {
+        !(0, providers_1.isProviderEnabled)('gemini')) {
         return {
             drafts: fallback(candidate.profile, job),
             usedAi: false,

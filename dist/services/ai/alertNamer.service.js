@@ -92,8 +92,7 @@ const suggestAlertNames = async (input, opts = {}) => {
         ? 'groq'
         : undefined;
     if (!preferred &&
-        !(0, providers_1.isProviderEnabled)('gemini') &&
-        !(0, providers_1.isProviderEnabled)('claude')) {
+        !(0, providers_1.isProviderEnabled)('gemini')) {
         return heuristic(input);
     }
     const userPrompt = [

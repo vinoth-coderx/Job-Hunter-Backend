@@ -173,8 +173,7 @@ export const generateScreeningQuestions = async (
     : undefined;
   if (
     !preferred &&
-    !isProviderEnabled('gemini') &&
-    !isProviderEnabled('claude')
+    !isProviderEnabled('gemini')
   ) {
     return {
       questions: heuristicFallback(),

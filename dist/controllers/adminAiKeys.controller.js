@@ -9,7 +9,7 @@ const aesCrypto_1 = require("../utils/aesCrypto");
 const aiKeySync_service_1 = require("../services/ai/aiKeySync.service");
 const config_service_1 = require("../services/config/config.service");
 const providers_1 = require("../services/ai/providers");
-const PROVIDERS = ['gemini', 'claude', 'groq'];
+const PROVIDERS = ['gemini', 'groq'];
 const toResponse = (k) => ({
     _id: k._id.toString(),
     provider: k.provider,
@@ -264,10 +264,9 @@ exports.syncAiKeysToAppConfig = (0, asyncHandler_1.asyncHandler)(async (_req, re
     await (0, aiKeySync_service_1.syncAllProvidersToAppConfig)();
     const APP_CFG = {
         gemini: 'GEMINI_API_KEY',
-        claude: 'ANTHROPIC_API_KEY',
         groq: 'GROQ_API_KEY',
     };
-    const report = { gemini: {}, claude: {}, groq: {} };
+    const report = { gemini: {}, groq: {} };
     for (const p of PROVIDERS) {
         const [keyRowsTotal, activeRows] = await Promise.all([
             AiKey_1.AiKey.countDocuments({ provider: p }),

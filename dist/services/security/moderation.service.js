@@ -175,7 +175,7 @@ const runAiRisk = async (job) => {
     if (!(0, providers_1.isAiEnabled)())
         return null;
     const groqAvailable = (0, providers_1.isProviderEnabled)('groq');
-    const geminiAvailable = (0, providers_1.isProviderEnabled)('gemini') || (0, providers_1.isProviderEnabled)('claude');
+    const geminiAvailable = (0, providers_1.isProviderEnabled)('gemini');
     if (!groqAvailable) {
         return callRiskModel(job, undefined, SYSTEM_TRIAGE, 'gemini-only');
     }

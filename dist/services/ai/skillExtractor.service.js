@@ -76,7 +76,7 @@ const extractSkills = async (text, opts = {}) => {
     const preferred = (0, providers_1.isProviderEnabled)('groq')
         ? 'groq'
         : undefined;
-    if (!preferred && !(0, providers_1.isProviderEnabled)('gemini') && !(0, providers_1.isProviderEnabled)('claude')) {
+    if (!preferred && !(0, providers_1.isProviderEnabled)('gemini')) {
         return { skills: [], usedAi: false, cached: false };
     }
     try {

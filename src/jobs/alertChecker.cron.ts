@@ -11,7 +11,6 @@ import { Job, IJob } from '../models/Job';
 import { User } from '../models/User';
 import { sendToTokens } from '../services/notification/fcm.service';
 import { sendJobAlertEmail } from '../services/notification/email.service';
-import { sendJobAlertWhatsApp } from '../services/notification/whatsapp.service';
 import { trackedCron, getCronSchedule } from '../utils/cronTracker';
 
 let alertTask: ScheduledTask | null = null;
@@ -135,19 +134,6 @@ export const checkAlertsNow = async (): Promise<void> => {
           });
         } catch (e) {
           logger.warn(`alert email send failed: ${(e as Error).message}`);
-        }
-      }
-
-      // ── WhatsApp (MSG91) — opt-in.
-      if (prefs.whatsapp === true && user.profile?.phone) {
-        try {
-          await sendJobAlertWhatsApp({
-            fullName: user.profile?.fullName ?? 'there',
-            phone: user.profile.phone,
-            jobs: jobs as unknown as IJob[],
-          });
-        } catch (e) {
-          logger.warn(`alert WhatsApp send failed: ${(e as Error).message}`);
         }
       }
 

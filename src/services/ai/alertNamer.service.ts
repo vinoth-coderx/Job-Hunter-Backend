@@ -111,8 +111,7 @@ export const suggestAlertNames = async (
     : undefined;
   if (
     !preferred &&
-    !isProviderEnabled('gemini') &&
-    !isProviderEnabled('claude')
+    !isProviderEnabled('gemini')
   ) {
     return heuristic(input);
   }

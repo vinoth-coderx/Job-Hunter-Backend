@@ -60,6 +60,30 @@ export const CONFIG_REGISTRY: ConfigRegistryEntry[] = [
     usedBy: 'services/scrapers/rapidapi.service.ts',
   },
   {
+    key: 'OPENWEBNINJA_JSEARCH_URL',
+    category: 'job-board',
+    isSecret: false,
+    description:
+      'Override OpenWebNinja JSearch endpoint (defaults to the canonical /jsearch/search URL in constants.ts).',
+    usedBy: 'services/scrapers/rapidapi.service.ts',
+  },
+  {
+    key: 'OPENWEBNINJA_WEBSEARCH_URL',
+    category: 'job-board',
+    isSecret: false,
+    description:
+      'Override OpenWebNinja Realtime Web Search endpoint (defaults to /realtime-web-search/search).',
+    usedBy: 'services/scrapers/realtimeWebSearch.service.ts',
+  },
+  {
+    key: 'RAPIDAPI_JSEARCH_URL',
+    category: 'job-board',
+    isSecret: false,
+    description:
+      'Override the legacy RapidAPI JSearch endpoint. Only consulted when RAPIDAPI_KEY (not OpenWebNinja) is in use.',
+    usedBy: 'services/scrapers/rapidapi.service.ts',
+  },
+  {
     key: 'SERPAPI_KEY',
     category: 'job-board',
     isSecret: true,
@@ -76,13 +100,6 @@ export const CONFIG_REGISTRY: ConfigRegistryEntry[] = [
     isSecret: true,
     description: 'Google AI Studio API key. Prefer adding via /ai page (auto-syncs from AiKey).',
     usedBy: 'services/ai/providers/gemini.provider.ts',
-  },
-  {
-    key: 'ANTHROPIC_API_KEY',
-    category: 'ai',
-    isSecret: true,
-    description: 'Anthropic Claude API key. Prefer adding via /ai page.',
-    usedBy: 'services/ai/providers/claude.provider.ts',
   },
   {
     key: 'GROQ_API_KEY',
@@ -119,7 +136,7 @@ export const CONFIG_REGISTRY: ConfigRegistryEntry[] = [
     key: 'AI_PROVIDER',
     category: 'ai',
     isSecret: false,
-    description: 'Default provider when no caller-side preference is set. One of: gemini, claude, groq.',
+    description: 'Default provider when no caller-side preference is set. One of: gemini, groq.',
     defaultValue: 'gemini',
     usedBy: 'services/ai/providers/index.ts',
   },
@@ -266,50 +283,6 @@ export const CONFIG_REGISTRY: ConfigRegistryEntry[] = [
     description: '"true" to run scheduled jobs (job scraper, alert checker, auto-apply, etc.). Set to "false" on read replicas.',
     defaultValue: 'true',
     usedBy: 'jobs/*',
-  },
-
-  // ── MSG91 (SMS + WhatsApp OTPs) ─────────────────────────────────────
-  {
-    key: 'MSG91_AUTH_KEY',
-    category: 'misc',
-    isSecret: true,
-    description: 'MSG91 dashboard → API → Auth Key.',
-    usedBy: 'services/msg91/msg91.service.ts',
-  },
-  {
-    key: 'MSG91_SMS_SENDER_ID',
-    category: 'misc',
-    isSecret: false,
-    description: '6-char alphanumeric DLT-registered sender id for SMS.',
-    usedBy: 'services/msg91/msg91.service.ts',
-  },
-  {
-    key: 'MSG91_SMS_TEMPLATE_ID',
-    category: 'misc',
-    isSecret: false,
-    description: 'DLT-approved template id used for OTP SMS.',
-    usedBy: 'services/msg91/msg91.service.ts',
-  },
-  {
-    key: 'MSG91_WHATSAPP_NAMESPACE',
-    category: 'misc',
-    isSecret: false,
-    description: 'WhatsApp Business namespace UUID.',
-    usedBy: 'services/msg91/msg91.service.ts',
-  },
-  {
-    key: 'MSG91_WHATSAPP_NUMBER',
-    category: 'misc',
-    isSecret: false,
-    description: 'WhatsApp Business phone number (with country code, no +).',
-    usedBy: 'services/msg91/msg91.service.ts',
-  },
-  {
-    key: 'MSG91_WHATSAPP_TEMPLATE',
-    category: 'misc',
-    isSecret: false,
-    description: 'Approved WhatsApp template name used for OTP.',
-    usedBy: 'services/msg91/msg91.service.ts',
   },
 
   // ── Rate limiting (newly-migrated) ──────────────────────────────────

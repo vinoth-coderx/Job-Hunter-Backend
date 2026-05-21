@@ -65,8 +65,7 @@ const generateCompanyDescription = async (input, ctx = {}) => {
         ? 'groq'
         : undefined;
     if (!preferred &&
-        !(0, providers_1.isProviderEnabled)('gemini') &&
-        !(0, providers_1.isProviderEnabled)('claude')) {
+        !(0, providers_1.isProviderEnabled)('gemini')) {
         return { description: '', usedAi: false, cached: false };
     }
     const userPrompt = `Generate the About section for:

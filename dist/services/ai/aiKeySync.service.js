@@ -7,10 +7,9 @@ const aesCrypto_1 = require("../../utils/aesCrypto");
 const logger_1 = require("../../utils/logger");
 const APP_CONFIG_KEY_BY_PROVIDER = {
     gemini: 'GEMINI_API_KEY',
-    claude: 'ANTHROPIC_API_KEY',
     groq: 'GROQ_API_KEY',
 };
-const ALL_PROVIDERS = ['gemini', 'claude', 'groq'];
+const ALL_PROVIDERS = ['gemini', 'groq'];
 const syncProviderToAppConfig = async (provider) => {
     const configKey = APP_CONFIG_KEY_BY_PROVIDER[provider];
     try {

@@ -42,12 +42,10 @@ export const AI_MATCH_THRESHOLD = 50;
 //                 JD generation, anticipatory recommendations).
 //   - "lite"    → 2.5 Flash-Lite, used for fast structured extraction
 //                 (resume parsing, suggestion lists) — costs less quota.
-// Claude (paid, future) maps to Haiku 4.5 / Sonnet 4.6 via the same
-// "lite" / "smart" buckets in providers/claude.provider.ts.
+// Groq runs the fast lane (moderation triage, resume rewrite) via its own
+// model identifiers in services/ai/providers/groq.provider.ts.
 export const GEMINI_MODEL_SMART = 'gemini-2.5-flash';
 export const GEMINI_MODEL_LITE = 'gemini-2.5-flash-lite';
-export const CLAUDE_MODEL_LITE = 'claude-haiku-4-5-20251001';
-export const CLAUDE_MODEL_SMART = 'claude-sonnet-4-6';
 
 // ─── AI quota (free tier protection) ─────────────────────────────────
 // Per-user daily cap → soft limit, blocks just that user when hit.

@@ -15,7 +15,7 @@ import mongoose, { Schema, Document, Model } from 'mongoose';
  * The `feature` string is free-form (not enum) to keep this open for new
  * AI services without a schema migration; the admin UI groups by it.
  */
-export type AiUsageProvider = 'gemini' | 'claude' | 'groq';
+export type AiUsageProvider = 'gemini' | 'groq';
 export type AiUsageTier = 'lite' | 'smart';
 
 export interface IAiUsageLog extends Document {
@@ -41,7 +41,7 @@ const aiUsageLogSchema = new Schema<IAiUsageLog>(
     feature: { type: String, required: true, index: true, maxlength: 60 },
     provider: {
       type: String,
-      enum: ['gemini', 'claude', 'groq'],
+      enum: ['gemini', 'groq'],
       required: true,
       index: true,
     },

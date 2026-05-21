@@ -117,8 +117,7 @@ export const summariseResume = async (
     : undefined;
   if (
     !preferred &&
-    !isProviderEnabled('gemini') &&
-    !isProviderEnabled('claude')
+    !isProviderEnabled('gemini')
   ) {
     return {
       summary: 'AI summary unavailable.',

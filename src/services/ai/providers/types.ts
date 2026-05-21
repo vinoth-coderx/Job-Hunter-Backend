@@ -32,7 +32,7 @@ export interface AiGenerateResult {
 }
 
 export interface AiProvider {
-  name: 'gemini' | 'claude' | 'groq';
+  name: 'gemini' | 'groq';
   enabled: boolean;
   generate(opts: AiGenerateOptions): Promise<AiGenerateResult>;
 }

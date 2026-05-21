@@ -229,7 +229,7 @@ const runAiRisk = async (
   if (!isAiEnabled()) return null;
 
   const groqAvailable = isProviderEnabled('groq');
-  const geminiAvailable = isProviderEnabled('gemini') || isProviderEnabled('claude');
+  const geminiAvailable = isProviderEnabled('gemini');
 
   // No Groq: run Gemini once, same as before.
   if (!groqAvailable) {

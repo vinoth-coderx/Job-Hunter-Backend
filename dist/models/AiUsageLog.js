@@ -40,7 +40,7 @@ const aiUsageLogSchema = new mongoose_1.Schema({
     feature: { type: String, required: true, index: true, maxlength: 60 },
     provider: {
         type: String,
-        enum: ['gemini', 'claude', 'groq'],
+        enum: ['gemini', 'groq'],
         required: true,
         index: true,
     },

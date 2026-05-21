@@ -140,8 +140,7 @@ export const draftRecruiterOutreach = async (
     : undefined;
   if (
     !preferred &&
-    !isProviderEnabled('gemini') &&
-    !isProviderEnabled('claude')
+    !isProviderEnabled('gemini')
   ) {
     return {
       drafts: fallback(candidate.profile, job),

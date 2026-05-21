@@ -96,7 +96,7 @@ export const extractSkills = async (
   const preferred: 'groq' | undefined = isProviderEnabled('groq')
     ? 'groq'
     : undefined;
-  if (!preferred && !isProviderEnabled('gemini') && !isProviderEnabled('claude')) {
+  if (!preferred && !isProviderEnabled('gemini')) {
     return { skills: [], usedAi: false, cached: false };
   }
 

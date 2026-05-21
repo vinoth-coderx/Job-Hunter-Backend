@@ -5,8 +5,8 @@ import { logger } from '../../utils/logger';
 
 /**
  * AiKey records are the admin-managed source of truth for each AI
- * provider's credentials. The runtime provider clients (gemini, claude,
- * groq) still read their key from AppConfig — this service projects the
+ * provider's credentials. The runtime provider clients (gemini, groq)
+ * still read their key from AppConfig — this service projects the
  * "winning" AiKey for each provider down into AppConfig so the providers
  * keep working without any per-request DB call.
  *
@@ -18,11 +18,10 @@ import { logger } from '../../utils/logger';
 
 const APP_CONFIG_KEY_BY_PROVIDER: Record<AiProvider, string> = {
   gemini: 'GEMINI_API_KEY',
-  claude: 'ANTHROPIC_API_KEY',
   groq: 'GROQ_API_KEY',
 };
 
-const ALL_PROVIDERS: AiProvider[] = ['gemini', 'claude', 'groq'];
+const ALL_PROVIDERS: AiProvider[] = ['gemini', 'groq'];
 
 export const syncProviderToAppConfig = async (
   provider: AiProvider,

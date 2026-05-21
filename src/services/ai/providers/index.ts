@@ -1,6 +1,5 @@
 import { getAppConfig } from '../../config/config.service';
 import { logger } from '../../../utils/logger';
-import { claudeProvider } from './claude.provider';
 import { geminiProvider } from './gemini.provider';
 import { groqProvider } from './groq.provider';
 import { recordAiUsage } from '../usageLog.service';
@@ -26,9 +25,11 @@ export interface AiCallContext {
   feature: string;
 }
 
+export type AiProviderName = 'gemini' | 'groq';
+
 /**
  * Build the provider chain for a single generate() call:
- * preferred (or AI_PROVIDER from config) first, then the others in a
+ * preferred (or AI_PROVIDER from config) first, then the other in a
  * fixed order. Only enabled providers (key configured) are returned —
  * disabled ones are skipped, not surfaced as failures.
  *
@@ -37,24 +38,17 @@ export interface AiCallContext {
  * automatically. Non-quota errors don't trigger fallback because they
  * usually mean the caller's prompt is bad — retrying won't help.
  */
-const ALL_PROVIDER_NAMES: ('gemini' | 'claude' | 'groq')[] = [
-  'gemini',
-  'claude',
-  'groq',
-];
+const ALL_PROVIDER_NAMES: AiProviderName[] = ['gemini', 'groq'];
 
-const providerByName = (name: 'gemini' | 'claude' | 'groq'): AiProvider => {
-  if (name === 'claude') return claudeProvider;
+const providerByName = (name: AiProviderName): AiProvider => {
   if (name === 'groq') return groqProvider;
   return geminiProvider;
 };
 
-const buildProviderChain = (
-  preferred?: 'gemini' | 'claude' | 'groq',
-): AiProvider[] => {
+const buildProviderChain = (preferred?: AiProviderName): AiProvider[] => {
   const want =
     preferred ??
-    (getAppConfig('AI_PROVIDER') as 'gemini' | 'claude' | 'groq' | null) ??
+    (getAppConfig('AI_PROVIDER') as AiProviderName | null) ??
     'gemini';
   // Preferred first, then the rest in `ALL_PROVIDER_NAMES` order — dedupe
   // and keep only the providers that currently have a key configured.
@@ -71,11 +65,10 @@ const buildProviderChain = (
 };
 
 export const isAiEnabled = (): boolean =>
-  geminiProvider.enabled || claudeProvider.enabled || groqProvider.enabled;
+  geminiProvider.enabled || groqProvider.enabled;
 
-export const isProviderEnabled = (name: 'gemini' | 'claude' | 'groq'): boolean => {
+export const isProviderEnabled = (name: AiProviderName): boolean => {
   if (name === 'gemini') return geminiProvider.enabled;
-  if (name === 'claude') return claudeProvider.enabled;
   return groqProvider.enabled;
 };
 
@@ -90,7 +83,7 @@ export const isProviderEnabled = (name: 'gemini' | 'claude' | 'groq'): boolean =
  * always caller-side (bad prompt, validation) and retrying won't help.
  */
 export const generate = async (
-  opts: AiGenerateOptions & { provider?: 'gemini' | 'claude' | 'groq' },
+  opts: AiGenerateOptions & { provider?: AiProviderName },
   ctx?: AiCallContext,
 ): Promise<AiGenerateResult> => {
   const chain = buildProviderChain(opts.provider);
@@ -152,7 +145,7 @@ export const generate = async (
  * instead of bubbling SyntaxError to the request.
  */
 export const generateJson = async <T>(
-  opts: AiGenerateOptions & { provider?: 'gemini' | 'claude' | 'groq' },
+  opts: AiGenerateOptions & { provider?: AiProviderName },
   ctx?: AiCallContext,
 ): Promise<T | null> => {
   try {

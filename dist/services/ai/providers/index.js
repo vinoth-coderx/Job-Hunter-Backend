@@ -3,7 +3,6 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.recordCacheHit = exports.generateJson = exports.generate = exports.isProviderEnabled = exports.isAiEnabled = exports.AiProviderQuotaError = exports.AiProviderAuthError = void 0;
 const config_service_1 = require("../../config/config.service");
 const logger_1 = require("../../../utils/logger");
-const claude_provider_1 = require("./claude.provider");
 const gemini_provider_1 = require("./gemini.provider");
 const groq_provider_1 = require("./groq.provider");
 const usageLog_service_1 = require("../usageLog.service");
@@ -11,14 +10,8 @@ const types_1 = require("./types");
 var types_2 = require("./types");
 Object.defineProperty(exports, "AiProviderAuthError", { enumerable: true, get: function () { return types_2.AiProviderAuthError; } });
 Object.defineProperty(exports, "AiProviderQuotaError", { enumerable: true, get: function () { return types_2.AiProviderQuotaError; } });
-const ALL_PROVIDER_NAMES = [
-    'gemini',
-    'claude',
-    'groq',
-];
+const ALL_PROVIDER_NAMES = ['gemini', 'groq'];
 const providerByName = (name) => {
-    if (name === 'claude')
-        return claude_provider_1.claudeProvider;
     if (name === 'groq')
         return groq_provider_1.groqProvider;
     return gemini_provider_1.geminiProvider;
@@ -40,13 +33,11 @@ const buildProviderChain = (preferred) => {
     }
     return chain;
 };
-const isAiEnabled = () => gemini_provider_1.geminiProvider.enabled || claude_provider_1.claudeProvider.enabled || groq_provider_1.groqProvider.enabled;
+const isAiEnabled = () => gemini_provider_1.geminiProvider.enabled || groq_provider_1.groqProvider.enabled;
 exports.isAiEnabled = isAiEnabled;
 const isProviderEnabled = (name) => {
     if (name === 'gemini')
         return gemini_provider_1.geminiProvider.enabled;
-    if (name === 'claude')
-        return claude_provider_1.claudeProvider.enabled;
     return groq_provider_1.groqProvider.enabled;
 };
 exports.isProviderEnabled = isProviderEnabled;

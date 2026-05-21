@@ -96,8 +96,7 @@ export const generateCompanyDescription = async (
     : undefined;
   if (
     !preferred &&
-    !isProviderEnabled('gemini') &&
-    !isProviderEnabled('claude')
+    !isProviderEnabled('gemini')
   ) {
     return { description: '', usedAi: false, cached: false };
   }

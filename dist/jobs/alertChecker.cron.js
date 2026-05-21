@@ -15,7 +15,6 @@ const Job_1 = require("../models/Job");
 const User_1 = require("../models/User");
 const fcm_service_1 = require("../services/notification/fcm.service");
 const email_service_1 = require("../services/notification/email.service");
-const whatsapp_service_1 = require("../services/notification/whatsapp.service");
 const cronTracker_1 = require("../utils/cronTracker");
 let alertTask = null;
 let isRunning = false;
@@ -109,18 +108,6 @@ const checkAlertsNow = async () => {
                 }
                 catch (e) {
                     logger_1.logger.warn(`alert email send failed: ${e.message}`);
-                }
-            }
-            if (prefs.whatsapp === true && user.profile?.phone) {
-                try {
-                    await (0, whatsapp_service_1.sendJobAlertWhatsApp)({
-                        fullName: user.profile?.fullName ?? 'there',
-                        phone: user.profile.phone,
-                        jobs: jobs,
-                    });
-                }
-                catch (e) {
-                    logger_1.logger.warn(`alert WhatsApp send failed: ${e.message}`);
                 }
             }
             alert.lastNotifiedAt = newest.postedAt ?? new Date();

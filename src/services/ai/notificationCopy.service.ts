@@ -145,7 +145,7 @@ export const rewriteNotificationCopy = async (
     : undefined;
   // No AI configured at all → fast-path the original copy. We don't burn
   // a quota slot just to no-op.
-  if (!preferred && !isProviderEnabled('gemini') && !isProviderEnabled('claude')) {
+  if (!preferred && !isProviderEnabled('gemini')) {
     return fallback;
   }
 

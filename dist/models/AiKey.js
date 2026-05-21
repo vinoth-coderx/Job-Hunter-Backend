@@ -38,7 +38,7 @@ const mongoose_1 = __importStar(require("mongoose"));
 const aiKeySchema = new mongoose_1.Schema({
     provider: {
         type: String,
-        enum: ['gemini', 'claude', 'groq'],
+        enum: ['gemini', 'groq'],
         required: true,
         index: true,
     },

@@ -124,8 +124,7 @@ export const polishJd = async (args: PolishJdArgs): Promise<JdPolishResult> => {
     : undefined;
   if (
     !preferred &&
-    !isProviderEnabled('gemini') &&
-    !isProviderEnabled('claude')
+    !isProviderEnabled('gemini')
   ) {
     return { polished: description, changes: [], usedAi: false, cached: false };
   }

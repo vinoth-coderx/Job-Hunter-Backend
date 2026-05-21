@@ -175,8 +175,7 @@ const generateHirerDigest = async (args) => {
     }
     const snapshot = await (0, exports.buildDigestSnapshot)(args.hirerProfileId);
     const noProvider = !(0, providers_1.isProviderEnabled)('groq') &&
-        !(0, providers_1.isProviderEnabled)('gemini') &&
-        !(0, providers_1.isProviderEnabled)('claude');
+        !(0, providers_1.isProviderEnabled)('gemini');
     if (noProvider || snapshot.totalJobsActive === 0) {
         const fallback = heuristicDigest(snapshot);
         const out = {

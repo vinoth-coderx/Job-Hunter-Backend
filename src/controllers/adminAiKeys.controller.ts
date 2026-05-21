@@ -12,7 +12,7 @@ import {
 import { getAppConfig } from '../services/config/config.service';
 import { isProviderEnabled } from '../services/ai/providers';
 
-const PROVIDERS: AiProvider[] = ['gemini', 'claude', 'groq'];
+const PROVIDERS: AiProvider[] = ['gemini', 'groq'];
 
 /** Strip the encrypted key before returning to the admin UI — it never
  * round-trips. The UI works off the document fields it can safely see.
@@ -337,7 +337,6 @@ export const syncAiKeysToAppConfig = asyncHandler(
     await syncAllProvidersToAppConfig();
     const APP_CFG: Record<AiProvider, string> = {
       gemini: 'GEMINI_API_KEY',
-      claude: 'ANTHROPIC_API_KEY',
       groq: 'GROQ_API_KEY',
     };
     const report: Record<AiProvider, {
@@ -345,7 +344,7 @@ export const syncAiKeysToAppConfig = asyncHandler(
       activeRows: number;
       syncedToAppConfig: boolean;
       providerEnabled: boolean;
-    }> = { gemini: {} as never, claude: {} as never, groq: {} as never };
+    }> = { gemini: {} as never, groq: {} as never };
     for (const p of PROVIDERS) {
       const [keyRowsTotal, activeRows] = await Promise.all([
         AiKey.countDocuments({ provider: p }),

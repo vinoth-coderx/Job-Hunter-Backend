@@ -3,7 +3,6 @@ import bcrypt from 'bcryptjs';
 import { Otp, OtpChannel, OtpPurpose } from '../../models/Otp';
 import { ApiError } from '../../utils/ApiError';
 import { sendEmail } from '../notification/email.service';
-import { sendOtpSms } from '../notification/sms.service';
 import { logger } from '../../utils/logger';
 import mongoose from 'mongoose';
 
@@ -62,14 +61,11 @@ export const issueOtp = async (input: IssueOtpInput): Promise<{ code: string }> 
       html: `<div style="font-family:system-ui;font-size:15px">Your verification code is <b style="font-size:22px;letter-spacing:4px">${code}</b><br/>It expires in 10 minutes.<br/>If you didn't request this, ignore this email.</div>`,
     }).catch((e) => logger.warn(`[otp] email send failed: ${e.message}`));
   } else if (input.channel === 'phone') {
-    // MSG91 (or whatever provider AppConfig points at). Falls back to a
-    // no-op when the gateway isn't configured — the persisted code can
-    // still be verified, useful for dev environments and the QA
-    // bypass-OTP backdoor (admin can read the code via the OTP
-    // controller in non-prod builds).
-    sendOtpSms(ident, code).catch((e) =>
-      logger.warn(`[otp] sms send failed: ${e.message}`),
-    );
+    // No SMS gateway is wired in this build — the code is persisted only,
+    // which still verifies via the admin OTP controller in non-prod builds.
+    // Email is the supported delivery channel; phone is kept for schema
+    // compatibility with existing data.
+    logger.warn(`[otp] phone channel requested but no SMS gateway configured; code persisted only for ${ident}`);
   }
 
   return { code };

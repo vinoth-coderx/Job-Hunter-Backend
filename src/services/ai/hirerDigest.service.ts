@@ -277,8 +277,7 @@ export const generateHirerDigest = async (
   // about. Saves a Groq call on accounts with no activity.
   const noProvider =
     !isProviderEnabled('groq') &&
-    !isProviderEnabled('gemini') &&
-    !isProviderEnabled('claude');
+    !isProviderEnabled('gemini');
   if (noProvider || snapshot.totalJobsActive === 0) {
     const fallback = heuristicDigest(snapshot);
     const out: HirerDigest = {
