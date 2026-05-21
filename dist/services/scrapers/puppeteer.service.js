@@ -1,22 +1,16 @@
 "use strict";
-var __importDefault = (this && this.__importDefault) || function (mod) {
-    return (mod && mod.__esModule) ? mod : { "default": mod };
-};
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.PuppeteerScraper = void 0;
-const puppeteer_1 = __importDefault(require("puppeteer"));
 const base_1 = require("./base");
 const constants_1 = require("../../config/constants");
+const puppeteerLaunch_1 = require("../../utils/puppeteerLaunch");
 class PuppeteerScraper extends base_1.BaseScraper {
     source = 'puppeteer';
     browser = null;
     async getBrowser() {
         if (this.browser && this.browser.connected)
             return this.browser;
-        this.browser = await puppeteer_1.default.launch({
-            headless: constants_1.PUPPETEER_HEADLESS,
-            args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],
-        });
+        this.browser = await (0, puppeteerLaunch_1.launchBrowser)();
         return this.browser;
     }
     async close() {

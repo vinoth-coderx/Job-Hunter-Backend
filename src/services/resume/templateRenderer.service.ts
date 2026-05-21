@@ -1,6 +1,6 @@
-import puppeteer, { Browser } from 'puppeteer';
+import type { Browser } from 'puppeteer-core';
 import { logger } from '../../utils/logger';
-import { PUPPETEER_HEADLESS } from '../../config/constants';
+import { launchBrowser } from '../../utils/puppeteerLaunch';
 import { IUser } from '../../models/User';
 
 /**
@@ -21,14 +21,7 @@ import { IUser } from '../../models/User';
 let browser: Browser | null = null;
 const getBrowser = async (): Promise<Browser> => {
   if (browser && browser.connected) return browser;
-  browser = await puppeteer.launch({
-    headless: PUPPETEER_HEADLESS,
-    args: [
-      '--no-sandbox',
-      '--disable-setuid-sandbox',
-      '--disable-dev-shm-usage',
-    ],
-  });
+  browser = await launchBrowser();
   return browser;
 };
 
@@ -249,7 +242,7 @@ export const renderTemplatePdf = async (
   const b = await getBrowser();
   const page = await b.newPage();
   try {
-    await page.setContent(filledHtml, { waitUntil: 'networkidle0' });
+    await page.setContent(filledHtml, { waitUntil: 'load' });
     const pdf = await page.pdf({
       format: 'A4',
       printBackground: true,
@@ -280,7 +273,7 @@ export const renderTemplateThumbnail = async (
   const page = await b.newPage();
   try {
     await page.setViewport({ width: 600, height: 840, deviceScaleFactor: 1.5 });
-    await page.setContent(html, { waitUntil: 'networkidle0' });
+    await page.setContent(html, { waitUntil: 'load' });
     const png = await page.screenshot({
       type: 'png',
       fullPage: false,

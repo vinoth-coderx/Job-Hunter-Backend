@@ -4,6 +4,7 @@ import { AuthRequest } from '../types';
 import { asyncHandler } from '../utils/asyncHandler';
 import { ApiError } from '../utils/ApiError';
 import { AiKey, IAiKey, AiProvider } from '../models/AiKey';
+import { AiUsageLog } from '../models/AiUsageLog';
 import { encryptSecret, decryptSecret } from '../utils/aesCrypto';
 import {
   syncProviderToAppConfig,
@@ -11,6 +12,25 @@ import {
 } from '../services/ai/aiKeySync.service';
 import { getAppConfig } from '../services/config/config.service';
 import { isProviderEnabled } from '../services/ai/providers';
+
+/**
+ * UTC instant of the most recent IST midnight (Asia/Kolkata = UTC+5:30,
+ * no DST). Used to filter `AiUsageLog` rows logged "today" by the same
+ * boundary the per-user / global quota service uses for reset.
+ */
+const istMidnightTodayUtc = (now = new Date()): Date => {
+  const IST_OFFSET_MIN = 330;
+  const istNow = new Date(now.getTime() + IST_OFFSET_MIN * 60_000);
+  const istMidnight = Date.UTC(
+    istNow.getUTCFullYear(),
+    istNow.getUTCMonth(),
+    istNow.getUTCDate(),
+    0,
+    0,
+    0,
+  );
+  return new Date(istMidnight - IST_OFFSET_MIN * 60_000);
+};
 
 const PROVIDERS: AiProvider[] = ['gemini', 'groq'];
 
@@ -157,10 +177,48 @@ const parseBody = (
 
 export const listAiKeys = asyncHandler(
   async (_req: AuthRequest, res: Response) => {
-    const keys = await AiKey.find({})
-      .sort({ priority: 1, createdAt: -1 })
-      .lean<IAiKey[]>();
-    res.json({ keys: keys.map((k) => toResponse(k)) });
+    const since = istMidnightTodayUtc();
+    const [keys, usageRows] = await Promise.all([
+      AiKey.find({})
+        .sort({ priority: 1, createdAt: -1 })
+        .lean<IAiKey[]>(),
+      // Live per-provider counts for *today* (since IST midnight) and the
+      // most recent call timestamp. AiUsageLog is the source of truth —
+      // the static `usageToday` field on AiKey was never incremented and
+      // the per-call lookup of "which AiKey was used" doesn't exist on
+      // the log row (we only carry the provider). Showing aggregated
+      // provider usage on each key is honest and shared providers
+      // typically only have one active key anyway.
+      AiUsageLog.aggregate<{
+        _id: AiProvider;
+        callsToday: number;
+        lastUsedAt: Date | null;
+      }>([
+        { $match: { createdAt: { $gte: since } } },
+        {
+          $group: {
+            _id: '$provider',
+            callsToday: { $sum: 1 },
+            lastUsedAt: { $max: '$createdAt' },
+          },
+        },
+      ]),
+    ]);
+
+    const byProvider = new Map(
+      usageRows.map((r) => [r._id, r] as const),
+    );
+
+    res.json({
+      keys: keys.map((k) => {
+        const live = byProvider.get(k.provider);
+        return {
+          ...toResponse(k),
+          usageToday: live?.callsToday ?? 0,
+          lastUsedAt: (live?.lastUsedAt ?? k.lastUsedAt)?.toISOString(),
+        };
+      }),
+    });
   },
 );
 

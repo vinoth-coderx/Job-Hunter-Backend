@@ -1,7 +1,8 @@
-import puppeteer, { Browser } from 'puppeteer';
+import type { Browser } from 'puppeteer-core';
 import { BaseScraper } from './base';
 import { ScrapedJob } from '../../types';
-import { JOB_FRESHNESS_DAYS, PUPPETEER_HEADLESS, SCRAPER_TIMEOUT_MS } from '../../config/constants';
+import { JOB_FRESHNESS_DAYS, SCRAPER_TIMEOUT_MS } from '../../config/constants';
+import { launchBrowser } from '../../utils/puppeteerLaunch';
 
 export class PuppeteerScraper extends BaseScraper {
   source = 'puppeteer' as const;
@@ -9,10 +10,7 @@ export class PuppeteerScraper extends BaseScraper {
 
   private async getBrowser(): Promise<Browser> {
     if (this.browser && this.browser.connected) return this.browser;
-    this.browser = await puppeteer.launch({
-      headless: PUPPETEER_HEADLESS,
-      args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],
-    });
+    this.browser = await launchBrowser();
     return this.browser;
   }
 

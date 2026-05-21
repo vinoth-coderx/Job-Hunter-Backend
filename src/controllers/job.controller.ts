@@ -581,7 +581,9 @@ export const matchedJobs = asyncHandler(async (req: AuthRequest, res: Response) 
     success: true,
     data: slice.map((m) => ({
       job: m.job,
-      score: m.match.score,
+      // Emit null when the score is 0 (empty profile, no signal) so the
+      // client can omit the match badge instead of rendering "0%".
+      score: m.match.score > 0 ? m.match.score : null,
       matchedSkills: m.match.matchedSkills,
       missingSkills: m.match.missingSkills,
       reasoning: m.match.reasoning,

@@ -1,24 +1,13 @@
 "use strict";
-var __importDefault = (this && this.__importDefault) || function (mod) {
-    return (mod && mod.__esModule) ? mod : { "default": mod };
-};
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.renderTemplateThumbnail = exports.renderTemplatePdf = exports.fillPlaceholders = exports.fillWithSample = exports.closeTemplateRendererBrowser = void 0;
-const puppeteer_1 = __importDefault(require("puppeteer"));
 const logger_1 = require("../../utils/logger");
-const constants_1 = require("../../config/constants");
+const puppeteerLaunch_1 = require("../../utils/puppeteerLaunch");
 let browser = null;
 const getBrowser = async () => {
     if (browser && browser.connected)
         return browser;
-    browser = await puppeteer_1.default.launch({
-        headless: constants_1.PUPPETEER_HEADLESS,
-        args: [
-            '--no-sandbox',
-            '--disable-setuid-sandbox',
-            '--disable-dev-shm-usage',
-        ],
-    });
+    browser = await (0, puppeteerLaunch_1.launchBrowser)();
     return browser;
 };
 const closeTemplateRendererBrowser = async () => {
@@ -146,7 +135,7 @@ const renderTemplatePdf = async (filledHtml) => {
     const b = await getBrowser();
     const page = await b.newPage();
     try {
-        await page.setContent(filledHtml, { waitUntil: 'networkidle0' });
+        await page.setContent(filledHtml, { waitUntil: 'load' });
         const pdf = await page.pdf({
             format: 'A4',
             printBackground: true,
@@ -169,7 +158,7 @@ const renderTemplateThumbnail = async (html) => {
     const page = await b.newPage();
     try {
         await page.setViewport({ width: 600, height: 840, deviceScaleFactor: 1.5 });
-        await page.setContent(html, { waitUntil: 'networkidle0' });
+        await page.setContent(html, { waitUntil: 'load' });
         const png = await page.screenshot({
             type: 'png',
             fullPage: false,

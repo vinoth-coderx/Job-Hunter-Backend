@@ -5,10 +5,17 @@ const mongoose_1 = require("mongoose");
 const asyncHandler_1 = require("../utils/asyncHandler");
 const ApiError_1 = require("../utils/ApiError");
 const AiKey_1 = require("../models/AiKey");
+const AiUsageLog_1 = require("../models/AiUsageLog");
 const aesCrypto_1 = require("../utils/aesCrypto");
 const aiKeySync_service_1 = require("../services/ai/aiKeySync.service");
 const config_service_1 = require("../services/config/config.service");
 const providers_1 = require("../services/ai/providers");
+const istMidnightTodayUtc = (now = new Date()) => {
+    const IST_OFFSET_MIN = 330;
+    const istNow = new Date(now.getTime() + IST_OFFSET_MIN * 60_000);
+    const istMidnight = Date.UTC(istNow.getUTCFullYear(), istNow.getUTCMonth(), istNow.getUTCDate(), 0, 0, 0);
+    return new Date(istMidnight - IST_OFFSET_MIN * 60_000);
+};
 const PROVIDERS = ['gemini', 'groq'];
 const toResponse = (k) => ({
     _id: k._id.toString(),
@@ -128,10 +135,33 @@ const parseBody = (body, { requireApiKey }) => {
     return out;
 };
 exports.listAiKeys = (0, asyncHandler_1.asyncHandler)(async (_req, res) => {
-    const keys = await AiKey_1.AiKey.find({})
-        .sort({ priority: 1, createdAt: -1 })
-        .lean();
-    res.json({ keys: keys.map((k) => toResponse(k)) });
+    const since = istMidnightTodayUtc();
+    const [keys, usageRows] = await Promise.all([
+        AiKey_1.AiKey.find({})
+            .sort({ priority: 1, createdAt: -1 })
+            .lean(),
+        AiUsageLog_1.AiUsageLog.aggregate([
+            { $match: { createdAt: { $gte: since } } },
+            {
+                $group: {
+                    _id: '$provider',
+                    callsToday: { $sum: 1 },
+                    lastUsedAt: { $max: '$createdAt' },
+                },
+            },
+        ]),
+    ]);
+    const byProvider = new Map(usageRows.map((r) => [r._id, r]));
+    res.json({
+        keys: keys.map((k) => {
+            const live = byProvider.get(k.provider);
+            return {
+                ...toResponse(k),
+                usageToday: live?.callsToday ?? 0,
+                lastUsedAt: (live?.lastUsedAt ?? k.lastUsedAt)?.toISOString(),
+            };
+        }),
+    });
 });
 exports.createAiKey = (0, asyncHandler_1.asyncHandler)(async (req, res) => {
     const parsed = parseBody(req.body ?? {}, { requireApiKey: true });

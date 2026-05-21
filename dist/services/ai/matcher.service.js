@@ -22,6 +22,16 @@ const toMatchable = (j) => ({
 });
 exports.toMatchable = toMatchable;
 const blendWithCompleteness = (rawScore, user) => {
+    const profile = user.profile;
+    const hasAnyProfileSignal = (profile?.skills?.length ?? 0) > 0 ||
+        (profile?.preferredRoles?.length ?? 0) > 0 ||
+        (profile?.experienceYears ?? 0) > 0 ||
+        Boolean(profile?.resumeText) ||
+        Boolean(profile?.resumeUrl) ||
+        (profile?.resumeProfile?.employments?.length ?? 0) > 0 ||
+        (profile?.resumeProfile?.itSkills?.length ?? 0) > 0;
+    if (!hasAnyProfileSignal)
+        return 0;
     const completeness = (0, completeness_service_1.completenessFromUser)(user);
     const factor = 0.6 + 0.4 * (completeness / 100);
     return Math.max(0, Math.min(100, Math.round(rawScore * factor)));

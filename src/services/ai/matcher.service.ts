@@ -46,10 +46,23 @@ export const toMatchable = (j: IJob): MatchableJob => ({
   salaryMax: j.salaryMax,
 });
 
-// Soft blend so empty profiles still see meaningful scores (60% floor)
-// but a fully-filled profile gets the un-discounted match. Pulls users
-// toward profile completion without locking them out at zero state.
+// Soft blend so partly-filled profiles still see meaningful scores (60%
+// floor) but a fully-filled profile gets the un-discounted match. Empty
+// profiles (no skills / roles / experience / resume) return 0 instead —
+// the 60% floor on truly-empty profiles produced fabricated match
+// percentages that looked like "41%" matches for users who had uploaded
+// nothing, which is dishonest and surfaces as a trust issue.
 const blendWithCompleteness = (rawScore: number, user: IUser): number => {
+  const profile = user.profile;
+  const hasAnyProfileSignal =
+    (profile?.skills?.length ?? 0) > 0 ||
+    (profile?.preferredRoles?.length ?? 0) > 0 ||
+    (profile?.experienceYears ?? 0) > 0 ||
+    Boolean(profile?.resumeText) ||
+    Boolean(profile?.resumeUrl) ||
+    (profile?.resumeProfile?.employments?.length ?? 0) > 0 ||
+    (profile?.resumeProfile?.itSkills?.length ?? 0) > 0;
+  if (!hasAnyProfileSignal) return 0;
   const completeness = completenessFromUser(user);
   const factor = 0.6 + 0.4 * (completeness / 100);
   return Math.max(0, Math.min(100, Math.round(rawScore * factor)));

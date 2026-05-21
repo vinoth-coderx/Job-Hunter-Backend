@@ -419,7 +419,7 @@ exports.matchedJobs = (0, asyncHandler_1.asyncHandler)(async (req, res) => {
         success: true,
         data: slice.map((m) => ({
             job: m.job,
-            score: m.match.score,
+            score: m.match.score > 0 ? m.match.score : null,
             matchedSkills: m.match.matchedSkills,
             missingSkills: m.match.missingSkills,
             reasoning: m.match.reasoning,
